@@ -1,0 +1,40 @@
+general:
+  stop_time: 30s
+  parallelism: 4
+  progress: false
+  model_unblocked_syscall_latency: true
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+          host_bandwidth_up "1000 Gbit"
+          host_bandwidth_down "1000 Gbit"
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 us"
+          packet_loss 0.0
+        ]
+      ]
+
+hosts:
+  time-test-frequent:
+    network_node_id: 0
+    processes:
+    - path: ./time_benchmark
+      args: "1000000"
+      start_time: 1s
+
+  time-test-baseline:
+    network_node_id: 0
+    processes:
+    - path: ./time_benchmark
+      args: "100000"
+      start_time: 5s
+

@@ -1,0 +1,33 @@
+分析文件: shadow.data/hosts/geth-node/geth.1000.strace
+
+总系统调用数: 181,070
+
+最频繁的系统调用 (前20):
+==================================================
+clock_gettime           174,094 ( 96.15%)
+epoll_pwait               2,278 (  1.26%)
+read                      1,704 (  0.94%)
+write                     1,535 (  0.85%)
+fcntl                       435 (  0.24%)
+getdents64                  128 (  0.07%)
+epoll_ctl                   118 (  0.07%)
+rt_sigaction                116 (  0.06%)
+close                        95 (  0.05%)
+fsync                        73 (  0.04%)
+madvise                      68 (  0.04%)
+lseek                        62 (  0.03%)
+inotify_init1                55 (  0.03%)
+mmap                         40 (  0.02%)
+rt_sigprocmask               36 (  0.02%)
+pread64                      32 (  0.02%)
+pwrite64                     30 (  0.02%)
+setsockopt                   19 (  0.01%)
+sigaltstack                  12 (  0.01%)
+mprotect                     10 (  0.01%)
+
+瓶颈分析:
+==================================================
+时间相关syscall: 174,096 (96.15%)
+锁相关syscall: 0 (0.00%)
+I/O相关syscall: 3,301 (1.82%)
+网络相关syscall: 137 (0.08%)

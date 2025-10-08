@@ -1,0 +1,7 @@
+time="2000-01-01T00:00:01Z" level=info msg="Specified a chain config file: /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/config.yml" prefix=genesis
+time="2000-01-01T00:00:01Z" level=info msg="No genesis time specified, defaulting to now()" prefix=genesis
+time="2000-01-01T00:00:01Z" level=info msg="Delaying genesis 946684801 by 0 seconds" prefix=genesis
+time="2000-01-01T00:00:01Z" level=info msg="Genesis is now 946684801" prefix=genesis
+time="2000-01-01T00:00:01Z" level=info msg="Setting fork geth times" cancun=946684801 prefix=genesis shanghai=946684801
+time="2000-01-01T00:00:01Z" level=info msg="Done writing genesis state to /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/genesis.ssz" prefix=genesis
+time="2000-01-01T00:00:01Z" level=info msg="Command completed" prefix=genesis

@@ -1,0 +1,33 @@
+分析文件: shadow.data/hosts/prysm-beacon-1/beacon-chain.1000.strace
+
+总系统调用数: 1,117,444
+
+最频繁的系统调用 (前20):
+==================================================
+clock_gettime         1,078,664 ( 96.53%)
+epoll_pwait              21,115 (  1.89%)
+read                      7,150 (  0.64%)
+write                     5,295 (  0.47%)
+getrandom                 3,057 (  0.27%)
+pwrite64                    879 (  0.08%)
+fdatasync                   311 (  0.03%)
+mmap                        204 (  0.02%)
+close                       137 (  0.01%)
+socket                      128 (  0.01%)
+bind                        118 (  0.01%)
+rt_sigaction                116 (  0.01%)
+fcntl                        62 (  0.01%)
+rt_sigprocmask               36 (  0.00%)
+epoll_ctl                    33 (  0.00%)
+setsockopt                   26 (  0.00%)
+sigaltstack                  12 (  0.00%)
+munmap                       11 (  0.00%)
+mprotect                     10 (  0.00%)
+pread64                       8 (  0.00%)
+
+瓶颈分析:
+==================================================
+时间相关syscall: 1,078,666 (96.53%)
+锁相关syscall: 0 (0.00%)
+I/O相关syscall: 13,332 (1.19%)
+网络相关syscall: 290 (0.03%)

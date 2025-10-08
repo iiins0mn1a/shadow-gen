@@ -1,0 +1,773 @@
+INFO [01-01|00:00:16.000] Maximum peer count                       ETH=0 total=0
+INFO [01-01|00:00:16.000] Smartcard socket not found, disabling    err="stat /run/pcscd/pcscd.comm: no such file or directory"
+ERROR[01-01|00:00:16.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:16.000] Set global gas cap                       cap=50,000,000
+INFO [01-01|00:00:16.000] Initializing the KZG library             backend=gokzg
+INFO [01-01|00:00:16.000] Allocated trie memory caches             clean=154.00MiB dirty=256.00MiB
+INFO [01-01|00:00:16.000] Using pebble as the backing database
+INFO [01-01|00:00:16.000] Allocated cache and file handles         database=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/geth/chaindata cache=512.00MiB handles=524,288
+INFO [01-01|00:00:16.000] Opened ancient database                  database=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/geth/chaindata/ancient/chain readonly=false
+INFO [01-01|00:00:16.000] State scheme set to already existing     scheme=path
+INFO [01-01|00:00:16.000] Initialising Ethereum protocol           network=32382 dbversion=<nil>
+INFO [01-01|00:00:16.000] Failed to load journal, discard it       err="journal not found"
+INFO [01-01|00:00:16.000] Opened ancient database                  database=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/geth/chaindata/ancient/state readonly=false
+INFO [01-01|00:00:16.000] Initialized path database                cache=154.00MiB buffer=256.00MiB history=90000
+INFO [01-01|00:00:16.000] 
+INFO [01-01|00:00:16.000] ---------------------------------------------------------------------------------------------------------------------------------------------------------
+INFO [01-01|00:00:16.000] Chain ID:  32382 (unknown)
+INFO [01-01|00:00:16.000] Consensus: unknown
+INFO [01-01|00:00:16.000] 
+INFO [01-01|00:00:16.000] Pre-Merge hard forks (block based):
+INFO [01-01|00:00:16.000]  - Homestead:                   #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/homestead.md)
+INFO [01-01|00:00:16.000]  - Tangerine Whistle (EIP 150): #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/tangerine-whistle.md)
+INFO [01-01|00:00:16.000]  - Spurious Dragon/1 (EIP 155): #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/spurious-dragon.md)
+INFO [01-01|00:00:16.000]  - Spurious Dragon/2 (EIP 158): #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/spurious-dragon.md)
+INFO [01-01|00:00:16.000]  - Byzantium:                   #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/byzantium.md)
+INFO [01-01|00:00:16.000]  - Constantinople:              #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/constantinople.md)
+INFO [01-01|00:00:16.000]  - Petersburg:                  #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/petersburg.md)
+INFO [01-01|00:00:16.000]  - Istanbul:                    #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/istanbul.md)
+INFO [01-01|00:00:16.000]  - Muir Glacier:                #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/muir-glacier.md)
+INFO [01-01|00:00:16.000]  - Berlin:                      #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/berlin.md)
+INFO [01-01|00:00:16.000]  - London:                      #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/london.md)
+INFO [01-01|00:00:16.000]  - Arrow Glacier:               #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/arrow-glacier.md)
+INFO [01-01|00:00:16.000]  - Gray Glacier:                #0        (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/gray-glacier.md)
+INFO [01-01|00:00:16.000] 
+INFO [01-01|00:00:16.000] Merge configured:
+INFO [01-01|00:00:16.000]  - Hard-fork specification:    https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/paris.md
+INFO [01-01|00:00:16.000]  - Network known to be merged
+INFO [01-01|00:00:16.000]  - Total terminal difficulty:  0
+INFO [01-01|00:00:16.000] 
+INFO [01-01|00:00:16.000] Post-Merge hard forks (timestamp based):
+INFO [01-01|00:00:16.000]  - Shanghai:                    @946684801  (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/shanghai.md)
+INFO [01-01|00:00:16.000]  - Cancun:                      @946684801  (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/cancun.md)
+INFO [01-01|00:00:16.000] 
+INFO [01-01|00:00:16.000] ---------------------------------------------------------------------------------------------------------------------------------------------------------
+INFO [01-01|00:00:16.000] 
+INFO [01-01|00:00:16.000] Loaded most recent local block           number=0 hash=7c3032..2c960b td=1 age=15s
+WARN [01-01|00:00:16.000] Failed to load snapshot                  err="missing or corrupted snapshot"
+INFO [01-01|00:00:16.000] Rebuilding state snapshot
+INFO [01-01|00:00:16.000] Initialized transaction indexer          range="last 2350000 blocks"
+INFO [01-01|00:00:16.000] Gasprice oracle is ignoring threshold set threshold=2
+WARN [01-01|00:00:16.000] Engine API enabled                       protocol=eth
+INFO [01-01|00:00:16.000] Starting peer-to-peer node               instance=Geth/node-0/v1.14.12-stable-da60d685/linux-amd64/go1.23.0
+INFO [01-01|00:00:16.000] Resuming state snapshot generation       root=28c388..8098e8 accounts=0 slots=0 storage=0.00B dangling=0 elapsed=0s
+INFO [01-01|00:00:16.000] Generated state snapshot                 accounts=6 slots=0 storage=354.00B dangling=0 elapsed=0s
+INFO [01-01|00:00:16.000] Loaded JWT secret file                   path=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/jwtsecret crc32=0x23b3a379
+INFO [01-01|00:00:16.000] HTTP server started                      endpoint=0.0.0.0:8000 auth=false prefix= cors=* vhosts=localhost
+INFO [01-01|00:00:16.000] WebSocket enabled                        url=ws://0.0.0.0:8100
+INFO [01-01|00:00:16.000] WebSocket enabled                        url=ws://0.0.0.0:8200
+INFO [01-01|00:00:16.000] HTTP server started                      endpoint=0.0.0.0:8200 auth=true  prefix= cors=localhost vhosts=*
+INFO [01-01|00:00:16.001] New local node record                    seq=946,684,816,001 id=2fcd5195abfe3b46 ip=127.0.0.1 udp=0 tcp=8400
+INFO [01-01|00:00:16.001] Started P2P networking                   self="enode://e84fd466ecfa24e2392085276124b4335b440b1183035000847a0152cd395fe9b0c0092a67e20713e3a6699c0e074208528746874b94c89c06a3c86b25ac400a@127.0.0.1:8400?discport=0"
+ERROR[01-01|00:00:19.000] Failed to start filesystem watcher       err="function not implemented"
+ERROR[01-01|00:00:22.000] Failed to start filesystem watcher       err="function not implemented"
+ERROR[01-01|00:00:25.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:27.020] Starting work on payload                 id=0x034f7d9e54e6f6a6
+INFO [01-01|00:00:27.020] Updated payload                          id=0x034f7d9e54e6f6a6 number=1 hash=4b216a..bd8c65 txs=0 withdrawals=0 gas=0 fees=0 root=3739ac..e1728b elapsed=0s
+INFO [01-01|00:00:27.022] Stopping work on payload                 id=0x034f7d9e54e6f6a6 reason=delivery
+INFO [01-01|00:00:27.028] Imported new potential chain segment     number=1 hash=4b216a..bd8c65 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=204.00B triediffs=859.00B triedirty=0.00B
+WARN [01-01|00:00:27.029] Ignoring already known beacon payload    number=1 hash=4b216a..bd8c65 age=0
+INFO [01-01|00:00:27.030] Chain head was updated                   number=1 hash=4b216a..bd8c65 root=3739ac..e1728b elapsed=0s
+ERROR[01-01|00:00:27.030] Nil finalized block cannot evict old blobs
+INFO [01-01|00:00:27.030] Indexed transactions                     blocks=2 txs=0 tail=0 elapsed=0s
+INFO [01-01|00:00:27.031] Starting work on payload                 id=0x035c34a8852be6c4
+INFO [01-01|00:00:27.031] Updated payload                          id=0x035c34a8852be6c4 number=2 hash=7d507d..57d896 txs=0 withdrawals=0 gas=0 fees=0 root=4e831e..d7e2a2 elapsed=0s
+ERROR[01-01|00:00:28.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:29.001] Starting work on payload                 id=0x0317c0df1cd5e260
+INFO [01-01|00:00:29.001] Updated payload                          id=0x0317c0df1cd5e260 number=2 hash=3a8dd2..d21a3d txs=0 withdrawals=0 gas=0 fees=0 root=4f66c6..f515f1 elapsed=0s
+INFO [01-01|00:00:29.016] Stopping work on payload                 id=0x035c34a8852be6c4 reason=delivery
+INFO [01-01|00:00:29.022] Imported new potential chain segment     number=2 hash=7d507d..57d896 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=408.00B triediffs=1.77KiB triedirty=0.00B
+INFO [01-01|00:00:29.024] Chain head was updated                   number=2 hash=7d507d..57d896 root=4e831e..d7e2a2 elapsed=0s
+ERROR[01-01|00:00:29.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:00:29.504] Ignoring already known beacon payload    number=2 hash=7d507d..57d896 age=0
+ERROR[01-01|00:00:31.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:31.001] Ignoring beacon update to old head       number=1 hash=4b216a..bd8c65 age=4s  have=2
+INFO [01-01|00:00:31.003] Starting work on payload                 id=0x0301e88f18f0c4f0
+INFO [01-01|00:00:31.003] Updated payload                          id=0x0301e88f18f0c4f0 number=3 hash=e2168a..4fb4a6 txs=0 withdrawals=0 gas=0 fees=0 root=2455f4..bd5e89 elapsed=0s
+INFO [01-01|00:00:31.020] Stopping work on payload                 id=0x0301e88f18f0c4f0 reason=delivery
+INFO [01-01|00:00:31.026] Imported new potential chain segment     number=3 hash=e2168a..4fb4a6 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=612.00B triediffs=2.95KiB triedirty=0.00B
+WARN [01-01|00:00:31.027] Ignoring already known beacon payload    number=3 hash=e2168a..4fb4a6 age=0
+INFO [01-01|00:00:31.029] Chain head was updated                   number=3 hash=e2168a..4fb4a6 root=2455f4..bd5e89 elapsed=0s
+ERROR[01-01|00:00:31.029] Nil finalized block cannot evict old blobs
+INFO [01-01|00:00:33.001] Ignoring beacon update to old head       number=2 hash=7d507d..57d896 age=4s  have=3
+INFO [01-01|00:00:33.003] Starting work on payload                 id=0x037a85b4a5a5eae8
+INFO [01-01|00:00:33.003] Updated payload                          id=0x037a85b4a5a5eae8 number=4 hash=8d0a9a..227866 txs=0 withdrawals=0 gas=0 fees=0 root=b8d231..7f3f7e elapsed=0s
+INFO [01-01|00:00:33.018] Stopping work on payload                 id=0x037a85b4a5a5eae8 reason=delivery
+INFO [01-01|00:00:33.024] Imported new potential chain segment     number=4 hash=8d0a9a..227866 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=816.00B triediffs=3.98KiB triedirty=0.00B
+WARN [01-01|00:00:33.025] Ignoring already known beacon payload    number=4 hash=8d0a9a..227866 age=0
+INFO [01-01|00:00:33.027] Chain head was updated                   number=4 hash=8d0a9a..227866 root=b8d231..7f3f7e elapsed=0s
+ERROR[01-01|00:00:33.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:34.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:35.001] Ignoring beacon update to old head       number=3 hash=e2168a..4fb4a6 age=4s  have=4
+INFO [01-01|00:00:35.003] Starting work on payload                 id=0x036b246fc3bf0897
+INFO [01-01|00:00:35.003] Updated payload                          id=0x036b246fc3bf0897 number=5 hash=d12c01..6e3538 txs=0 withdrawals=0 gas=0 fees=0 root=ac0daf..8219ac elapsed=0s
+INFO [01-01|00:00:35.018] Stopping work on payload                 id=0x036b246fc3bf0897 reason=delivery
+INFO [01-01|00:00:35.024] Imported new potential chain segment     number=5 hash=d12c01..6e3538 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=1020.00B triediffs=5.23KiB triedirty=0.00B
+WARN [01-01|00:00:35.025] Ignoring already known beacon payload    number=5 hash=d12c01..6e3538 age=0
+INFO [01-01|00:00:35.027] Chain head was updated                   number=5 hash=d12c01..6e3538 root=ac0daf..8219ac elapsed=0s
+ERROR[01-01|00:00:35.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:37.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:37.001] Ignoring beacon update to old head       number=4 hash=8d0a9a..227866 age=4s  have=5
+INFO [01-01|00:00:37.003] Starting work on payload                 id=0x0390397a2bf92803
+INFO [01-01|00:00:37.003] Updated payload                          id=0x0390397a2bf92803 number=6 hash=752e2c..5be37b txs=0 withdrawals=0 gas=0 fees=0 root=847801..06d3f2 elapsed=0s
+INFO [01-01|00:00:37.018] Stopping work on payload                 id=0x0390397a2bf92803 reason=delivery
+INFO [01-01|00:00:37.024] Imported new potential chain segment     number=6 hash=752e2c..5be37b blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=1.20KiB  triediffs=6.50KiB triedirty=0.00B
+WARN [01-01|00:00:37.025] Ignoring already known beacon payload    number=6 hash=752e2c..5be37b age=0
+INFO [01-01|00:00:37.027] Chain head was updated                   number=6 hash=752e2c..5be37b root=847801..06d3f2 elapsed=0s
+ERROR[01-01|00:00:37.027] Nil finalized block cannot evict old blobs
+INFO [01-01|00:00:39.001] Starting work on payload                 id=0x0396ce6bf6aad105
+INFO [01-01|00:00:39.001] Starting work on payload                 id=0x03a3b9fb18ced9cb
+INFO [01-01|00:00:39.001] Updated payload                          id=0x0396ce6bf6aad105 number=7 hash=cb6ef3..bace13 txs=0 withdrawals=0 gas=0 fees=0 root=ff32e5..4e6f95 elapsed=0s
+INFO [01-01|00:00:39.001] Updated payload                          id=0x03a3b9fb18ced9cb number=7 hash=b547dd..fd6dbf txs=0 withdrawals=0 gas=0 fees=0 root=360ca6..81ecfc elapsed=0s
+INFO [01-01|00:00:39.016] Stopping work on payload                 id=0x03a3b9fb18ced9cb reason=delivery
+INFO [01-01|00:00:39.022] Imported new potential chain segment     number=7 hash=b547dd..fd6dbf blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=1.39KiB  triediffs=7.95KiB triedirty=0.00B
+WARN [01-01|00:00:39.023] Ignoring already known beacon payload    number=7 hash=b547dd..fd6dbf age=0
+INFO [01-01|00:00:39.024] Chain head was updated                   number=7 hash=b547dd..fd6dbf root=360ca6..81ecfc elapsed=0s
+ERROR[01-01|00:00:39.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:40.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:41.001] Starting work on payload                 id=0x0394264b7819dce7
+INFO [01-01|00:00:41.001] Starting work on payload                 id=0x0313c746164765c5
+INFO [01-01|00:00:41.001] Stopping work on payload                 id=0x0317c0df1cd5e260 reason=timeout
+INFO [01-01|00:00:41.001] Updated payload                          id=0x0394264b7819dce7 number=8 hash=15e4cd..9ed125 txs=0 withdrawals=0 gas=0 fees=0 root=038056..c1c746 elapsed=0s
+INFO [01-01|00:00:41.001] Updated payload                          id=0x0313c746164765c5 number=8 hash=96dbf6..bbd18a txs=0 withdrawals=0 gas=0 fees=0 root=3f80b7..4d783b elapsed=0s
+INFO [01-01|00:00:41.018] Stopping work on payload                 id=0x0394264b7819dce7 reason=delivery
+INFO [01-01|00:00:41.024] Imported new potential chain segment     number=8 hash=15e4cd..9ed125 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=1.59KiB  triediffs=9.26KiB triedirty=0.00B
+INFO [01-01|00:00:41.026] Chain head was updated                   number=8 hash=15e4cd..9ed125 root=038056..c1c746 elapsed=0s
+ERROR[01-01|00:00:41.026] Nil finalized block cannot evict old blobs
+WARN [01-01|00:00:41.404] Ignoring already known beacon payload    number=8 hash=15e4cd..9ed125 age=0
+ERROR[01-01|00:00:43.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:43.001] Ignoring beacon update to old head       number=7 hash=b547dd..fd6dbf age=4s  have=8
+INFO [01-01|00:00:43.003] Starting work on payload                 id=0x03e511631b7a636a
+INFO [01-01|00:00:43.003] Updated payload                          id=0x03e511631b7a636a number=9 hash=5c5eb2..cea7c9 txs=0 withdrawals=0 gas=0 fees=0 root=c83baa..f3b226 elapsed=0s
+INFO [01-01|00:00:43.016] Stopping work on payload                 id=0x03e511631b7a636a reason=delivery
+INFO [01-01|00:00:43.022] Imported new potential chain segment     number=9 hash=5c5eb2..cea7c9 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=1.79KiB  triediffs=10.75KiB triedirty=0.00B
+WARN [01-01|00:00:43.023] Ignoring already known beacon payload    number=9 hash=5c5eb2..cea7c9 age=0
+INFO [01-01|00:00:43.025] Chain head was updated                   number=9 hash=5c5eb2..cea7c9 root=c83baa..f3b226 elapsed=0s
+ERROR[01-01|00:00:43.025] Nil finalized block cannot evict old blobs
+INFO [01-01|00:00:45.001] Starting work on payload                 id=0x030280323ed63bba
+INFO [01-01|00:00:45.001] Starting work on payload                 id=0x031f53175aa8c1ee
+INFO [01-01|00:00:45.001] Updated payload                          id=0x030280323ed63bba number=10 hash=f420d9..fa07a8 txs=0 withdrawals=0 gas=0 fees=0 root=9882a9..22122f elapsed=0s
+INFO [01-01|00:00:45.001] Updated payload                          id=0x031f53175aa8c1ee number=10 hash=64323e..6f68b7 txs=0 withdrawals=0 gas=0 fees=0 root=4bd9bd..d0b917 elapsed=0s
+INFO [01-01|00:00:45.022] Stopping work on payload                 id=0x031f53175aa8c1ee reason=delivery
+INFO [01-01|00:00:45.026] Imported new potential chain segment     number=10 hash=64323e..6f68b7 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=1.99KiB  triediffs=12.04KiB triedirty=0.00B
+WARN [01-01|00:00:45.027] Ignoring already known beacon payload    number=10 hash=64323e..6f68b7 age=0
+INFO [01-01|00:00:45.028] Chain head was updated                   number=10 hash=64323e..6f68b7 root=4bd9bd..d0b917 elapsed=0s
+ERROR[01-01|00:00:45.028] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:46.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:47.001] Starting work on payload                 id=0x03ffa55e6523fd8c
+INFO [01-01|00:00:47.001] Starting work on payload                 id=0x038438d4306b3558
+INFO [01-01|00:00:47.001] Updated payload                          id=0x03ffa55e6523fd8c number=11 hash=e5a316..bb1993 txs=0 withdrawals=0 gas=0 fees=0 root=e66c1a..1ce35b elapsed=0s
+INFO [01-01|00:00:47.001] Updated payload                          id=0x038438d4306b3558 number=11 hash=9c7665..577141 txs=0 withdrawals=0 gas=0 fees=0 root=d05b3d..316a55 elapsed=0s
+INFO [01-01|00:00:47.018] Stopping work on payload                 id=0x03ffa55e6523fd8c reason=delivery
+INFO [01-01|00:00:47.024] Imported new potential chain segment     number=11 hash=e5a316..bb1993 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=2.19KiB  triediffs=13.38KiB triedirty=0.00B
+INFO [01-01|00:00:47.026] Chain head was updated                   number=11 hash=e5a316..bb1993 root=e66c1a..1ce35b elapsed=0s
+ERROR[01-01|00:00:47.026] Nil finalized block cannot evict old blobs
+WARN [01-01|00:00:47.704] Ignoring already known beacon payload    number=11 hash=e5a316..bb1993 age=0
+ERROR[01-01|00:00:49.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:49.003] Ignoring beacon update to old head       number=10 hash=64323e..6f68b7 age=4s  have=11
+INFO [01-01|00:00:49.005] Starting work on payload                 id=0x0303ba67fa91860d
+INFO [01-01|00:00:49.005] Updated payload                          id=0x0303ba67fa91860d number=12 hash=2cbc26..13202d txs=0 withdrawals=0 gas=0 fees=0 root=94ac3d..920b10 elapsed=0s
+INFO [01-01|00:00:49.016] Stopping work on payload                 id=0x038438d4306b3558 reason=delivery
+INFO [01-01|00:00:49.022] Imported new potential chain segment     number=11 hash=9c7665..577141 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=2.39KiB  triediffs=14.67KiB triedirty=0.00B
+WARN [01-01|00:00:49.025] Ignoring already known beacon payload    number=11 hash=9c7665..577141 age=0
+INFO [01-01|00:00:51.001] Starting work on payload                 id=0x03a04bef79d1e2f2
+INFO [01-01|00:00:51.001] Stopping work on payload                 id=0x0396ce6bf6aad105 reason=timeout
+INFO [01-01|00:00:51.001] Updated payload                          id=0x03a04bef79d1e2f2 number=12 hash=7ae47d..3eae13 txs=0 withdrawals=0 gas=0 fees=0 root=fb50a8..71cd5b elapsed=0s
+INFO [01-01|00:00:51.020] Stopping work on payload                 id=0x0303ba67fa91860d reason=delivery
+INFO [01-01|00:00:51.026] Imported new potential chain segment     number=12 hash=2cbc26..13202d blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=2.59KiB  triediffs=16.00KiB triedirty=0.00B
+WARN [01-01|00:00:51.027] Ignoring already known beacon payload    number=12 hash=2cbc26..13202d age=0
+INFO [01-01|00:00:51.028] Chain head was updated                   number=12 hash=2cbc26..13202d root=94ac3d..920b10 elapsed=0s
+INFO [01-01|00:00:51.028] Starting work on payload                 id=0x03d731d66348d069
+INFO [01-01|00:00:51.028] Updated payload                          id=0x03d731d66348d069 number=13 hash=3be6db..f4f7dc txs=0 withdrawals=0 gas=0 fees=0 root=502a65..f9b736 elapsed=0s
+ERROR[01-01|00:00:51.028] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:52.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:53.001] Starting work on payload                 id=0x039f84013cbe2153
+INFO [01-01|00:00:53.001] Stopping work on payload                 id=0x0313c746164765c5 reason=timeout
+INFO [01-01|00:00:53.001] Updated payload                          id=0x039f84013cbe2153 number=13 hash=ba2e2d..a00fad txs=0 withdrawals=0 gas=0 fees=0 root=4274f2..6b8d38 elapsed=0s
+INFO [01-01|00:00:53.016] Stopping work on payload                 id=0x03d731d66348d069 reason=delivery
+INFO [01-01|00:00:53.022] Imported new potential chain segment     number=13 hash=3be6db..f4f7dc blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=2.79KiB  triediffs=17.41KiB triedirty=0.00B
+WARN [01-01|00:00:53.023] Ignoring already known beacon payload    number=13 hash=3be6db..f4f7dc age=0
+INFO [01-01|00:00:53.024] Chain head was updated                   number=13 hash=3be6db..f4f7dc root=502a65..f9b736 elapsed=0s
+ERROR[01-01|00:00:53.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:55.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:55.001] Ignoring beacon update to old head       number=12 hash=2cbc26..13202d age=4s  have=13
+INFO [01-01|00:00:55.003] Starting work on payload                 id=0x03089abc7ea68f55
+INFO [01-01|00:00:55.003] Updated payload                          id=0x03089abc7ea68f55 number=14 hash=3e16e2..7378ad txs=0 withdrawals=0 gas=0 fees=0 root=d21f70..1257e3 elapsed=0s
+INFO [01-01|00:00:55.016] Stopping work on payload                 id=0x039f84013cbe2153 reason=delivery
+INFO [01-01|00:00:55.022] Imported new potential chain segment     number=13 hash=ba2e2d..a00fad blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=2.99KiB  triediffs=18.92KiB triedirty=0.00B
+INFO [01-01|00:00:55.024] Chain reorg detected                     number=12 hash=2cbc26..13202d drop=1 dropfrom=3be6db..f4f7dc add=1 addfrom=ba2e2d..a00fad
+INFO [01-01|00:00:55.024] Chain head was updated                   number=13 hash=ba2e2d..a00fad root=4274f2..6b8d38 elapsed=0s
+INFO [01-01|00:00:55.024] Starting work on payload                 id=0x035596a739ad5e81
+INFO [01-01|00:00:55.024] Updated payload                          id=0x035596a739ad5e81 number=14 hash=1e7ec2..f7ad7b txs=0 withdrawals=0 gas=0 fees=0 root=39eca2..f7ceb8 elapsed=0s
+ERROR[01-01|00:00:55.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:00:55.404] Ignoring already known beacon payload    number=13 hash=ba2e2d..a00fad age=0
+INFO [01-01|00:00:57.001] Starting work on payload                 id=0x03967591dadd2003
+INFO [01-01|00:00:57.001] Stopping work on payload                 id=0x030280323ed63bba reason=timeout
+INFO [01-01|00:00:57.001] Updated payload                          id=0x03967591dadd2003 number=14 hash=33677e..1a5b2e txs=0 withdrawals=0 gas=0 fees=0 root=03ffb8..cfa78e elapsed=0s
+INFO [01-01|00:00:57.016] Stopping work on payload                 id=0x035596a739ad5e81 reason=delivery
+INFO [01-01|00:00:57.022] Imported new potential chain segment     number=14 hash=1e7ec2..f7ad7b blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=3.19KiB  triediffs=20.55KiB triedirty=0.00B
+WARN [01-01|00:00:57.504] Ignoring already known beacon payload    number=14 hash=1e7ec2..f7ad7b age=0
+INFO [01-01|00:00:57.506] Chain head was updated                   number=14 hash=1e7ec2..f7ad7b root=39eca2..f7ceb8 elapsed=0s
+ERROR[01-01|00:00:57.506] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:00:58.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:59.001] Ignoring beacon update to old head       number=13 hash=ba2e2d..a00fad age=4s  have=14
+INFO [01-01|00:00:59.003] Starting work on payload                 id=0x0381968026062e34
+INFO [01-01|00:00:59.003] Updated payload                          id=0x0381968026062e34 number=15 hash=a88f9e..7d86f3 txs=0 withdrawals=0 gas=0 fees=0 root=c7c089..8382bf elapsed=0s
+INFO [01-01|00:00:59.018] Stopping work on payload                 id=0x0381968026062e34 reason=delivery
+INFO [01-01|00:00:59.024] Imported new potential chain segment     number=15 hash=a88f9e..7d86f3 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=3.39KiB  triediffs=21.94KiB triedirty=0.00B
+WARN [01-01|00:00:59.604] Ignoring already known beacon payload    number=15 hash=a88f9e..7d86f3 age=0
+INFO [01-01|00:00:59.606] Chain head was updated                   number=15 hash=a88f9e..7d86f3 root=c7c089..8382bf elapsed=0s
+ERROR[01-01|00:00:59.606] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:01.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:01.001] Starting work on payload                 id=0x03f44624485635f4
+INFO [01-01|00:01:01.001] Starting work on payload                 id=0x0311a1d9c3c7e4d6
+INFO [01-01|00:01:01.001] Updated payload                          id=0x03f44624485635f4 number=16 hash=b43381..715ec2 txs=0 withdrawals=0 gas=0 fees=0 root=a099c5..e3116c elapsed=0s
+INFO [01-01|00:01:01.001] Updated payload                          id=0x0311a1d9c3c7e4d6 number=16 hash=35840a..34b4e9 txs=0 withdrawals=0 gas=0 fees=0 root=7bf257..b51d3b elapsed=0s
+INFO [01-01|00:01:01.018] Stopping work on payload                 id=0x03f44624485635f4 reason=delivery
+INFO [01-01|00:01:01.022] Imported new potential chain segment     number=16 hash=b43381..715ec2 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=3.59KiB  triediffs=23.33KiB triedirty=0.00B
+INFO [01-01|00:01:01.024] Chain head was updated                   number=16 hash=b43381..715ec2 root=a099c5..e3116c elapsed=0s
+ERROR[01-01|00:01:01.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:01.704] Ignoring already known beacon payload    number=16 hash=b43381..715ec2 age=0
+INFO [01-01|00:01:03.001] Stopping work on payload                 id=0x03a04bef79d1e2f2 reason=timeout
+INFO [01-01|00:01:03.001] Starting work on payload                 id=0x036a21cad2f882da
+INFO [01-01|00:01:03.001] Starting work on payload                 id=0x0373177629d07b71
+INFO [01-01|00:01:03.001] Updated payload                          id=0x036a21cad2f882da number=17 hash=018c4f..a46e20 txs=0 withdrawals=0 gas=0 fees=0 root=5fa61a..2893b9 elapsed=0s
+INFO [01-01|00:01:03.001] Updated payload                          id=0x0373177629d07b71 number=17 hash=b31085..f14e10 txs=0 withdrawals=0 gas=0 fees=0 root=492a50..46e1c9 elapsed=0s
+INFO [01-01|00:01:03.032] Stopping work on payload                 id=0x0373177629d07b71 reason=delivery
+INFO [01-01|00:01:03.038] Imported new potential chain segment     number=17 hash=b31085..f14e10 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=3.79KiB  triediffs=24.76KiB triedirty=0.00B
+WARN [01-01|00:01:03.039] Ignoring already known beacon payload    number=17 hash=b31085..f14e10 age=0
+INFO [01-01|00:01:03.040] Chain head was updated                   number=17 hash=b31085..f14e10 root=492a50..46e1c9 elapsed=0s
+ERROR[01-01|00:01:03.040] Nil finalized block cannot evict old blobs
+INFO [01-01|00:01:03.041] Starting work on payload                 id=0x03e8b34a493b08fe
+INFO [01-01|00:01:03.041] Updated payload                          id=0x03e8b34a493b08fe number=18 hash=41d8d6..c8e066 txs=0 withdrawals=0 gas=0 fees=0 root=89f55e..ad8866 elapsed=0s
+ERROR[01-01|00:01:04.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:05.001] Starting work on payload                 id=0x038726409f484c5b
+INFO [01-01|00:01:05.001] Updated payload                          id=0x038726409f484c5b number=18 hash=33baa6..9620b9 txs=0 withdrawals=0 gas=0 fees=0 root=c7418c..ff3693 elapsed=0s
+INFO [01-01|00:01:05.076] Stopping work on payload                 id=0x03e8b34a493b08fe reason=delivery
+INFO [01-01|00:01:05.082] Imported new potential chain segment     number=18 hash=41d8d6..c8e066 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=3.98KiB  triediffs=26.41KiB triedirty=0.00B
+WARN [01-01|00:01:05.204] Ignoring already known beacon payload    number=18 hash=41d8d6..c8e066 age=0
+INFO [01-01|00:01:05.206] Chain head was updated                   number=18 hash=41d8d6..c8e066 root=89f55e..ad8866 elapsed=0s
+ERROR[01-01|00:01:05.206] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:07.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:07.001] Ignoring beacon update to old head       number=17 hash=b31085..f14e10 age=4s  have=18
+INFO [01-01|00:01:07.003] Stopping work on payload                 id=0x03089abc7ea68f55 reason=timeout
+INFO [01-01|00:01:07.003] Starting work on payload                 id=0x0346c2e547b9a1e3
+INFO [01-01|00:01:07.003] Updated payload                          id=0x0346c2e547b9a1e3 number=19 hash=ffd56d..2a1ce2 txs=0 withdrawals=0 gas=0 fees=0 root=ab461a..7fec4e elapsed=0s
+INFO [01-01|00:01:07.016] Stopping work on payload                 id=0x038726409f484c5b reason=delivery
+INFO [01-01|00:01:07.022] Imported new potential chain segment     number=18 hash=33baa6..9620b9 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=4.18KiB  triediffs=28.09KiB triedirty=0.00B
+INFO [01-01|00:01:07.024] Chain reorg detected                     number=17 hash=b31085..f14e10 drop=1 dropfrom=41d8d6..c8e066 add=1 addfrom=33baa6..9620b9
+INFO [01-01|00:01:07.024] Chain head was updated                   number=18 hash=33baa6..9620b9 root=c7418c..ff3693 elapsed=0s
+INFO [01-01|00:01:07.024] Starting work on payload                 id=0x033a76dcbf2cb7d7
+INFO [01-01|00:01:07.024] Updated payload                          id=0x033a76dcbf2cb7d7 number=19 hash=fd2694..76c4cd txs=0 withdrawals=0 gas=0 fees=0 root=717474..1c12a4 elapsed=0s
+ERROR[01-01|00:01:07.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:07.304] Ignoring already known beacon payload    number=18 hash=33baa6..9620b9 age=0
+INFO [01-01|00:01:09.001] Starting work on payload                 id=0x03a80db33b9d310d
+INFO [01-01|00:01:09.001] Stopping work on payload                 id=0x03967591dadd2003 reason=timeout
+INFO [01-01|00:01:09.001] Updated payload                          id=0x03a80db33b9d310d number=19 hash=302e10..6b92ee txs=0 withdrawals=0 gas=0 fees=0 root=0a823c..266641 elapsed=0s
+INFO [01-01|00:01:09.016] Stopping work on payload                 id=0x033a76dcbf2cb7d7 reason=delivery
+INFO [01-01|00:01:09.022] Imported new potential chain segment     number=19 hash=fd2694..76c4cd blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=4.38KiB  triediffs=29.84KiB triedirty=0.00B
+INFO [01-01|00:01:09.024] Chain head was updated                   number=19 hash=fd2694..76c4cd root=717474..1c12a4 elapsed=0s
+ERROR[01-01|00:01:09.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:09.404] Ignoring already known beacon payload    number=19 hash=fd2694..76c4cd age=0
+ERROR[01-01|00:01:10.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:11.001] Ignoring beacon update to old head       number=18 hash=33baa6..9620b9 age=4s  have=19
+INFO [01-01|00:01:11.003] Starting work on payload                 id=0x034e763515396da9
+INFO [01-01|00:01:11.003] Updated payload                          id=0x034e763515396da9 number=20 hash=96eeb2..48d49a txs=0 withdrawals=0 gas=0 fees=0 root=eddbbb..a8aec7 elapsed=0s
+INFO [01-01|00:01:11.018] Stopping work on payload                 id=0x034e763515396da9 reason=delivery
+INFO [01-01|00:01:11.024] Imported new potential chain segment     number=20 hash=96eeb2..48d49a blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=4.58KiB  triediffs=31.54KiB triedirty=0.00B
+WARN [01-01|00:01:11.025] Ignoring already known beacon payload    number=20 hash=96eeb2..48d49a age=0
+INFO [01-01|00:01:11.027] Chain head was updated                   number=20 hash=96eeb2..48d49a root=eddbbb..a8aec7 elapsed=0s
+ERROR[01-01|00:01:11.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:13.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:13.001] Ignoring beacon update to old head       number=19 hash=fd2694..76c4cd age=4s  have=20
+INFO [01-01|00:01:13.001] Stopping work on payload                 id=0x0311a1d9c3c7e4d6 reason=timeout
+INFO [01-01|00:01:13.003] Starting work on payload                 id=0x0362dfd6363674bc
+INFO [01-01|00:01:13.003] Updated payload                          id=0x0362dfd6363674bc number=21 hash=e16102..88562c txs=0 withdrawals=0 gas=0 fees=0 root=49fa62..f10c03 elapsed=0s
+INFO [01-01|00:01:13.018] Stopping work on payload                 id=0x0362dfd6363674bc reason=delivery
+INFO [01-01|00:01:13.024] Imported new potential chain segment     number=21 hash=e16102..88562c blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=4.78KiB  triediffs=33.16KiB triedirty=0.00B
+WARN [01-01|00:01:13.025] Ignoring already known beacon payload    number=21 hash=e16102..88562c age=0
+INFO [01-01|00:01:13.027] Chain head was updated                   number=21 hash=e16102..88562c root=49fa62..f10c03 elapsed=0s
+ERROR[01-01|00:01:13.027] Nil finalized block cannot evict old blobs
+INFO [01-01|00:01:15.001] Ignoring beacon update to old head       number=20 hash=96eeb2..48d49a age=4s  have=21
+INFO [01-01|00:01:15.001] Stopping work on payload                 id=0x036a21cad2f882da reason=timeout
+INFO [01-01|00:01:15.003] Starting work on payload                 id=0x039d85236d5c5166
+INFO [01-01|00:01:15.003] Updated payload                          id=0x039d85236d5c5166 number=22 hash=5d553a..a8b0a9 txs=0 withdrawals=0 gas=0 fees=0 root=943098..ec05f1 elapsed=0s
+ERROR[01-01|00:01:16.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:17.001] Starting work on payload                 id=0x03e0e09e04fe65d6
+INFO [01-01|00:01:17.001] Updated payload                          id=0x03e0e09e04fe65d6 number=22 hash=a900ae..aae7ce txs=0 withdrawals=0 gas=0 fees=0 root=bc8829..afa6d3 elapsed=0s
+INFO [01-01|00:01:17.016] Stopping work on payload                 id=0x039d85236d5c5166 reason=delivery
+INFO [01-01|00:01:17.022] Imported new potential chain segment     number=22 hash=5d553a..a8b0a9 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=4.98KiB  triediffs=34.76KiB triedirty=0.00B
+WARN [01-01|00:01:17.023] Ignoring already known beacon payload    number=22 hash=5d553a..a8b0a9 age=0
+INFO [01-01|00:01:17.024] Chain head was updated                   number=22 hash=5d553a..a8b0a9 root=943098..ec05f1 elapsed=0s
+INFO [01-01|00:01:17.024] Starting work on payload                 id=0x0393b88f1ac102b6
+INFO [01-01|00:01:17.024] Updated payload                          id=0x0393b88f1ac102b6 number=23 hash=11983b..a2d0f4 txs=0 withdrawals=0 gas=0 fees=0 root=c9513c..8f44a2 elapsed=0s
+ERROR[01-01|00:01:17.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:19.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:19.001] Starting work on payload                 id=0x0309ec5984873d63
+INFO [01-01|00:01:19.001] Updated payload                          id=0x0309ec5984873d63 number=23 hash=266e9f..9028e4 txs=0 withdrawals=0 gas=0 fees=0 root=d2a3c0..1910d3 elapsed=0s
+INFO [01-01|00:01:19.003] Stopping work on payload                 id=0x0346c2e547b9a1e3 reason=timeout
+INFO [01-01|00:01:19.016] Stopping work on payload                 id=0x0393b88f1ac102b6 reason=delivery
+INFO [01-01|00:01:19.022] Imported new potential chain segment     number=23 hash=11983b..a2d0f4 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=5.18KiB  triediffs=36.49KiB triedirty=0.00B
+WARN [01-01|00:01:19.023] Ignoring already known beacon payload    number=23 hash=11983b..a2d0f4 age=0
+INFO [01-01|00:01:19.024] Chain head was updated                   number=23 hash=11983b..a2d0f4 root=c9513c..8f44a2 elapsed=0s
+ERROR[01-01|00:01:19.024] Nil finalized block cannot evict old blobs
+INFO [01-01|00:01:21.001] Ignoring beacon update to old head       number=22 hash=5d553a..a8b0a9 age=4s  have=23
+INFO [01-01|00:01:21.001] Stopping work on payload                 id=0x03a80db33b9d310d reason=timeout
+INFO [01-01|00:01:21.003] Starting work on payload                 id=0x03812dd3e3b53a21
+INFO [01-01|00:01:21.003] Updated payload                          id=0x03812dd3e3b53a21 number=24 hash=d5a5fd..bba08e txs=0 withdrawals=0 gas=0 fees=0 root=f44435..817593 elapsed=0s
+INFO [01-01|00:01:21.016] Stopping work on payload                 id=0x0309ec5984873d63 reason=delivery
+INFO [01-01|00:01:21.022] Imported new potential chain segment     number=23 hash=266e9f..9028e4 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=5.38KiB  triediffs=38.06KiB triedirty=0.00B
+WARN [01-01|00:01:21.304] Ignoring already known beacon payload    number=23 hash=266e9f..9028e4 age=0
+ERROR[01-01|00:01:22.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:23.001] Starting work on payload                 id=0x03389cb887cb1978
+INFO [01-01|00:01:23.001] Updated payload                          id=0x03389cb887cb1978 number=24 hash=2a1a29..c9102c txs=0 withdrawals=0 gas=0 fees=0 root=307f80..21e3ec elapsed=0s
+INFO [01-01|00:01:23.016] Stopping work on payload                 id=0x03812dd3e3b53a21 reason=delivery
+INFO [01-01|00:01:23.022] Imported new potential chain segment     number=24 hash=d5a5fd..bba08e blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=5.58KiB  triediffs=39.94KiB triedirty=0.00B
+INFO [01-01|00:01:23.024] Chain head was updated                   number=24 hash=d5a5fd..bba08e root=f44435..817593 elapsed=0s
+ERROR[01-01|00:01:23.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:24.104] Ignoring already known beacon payload    number=24 hash=d5a5fd..bba08e age=1s
+INFO [01-01|00:01:24.106] Starting work on payload                 id=0x03a71e7f9df5683f
+INFO [01-01|00:01:24.106] Updated payload                          id=0x03a71e7f9df5683f number=25 hash=2aa85e..826ccb txs=0 withdrawals=0 gas=0 fees=0 root=0efd1f..2b7ec9 elapsed=0s
+ERROR[01-01|00:01:25.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:25.001] Starting work on payload                 id=0x03d21996b145886f
+INFO [01-01|00:01:25.001] Updated payload                          id=0x03d21996b145886f number=25 hash=279621..ca333b txs=0 withdrawals=0 gas=0 fees=0 root=704865..8b239c elapsed=0s
+INFO [01-01|00:01:25.016] Stopping work on payload                 id=0x03a71e7f9df5683f reason=delivery
+INFO [01-01|00:01:25.022] Imported new potential chain segment     number=25 hash=2aa85e..826ccb blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=5.78KiB  triediffs=41.75KiB triedirty=0.00B
+WARN [01-01|00:01:25.023] Ignoring already known beacon payload    number=25 hash=2aa85e..826ccb age=0
+INFO [01-01|00:01:25.024] Chain head was updated                   number=25 hash=2aa85e..826ccb root=0efd1f..2b7ec9 elapsed=0s
+ERROR[01-01|00:01:25.024] Nil finalized block cannot evict old blobs
+INFO [01-01|00:01:27.001] Starting work on payload                 id=0x0311e77633dec9e3
+INFO [01-01|00:01:27.001] Starting work on payload                 id=0x03b5620bc50061ec
+INFO [01-01|00:01:27.001] Updated payload                          id=0x0311e77633dec9e3 number=26 hash=4304a5..daf9bf txs=0 withdrawals=0 gas=0 fees=0 root=101516..e25664 elapsed=0s
+INFO [01-01|00:01:27.001] Updated payload                          id=0x03b5620bc50061ec number=26 hash=370f6c..60ca6e txs=0 withdrawals=0 gas=0 fees=0 root=682cd1..14ed83 elapsed=0s
+INFO [01-01|00:01:27.018] Stopping work on payload                 id=0x0311e77633dec9e3 reason=delivery
+INFO [01-01|00:01:27.024] Imported new potential chain segment     number=26 hash=4304a5..daf9bf blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=5.98KiB  triediffs=43.35KiB triedirty=0.00B
+INFO [01-01|00:01:27.026] Chain head was updated                   number=26 hash=4304a5..daf9bf root=101516..e25664 elapsed=0s
+ERROR[01-01|00:01:27.026] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:27.604] Ignoring already known beacon payload    number=26 hash=4304a5..daf9bf age=0
+ERROR[01-01|00:01:28.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:29.001] Ignoring beacon update to old head       number=25 hash=2aa85e..826ccb age=4s  have=26
+INFO [01-01|00:01:29.001] Stopping work on payload                 id=0x03e0e09e04fe65d6 reason=timeout
+INFO [01-01|00:01:29.003] Starting work on payload                 id=0x032e23f2d6039719
+INFO [01-01|00:01:29.003] Updated payload                          id=0x032e23f2d6039719 number=27 hash=674170..c6d92f txs=0 withdrawals=0 gas=0 fees=0 root=f0467a..c651c3 elapsed=0s
+INFO [01-01|00:01:29.018] Stopping work on payload                 id=0x032e23f2d6039719 reason=delivery
+INFO [01-01|00:01:29.024] Imported new potential chain segment     number=27 hash=674170..c6d92f blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=6.18KiB  triediffs=45.14KiB triedirty=0.00B
+WARN [01-01|00:01:29.025] Ignoring already known beacon payload    number=27 hash=674170..c6d92f age=0
+INFO [01-01|00:01:29.027] Chain head was updated                   number=27 hash=674170..c6d92f root=f0467a..c651c3 elapsed=0s
+ERROR[01-01|00:01:29.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:31.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:31.001] Starting work on payload                 id=0x034e29ebac42ee22
+INFO [01-01|00:01:31.001] Starting work on payload                 id=0x03175585d2c9b8d4
+INFO [01-01|00:01:31.001] Updated payload                          id=0x034e29ebac42ee22 number=28 hash=e25296..4dbda3 txs=0 withdrawals=0 gas=0 fees=0 root=7f63b7..f9552f elapsed=0s
+INFO [01-01|00:01:31.001] Updated payload                          id=0x03175585d2c9b8d4 number=28 hash=1a9111..606f60 txs=0 withdrawals=0 gas=0 fees=0 root=42c8cf..49179b elapsed=0s
+INFO [01-01|00:01:31.016] Stopping work on payload                 id=0x03175585d2c9b8d4 reason=delivery
+INFO [01-01|00:01:31.022] Imported new potential chain segment     number=28 hash=1a9111..606f60 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=6.38KiB  triediffs=46.77KiB triedirty=0.00B
+WARN [01-01|00:01:31.023] Ignoring already known beacon payload    number=28 hash=1a9111..606f60 age=0
+INFO [01-01|00:01:31.024] Chain head was updated                   number=28 hash=1a9111..606f60 root=42c8cf..49179b elapsed=0s
+ERROR[01-01|00:01:31.024] Nil finalized block cannot evict old blobs
+INFO [01-01|00:01:33.001] Starting work on payload                 id=0x036dcd759634a7c1
+INFO [01-01|00:01:33.001] Updated payload                          id=0x036dcd759634a7c1 number=29 hash=4c5331..a6bbd9 txs=0 withdrawals=0 gas=0 fees=0 root=e8386d..86d57a elapsed=0s
+INFO [01-01|00:01:33.016] Stopping work on payload                 id=0x034e29ebac42ee22 reason=delivery
+INFO [01-01|00:01:33.022] Imported new potential chain segment     number=28 hash=e25296..4dbda3 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=6.57KiB  triediffs=48.53KiB triedirty=0.00B
+WARN [01-01|00:01:33.204] Ignoring already known beacon payload    number=28 hash=e25296..4dbda3 age=0
+ERROR[01-01|00:01:34.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:35.001] Starting work on payload                 id=0x030c91647f1e97d5
+INFO [01-01|00:01:35.001] Stopping work on payload                 id=0x03389cb887cb1978 reason=timeout
+INFO [01-01|00:01:35.001] Updated payload                          id=0x030c91647f1e97d5 number=29 hash=20f3c8..d55311 txs=0 withdrawals=0 gas=0 fees=0 root=43d2aa..18efa8 elapsed=0s
+INFO [01-01|00:01:35.014] Stopping work on payload                 id=0x036dcd759634a7c1 reason=delivery
+INFO [01-01|00:01:35.020] Imported new potential chain segment     number=29 hash=4c5331..a6bbd9 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=6.77KiB  triediffs=50.41KiB triedirty=0.00B
+WARN [01-01|00:01:35.021] Ignoring already known beacon payload    number=29 hash=4c5331..a6bbd9 age=0
+INFO [01-01|00:01:35.022] Chain head was updated                   number=29 hash=4c5331..a6bbd9 root=e8386d..86d57a elapsed=0s
+ERROR[01-01|00:01:35.022] Nil finalized block cannot evict old blobs
+INFO [01-01|00:01:35.023] Starting work on payload                 id=0x03f8e2a5ebffbb9e
+INFO [01-01|00:01:35.023] Updated payload                          id=0x03f8e2a5ebffbb9e number=30 hash=47a05c..b1b74c txs=0 withdrawals=0 gas=0 fees=0 root=b34a80..7f2551 elapsed=0s
+ERROR[01-01|00:01:37.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:37.001] Starting work on payload                 id=0x03e83780b95d16c3
+INFO [01-01|00:01:37.001] Stopping work on payload                 id=0x03d21996b145886f reason=timeout
+INFO [01-01|00:01:37.001] Updated payload                          id=0x03e83780b95d16c3 number=30 hash=9c1347..853659 txs=0 withdrawals=0 gas=0 fees=0 root=5d9b0e..10ccdb elapsed=0s
+INFO [01-01|00:01:37.016] Stopping work on payload                 id=0x03f8e2a5ebffbb9e reason=delivery
+INFO [01-01|00:01:37.022] Imported new potential chain segment     number=30 hash=47a05c..b1b74c blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=6.97KiB  triediffs=52.15KiB triedirty=0.00B
+INFO [01-01|00:01:37.024] Chain head was updated                   number=30 hash=47a05c..b1b74c root=b34a80..7f2551 elapsed=0s
+ERROR[01-01|00:01:37.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:37.404] Ignoring already known beacon payload    number=30 hash=47a05c..b1b74c age=0
+INFO [01-01|00:01:39.001] Starting work on payload                 id=0x03bd67cb12c8a917
+INFO [01-01|00:01:39.001] Stopping work on payload                 id=0x03b5620bc50061ec reason=timeout
+INFO [01-01|00:01:39.001] Updated payload                          id=0x03bd67cb12c8a917 number=31 hash=fdd9e4..39b1bf txs=0 withdrawals=0 gas=0 fees=0 root=a4f8e2..d8c54d elapsed=0s
+INFO [01-01|00:01:39.014] Stopping work on payload                 id=0x03e83780b95d16c3 reason=delivery
+INFO [01-01|00:01:39.020] Imported new potential chain segment     number=30 hash=9c1347..853659 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=7.17KiB  triediffs=53.91KiB triedirty=0.00B
+WARN [01-01|00:01:39.021] Ignoring already known beacon payload    number=30 hash=9c1347..853659 age=0
+ERROR[01-01|00:01:40.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:41.001] Starting work on payload                 id=0x03cc790508d8e33d
+INFO [01-01|00:01:41.001] Updated payload                          id=0x03cc790508d8e33d number=31 hash=7e5866..90dae9 txs=0 withdrawals=0 gas=0 fees=0 root=12cafd..2bebf2 elapsed=0s
+INFO [01-01|00:01:41.016] Stopping work on payload                 id=0x03bd67cb12c8a917 reason=delivery
+INFO [01-01|00:01:41.022] Imported new potential chain segment     number=31 hash=fdd9e4..39b1bf blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=7.37KiB  triediffs=55.39KiB triedirty=0.00B
+INFO [01-01|00:01:41.024] Chain head was updated                   number=31 hash=fdd9e4..39b1bf root=a4f8e2..d8c54d elapsed=0s
+INFO [01-01|00:01:41.024] Starting work on payload                 id=0x03bd1cae6ceddfe0
+INFO [01-01|00:01:41.024] Updated payload                          id=0x03bd1cae6ceddfe0 number=32 hash=272953..0f9143 txs=0 withdrawals=0 gas=0 fees=0 root=85904b..e24966 elapsed=0s
+ERROR[01-01|00:01:41.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:41.604] Ignoring already known beacon payload    number=31 hash=fdd9e4..39b1bf age=0
+ERROR[01-01|00:01:43.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:43.001] Starting work on payload                 id=0x031f6c2ee03da6f4
+INFO [01-01|00:01:43.001] Updated payload                          id=0x031f6c2ee03da6f4 number=32 hash=ffabfc..675904 txs=0 withdrawals=0 gas=0 fees=0 root=e6df93..0b10c4 elapsed=0s
+INFO [01-01|00:01:43.016] Stopping work on payload                 id=0x03bd1cae6ceddfe0 reason=delivery
+INFO [01-01|00:01:43.022] Imported new potential chain segment     number=32 hash=272953..0f9143 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=7.57KiB  triediffs=57.37KiB triedirty=0.00B
+INFO [01-01|00:01:43.024] Chain head was updated                   number=32 hash=272953..0f9143 root=85904b..e24966 elapsed=0s
+ERROR[01-01|00:01:43.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:43.704] Ignoring already known beacon payload    number=32 hash=272953..0f9143 age=0
+INFO [01-01|00:01:45.001] Starting work on payload                 id=0x0328783a4b1b46f5
+INFO [01-01|00:01:45.001] Starting work on payload                 id=0x0317475f812c3b8c
+INFO [01-01|00:01:45.001] Updated payload                          id=0x0328783a4b1b46f5 number=33 hash=dc8b14..174c84 txs=0 withdrawals=0 gas=0 fees=0 root=d54978..8594fc elapsed=0s
+INFO [01-01|00:01:45.001] Updated payload                          id=0x0317475f812c3b8c number=33 hash=450ca4..15d341 txs=0 withdrawals=0 gas=0 fees=0 root=eb76f3..c7b7fe elapsed=0s
+INFO [01-01|00:01:45.018] Stopping work on payload                 id=0x0317475f812c3b8c reason=delivery
+INFO [01-01|00:01:45.022] Imported new potential chain segment     number=33 hash=450ca4..15d341 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=7.77KiB  triediffs=59.18KiB triedirty=0.00B
+WARN [01-01|00:01:45.023] Ignoring already known beacon payload    number=33 hash=450ca4..15d341 age=0
+INFO [01-01|00:01:45.024] Chain head was updated                   number=33 hash=450ca4..15d341 root=eb76f3..c7b7fe elapsed=0s
+ERROR[01-01|00:01:45.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:46.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:47.001] Ignoring beacon update to old head       number=32 hash=272953..0f9143 age=4s  have=33
+INFO [01-01|00:01:47.001] Stopping work on payload                 id=0x030c91647f1e97d5 reason=timeout
+INFO [01-01|00:01:47.003] Starting work on payload                 id=0x0375eabd1fc6ef7e
+INFO [01-01|00:01:47.003] Updated payload                          id=0x0375eabd1fc6ef7e number=34 hash=c3b8f9..f1b256 txs=0 withdrawals=0 gas=0 fees=0 root=7371fb..20ad70 elapsed=0s
+INFO [01-01|00:01:47.018] Stopping work on payload                 id=0x0375eabd1fc6ef7e reason=delivery
+INFO [01-01|00:01:47.024] Imported new potential chain segment     number=34 hash=c3b8f9..f1b256 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=7.97KiB  triediffs=60.91KiB triedirty=0.00B
+WARN [01-01|00:01:47.204] Ignoring already known beacon payload    number=34 hash=c3b8f9..f1b256 age=0
+INFO [01-01|00:01:47.206] Chain head was updated                   number=34 hash=c3b8f9..f1b256 root=7371fb..20ad70 elapsed=0s
+ERROR[01-01|00:01:47.206] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:49.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:49.001] Starting work on payload                 id=0x0376a9f1819d2cb6
+INFO [01-01|00:01:49.001] Starting work on payload                 id=0x038890924488a894
+INFO [01-01|00:01:49.001] Updated payload                          id=0x0376a9f1819d2cb6 number=35 hash=1bf459..ee0879 txs=0 withdrawals=0 gas=0 fees=0 root=d05308..21737b elapsed=0s
+INFO [01-01|00:01:49.001] Updated payload                          id=0x038890924488a894 number=35 hash=a843b5..0b2d7f txs=0 withdrawals=0 gas=0 fees=0 root=005f51..a3504a elapsed=0s
+INFO [01-01|00:01:49.018] Stopping work on payload                 id=0x0376a9f1819d2cb6 reason=delivery
+INFO [01-01|00:01:49.024] Imported new potential chain segment     number=35 hash=1bf459..ee0879 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=8.17KiB  triediffs=62.80KiB triedirty=0.00B
+INFO [01-01|00:01:49.026] Chain head was updated                   number=35 hash=1bf459..ee0879 root=d05308..21737b elapsed=0s
+ERROR[01-01|00:01:49.026] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:49.304] Ignoring already known beacon payload    number=35 hash=1bf459..ee0879 age=0
+INFO [01-01|00:01:51.001] Starting work on payload                 id=0x039e14b9e7b36860
+INFO [01-01|00:01:51.001] Starting work on payload                 id=0x03af624eb8bc8b29
+INFO [01-01|00:01:51.001] Updated payload                          id=0x039e14b9e7b36860 number=36 hash=1c9c8d..b1926b txs=0 withdrawals=0 gas=0 fees=0 root=9970a0..e03f5e elapsed=0s
+INFO [01-01|00:01:51.001] Updated payload                          id=0x03af624eb8bc8b29 number=36 hash=4430ae..125684 txs=0 withdrawals=0 gas=0 fees=0 root=627c08..4e0395 elapsed=0s
+INFO [01-01|00:01:51.018] Stopping work on payload                 id=0x03af624eb8bc8b29 reason=delivery
+INFO [01-01|00:01:51.022] Imported new potential chain segment     number=36 hash=4430ae..125684 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=8.37KiB  triediffs=64.61KiB triedirty=0.00B
+WARN [01-01|00:01:51.023] Ignoring already known beacon payload    number=36 hash=4430ae..125684 age=0
+INFO [01-01|00:01:51.024] Chain head was updated                   number=36 hash=4430ae..125684 root=627c08..4e0395 elapsed=0s
+ERROR[01-01|00:01:51.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:52.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:53.001] Ignoring beacon update to old head       number=35 hash=1bf459..ee0879 age=4s  have=36
+INFO [01-01|00:01:53.001] Stopping work on payload                 id=0x03cc790508d8e33d reason=timeout
+INFO [01-01|00:01:53.003] Starting work on payload                 id=0x03dfefe839355366
+INFO [01-01|00:01:53.003] Updated payload                          id=0x03dfefe839355366 number=37 hash=999c1b..7ead5d txs=0 withdrawals=0 gas=0 fees=0 root=7dd02a..58377c elapsed=0s
+INFO [01-01|00:01:53.016] Stopping work on payload                 id=0x039e14b9e7b36860 reason=delivery
+INFO [01-01|00:01:53.020] Imported new potential chain segment     number=36 hash=1c9c8d..b1926b blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=8.57KiB  triediffs=66.31KiB triedirty=0.00B
+INFO [01-01|00:01:53.022] Chain reorg detected                     number=35 hash=1bf459..ee0879 drop=1 dropfrom=4430ae..125684 add=1 addfrom=1c9c8d..b1926b
+INFO [01-01|00:01:53.022] Chain head was updated                   number=36 hash=1c9c8d..b1926b root=9970a0..e03f5e elapsed=0s
+INFO [01-01|00:01:53.022] Starting work on payload                 id=0x03308b998869d4cd
+INFO [01-01|00:01:53.022] Updated payload                          id=0x03308b998869d4cd number=37 hash=9b2037..e3c79e txs=0 withdrawals=0 gas=0 fees=0 root=cea146..ddb03b elapsed=0s
+ERROR[01-01|00:01:53.022] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:53.504] Ignoring already known beacon payload    number=36 hash=1c9c8d..b1926b age=0
+ERROR[01-01|00:01:55.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:55.001] Starting work on payload                 id=0x03b433ece92db308
+INFO [01-01|00:01:55.001] Stopping work on payload                 id=0x031f6c2ee03da6f4 reason=timeout
+INFO [01-01|00:01:55.001] Updated payload                          id=0x03b433ece92db308 number=37 hash=8b2869..b143e1 txs=0 withdrawals=0 gas=0 fees=0 root=2732fc..5b8cde elapsed=0s
+INFO [01-01|00:01:55.016] Stopping work on payload                 id=0x03308b998869d4cd reason=delivery
+INFO [01-01|00:01:55.022] Imported new potential chain segment     number=37 hash=9b2037..e3c79e blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=8.77KiB  triediffs=67.83KiB triedirty=0.00B
+INFO [01-01|00:01:55.024] Chain head was updated                   number=37 hash=9b2037..e3c79e root=cea146..ddb03b elapsed=0s
+ERROR[01-01|00:01:55.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:55.604] Ignoring already known beacon payload    number=37 hash=9b2037..e3c79e age=0
+INFO [01-01|00:01:57.001] Starting work on payload                 id=0x03e3def0743d441b
+INFO [01-01|00:01:57.001] Starting work on payload                 id=0x0346fc510fc66b4e
+INFO [01-01|00:01:57.001] Stopping work on payload                 id=0x0328783a4b1b46f5 reason=timeout
+INFO [01-01|00:01:57.001] Updated payload                          id=0x03e3def0743d441b number=38 hash=0f950b..91144f txs=0 withdrawals=0 gas=0 fees=0 root=a2354f..4db20d elapsed=0s
+INFO [01-01|00:01:57.001] Updated payload                          id=0x0346fc510fc66b4e number=38 hash=07af6f..3a8d38 txs=0 withdrawals=0 gas=0 fees=0 root=84b4ac..897588 elapsed=0s
+INFO [01-01|00:01:57.018] Stopping work on payload                 id=0x0346fc510fc66b4e reason=delivery
+INFO [01-01|00:01:57.024] Imported new potential chain segment     number=38 hash=07af6f..3a8d38 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=8.96KiB  triediffs=69.39KiB triedirty=0.00B
+WARN [01-01|00:01:57.025] Ignoring already known beacon payload    number=38 hash=07af6f..3a8d38 age=0
+INFO [01-01|00:01:57.026] Chain head was updated                   number=38 hash=07af6f..3a8d38 root=84b4ac..897588 elapsed=0s
+ERROR[01-01|00:01:57.026] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:01:58.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:01:59.001] Starting work on payload                 id=0x034017597cbed50a
+INFO [01-01|00:01:59.001] Starting work on payload                 id=0x032ba9a584495ec1
+INFO [01-01|00:01:59.001] Updated payload                          id=0x034017597cbed50a number=39 hash=e45398..acaf98 txs=0 withdrawals=0 gas=0 fees=0 root=8387c8..a772a1 elapsed=0s
+INFO [01-01|00:01:59.001] Updated payload                          id=0x032ba9a584495ec1 number=39 hash=a6c3ac..25d8c6 txs=0 withdrawals=0 gas=0 fees=0 root=2ebe10..56d69a elapsed=0s
+INFO [01-01|00:01:59.016] Stopping work on payload                 id=0x034017597cbed50a reason=delivery
+INFO [01-01|00:01:59.022] Imported new potential chain segment     number=39 hash=e45398..acaf98 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=9.16KiB  triediffs=71.08KiB triedirty=0.00B
+INFO [01-01|00:01:59.024] Chain head was updated                   number=39 hash=e45398..acaf98 root=8387c8..a772a1 elapsed=0s
+ERROR[01-01|00:01:59.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:01:59.104] Ignoring already known beacon payload    number=39 hash=e45398..acaf98 age=0
+ERROR[01-01|00:02:01.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:01.001] Starting work on payload                 id=0x03056d50569b2bef
+INFO [01-01|00:02:01.001] Starting work on payload                 id=0x031071da981406fb
+INFO [01-01|00:02:01.001] Stopping work on payload                 id=0x038890924488a894 reason=timeout
+INFO [01-01|00:02:01.001] Updated payload                          id=0x03056d50569b2bef number=40 hash=a982cc..5940c6 txs=0 withdrawals=0 gas=0 fees=0 root=48ade0..b6e8f9 elapsed=0s
+INFO [01-01|00:02:01.001] Updated payload                          id=0x031071da981406fb number=40 hash=8a0c29..dca2f2 txs=0 withdrawals=0 gas=0 fees=0 root=39740d..9e3d4d elapsed=0s
+INFO [01-01|00:02:01.018] Stopping work on payload                 id=0x031071da981406fb reason=delivery
+INFO [01-01|00:02:01.024] Imported new potential chain segment     number=40 hash=8a0c29..dca2f2 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=9.36KiB  triediffs=72.84KiB triedirty=0.00B
+WARN [01-01|00:02:01.025] Ignoring already known beacon payload    number=40 hash=8a0c29..dca2f2 age=0
+INFO [01-01|00:02:01.026] Chain head was updated                   number=40 hash=8a0c29..dca2f2 root=39740d..9e3d4d elapsed=0s
+ERROR[01-01|00:02:01.026] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:03.001] Starting work on payload                 id=0x03eef882889d2f8e
+INFO [01-01|00:02:03.001] Starting work on payload                 id=0x0393edd2c9002352
+INFO [01-01|00:02:03.001] Updated payload                          id=0x03eef882889d2f8e number=41 hash=42d8be..d1e425 txs=0 withdrawals=0 gas=0 fees=0 root=97072d..fc6ce4 elapsed=0s
+INFO [01-01|00:02:03.001] Updated payload                          id=0x0393edd2c9002352 number=41 hash=e6b4e1..484b71 txs=0 withdrawals=0 gas=0 fees=0 root=53f2e3..de7739 elapsed=0s
+INFO [01-01|00:02:03.018] Stopping work on payload                 id=0x03eef882889d2f8e reason=delivery
+INFO [01-01|00:02:03.024] Imported new potential chain segment     number=41 hash=42d8be..d1e425 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=9.56KiB  triediffs=74.50KiB triedirty=0.00B
+INFO [01-01|00:02:03.026] Chain head was updated                   number=41 hash=42d8be..d1e425 root=97072d..fc6ce4 elapsed=0s
+ERROR[01-01|00:02:03.026] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:03.304] Ignoring already known beacon payload    number=41 hash=42d8be..d1e425 age=0
+ERROR[01-01|00:02:04.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:05.001] Ignoring beacon update to old head       number=40 hash=8a0c29..dca2f2 age=4s  have=41
+INFO [01-01|00:02:05.003] Stopping work on payload                 id=0x03dfefe839355366 reason=timeout
+INFO [01-01|00:02:05.003] Starting work on payload                 id=0x03b265862923ae1e
+INFO [01-01|00:02:05.003] Updated payload                          id=0x03b265862923ae1e number=42 hash=35f0d0..6a0c3a txs=0 withdrawals=0 gas=0 fees=0 root=076dd2..26546c elapsed=0s
+INFO [01-01|00:02:05.014] Stopping work on payload                 id=0x0393edd2c9002352 reason=delivery
+INFO [01-01|00:02:05.020] Imported new potential chain segment     number=41 hash=e6b4e1..484b71 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=9.76KiB  triediffs=76.29KiB triedirty=0.00B
+WARN [01-01|00:02:05.021] Ignoring already known beacon payload    number=41 hash=e6b4e1..484b71 age=0
+INFO [01-01|00:02:05.022] Chain reorg detected                     number=40 hash=8a0c29..dca2f2 drop=1 dropfrom=42d8be..d1e425 add=1 addfrom=e6b4e1..484b71
+INFO [01-01|00:02:05.022] Chain head was updated                   number=41 hash=e6b4e1..484b71 root=53f2e3..de7739 elapsed=0s
+INFO [01-01|00:02:05.022] Starting work on payload                 id=0x03ab1c4313624bd2
+INFO [01-01|00:02:05.022] Updated payload                          id=0x03ab1c4313624bd2 number=42 hash=74133c..6cbedc txs=0 withdrawals=0 gas=0 fees=0 root=a3ef1e..9b7d71 elapsed=0s
+ERROR[01-01|00:02:05.022] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:07.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:07.001] Starting work on payload                 id=0x035b73646299f56c
+INFO [01-01|00:02:07.001] Stopping work on payload                 id=0x03b433ece92db308 reason=timeout
+INFO [01-01|00:02:07.001] Updated payload                          id=0x035b73646299f56c number=42 hash=99e463..356137 txs=0 withdrawals=0 gas=0 fees=0 root=e81d56..ff5f3d elapsed=0s
+INFO [01-01|00:02:07.032] Stopping work on payload                 id=0x03ab1c4313624bd2 reason=delivery
+INFO [01-01|00:02:07.038] Imported new potential chain segment     number=42 hash=74133c..6cbedc blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=9.96KiB  triediffs=78.05KiB triedirty=0.00B
+WARN [01-01|00:02:07.039] Ignoring already known beacon payload    number=42 hash=74133c..6cbedc age=0
+INFO [01-01|00:02:07.040] Chain head was updated                   number=42 hash=74133c..6cbedc root=a3ef1e..9b7d71 elapsed=0s
+ERROR[01-01|00:02:07.040] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:07.041] Starting work on payload                 id=0x03cee155d2a3f743
+INFO [01-01|00:02:07.041] Updated payload                          id=0x03cee155d2a3f743 number=43 hash=ab33b8..be96b4 txs=0 withdrawals=0 gas=0 fees=0 root=19e934..40c0da elapsed=0s
+INFO [01-01|00:02:09.001] Starting work on payload                 id=0x036800f5d43a89d5
+INFO [01-01|00:02:09.001] Stopping work on payload                 id=0x03e3def0743d441b reason=timeout
+INFO [01-01|00:02:09.001] Updated payload                          id=0x036800f5d43a89d5 number=43 hash=4627db..84945f txs=0 withdrawals=0 gas=0 fees=0 root=f49905..eb6f5f elapsed=0s
+INFO [01-01|00:02:09.046] Stopping work on payload                 id=0x03cee155d2a3f743 reason=delivery
+INFO [01-01|00:02:09.052] Imported new potential chain segment     number=43 hash=ab33b8..be96b4 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=10.16KiB triediffs=80.02KiB triedirty=0.00B
+WARN [01-01|00:02:09.604] Ignoring already known beacon payload    number=43 hash=ab33b8..be96b4 age=0
+INFO [01-01|00:02:09.606] Chain head was updated                   number=43 hash=ab33b8..be96b4 root=19e934..40c0da elapsed=0s
+ERROR[01-01|00:02:09.606] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:10.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:11.001] Starting work on payload                 id=0x039b56989abfaebc
+INFO [01-01|00:02:11.001] Stopping work on payload                 id=0x032ba9a584495ec1 reason=timeout
+INFO [01-01|00:02:11.001] Updated payload                          id=0x039b56989abfaebc number=44 hash=012f2d..c5b9b4 txs=0 withdrawals=0 gas=0 fees=0 root=67bde0..db6f76 elapsed=0s
+INFO [01-01|00:02:11.016] Stopping work on payload                 id=0x036800f5d43a89d5 reason=delivery
+INFO [01-01|00:02:11.022] Imported new potential chain segment     number=43 hash=4627db..84945f blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=10.36KiB triediffs=82.17KiB triedirty=0.00B
+INFO [01-01|00:02:11.024] Chain reorg detected                     number=42 hash=74133c..6cbedc drop=1 dropfrom=ab33b8..be96b4 add=1 addfrom=4627db..84945f
+INFO [01-01|00:02:11.024] Chain head was updated                   number=43 hash=4627db..84945f root=f49905..eb6f5f elapsed=0s
+ERROR[01-01|00:02:11.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:11.704] Ignoring already known beacon payload    number=43 hash=4627db..84945f age=0
+INFO [01-01|00:02:11.706] Starting work on payload                 id=0x036acf3ac77e5705
+INFO [01-01|00:02:11.706] Updated payload                          id=0x036acf3ac77e5705 number=44 hash=6b26ae..8da931 txs=0 withdrawals=0 gas=0 fees=0 root=cd2762..da8c9c elapsed=0s
+ERROR[01-01|00:02:13.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:13.001] Stopping work on payload                 id=0x03056d50569b2bef reason=timeout
+INFO [01-01|00:02:13.001] Starting work on payload                 id=0x03ee3e743a42f3bd
+INFO [01-01|00:02:13.001] Updated payload                          id=0x03ee3e743a42f3bd number=44 hash=df614c..bff5ef txs=0 withdrawals=0 gas=0 fees=0 root=777398..0c10bb elapsed=0s
+INFO [01-01|00:02:13.016] Stopping work on payload                 id=0x036acf3ac77e5705 reason=delivery
+INFO [01-01|00:02:13.022] Imported new potential chain segment     number=44 hash=6b26ae..8da931 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=10.56KiB triediffs=83.89KiB triedirty=0.00B
+WARN [01-01|00:02:13.023] Ignoring already known beacon payload    number=44 hash=6b26ae..8da931 age=0
+INFO [01-01|00:02:13.024] Chain head was updated                   number=44 hash=6b26ae..8da931 root=cd2762..da8c9c elapsed=0s
+ERROR[01-01|00:02:13.024] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:15.001] Ignoring beacon update to old head       number=43 hash=4627db..84945f age=4s  have=44
+INFO [01-01|00:02:15.003] Starting work on payload                 id=0x037e3d7a57868599
+INFO [01-01|00:02:15.003] Updated payload                          id=0x037e3d7a57868599 number=45 hash=ec2c2f..768c7c txs=0 withdrawals=0 gas=0 fees=0 root=73e6ea..b555e7 elapsed=0s
+INFO [01-01|00:02:15.020] Stopping work on payload                 id=0x037e3d7a57868599 reason=delivery
+INFO [01-01|00:02:15.026] Imported new potential chain segment     number=45 hash=ec2c2f..768c7c blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=10.76KiB triediffs=85.90KiB triedirty=0.00B
+WARN [01-01|00:02:15.204] Ignoring already known beacon payload    number=45 hash=ec2c2f..768c7c age=0
+INFO [01-01|00:02:15.206] Chain head was updated                   number=45 hash=ec2c2f..768c7c root=73e6ea..b555e7 elapsed=0s
+ERROR[01-01|00:02:15.206] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:16.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:17.001] Starting work on payload                 id=0x03e5ca1008ecfd83
+INFO [01-01|00:02:17.001] Starting work on payload                 id=0x03052eeb3a2032a8
+INFO [01-01|00:02:17.001] Updated payload                          id=0x03e5ca1008ecfd83 number=46 hash=0d4f7a..10511c txs=0 withdrawals=0 gas=0 fees=0 root=63fbed..5c4d9d elapsed=0s
+INFO [01-01|00:02:17.001] Updated payload                          id=0x03052eeb3a2032a8 number=46 hash=c9c0cc..a983ab txs=0 withdrawals=0 gas=0 fees=0 root=54436a..e4375f elapsed=0s
+INFO [01-01|00:02:17.003] Stopping work on payload                 id=0x03b265862923ae1e reason=timeout
+INFO [01-01|00:02:17.022] Stopping work on payload                 id=0x03e5ca1008ecfd83 reason=delivery
+INFO [01-01|00:02:17.028] Imported new potential chain segment     number=46 hash=0d4f7a..10511c blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=10.96KiB triediffs=87.53KiB triedirty=0.00B
+INFO [01-01|00:02:17.030] Chain head was updated                   number=46 hash=0d4f7a..10511c root=63fbed..5c4d9d elapsed=0s
+ERROR[01-01|00:02:17.030] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:17.304] Ignoring already known beacon payload    number=46 hash=0d4f7a..10511c age=0
+ERROR[01-01|00:02:19.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:19.001] Ignoring beacon update to old head       number=45 hash=ec2c2f..768c7c age=4s  have=46
+INFO [01-01|00:02:19.001] Stopping work on payload                 id=0x035b73646299f56c reason=timeout
+INFO [01-01|00:02:19.003] Starting work on payload                 id=0x03c24abcb2af1cfd
+INFO [01-01|00:02:19.003] Updated payload                          id=0x03c24abcb2af1cfd number=47 hash=e2cd89..d80c67 txs=0 withdrawals=0 gas=0 fees=0 root=7d59f4..e80b7f elapsed=0s
+INFO [01-01|00:02:19.018] Stopping work on payload                 id=0x03c24abcb2af1cfd reason=delivery
+INFO [01-01|00:02:19.024] Imported new potential chain segment     number=47 hash=e2cd89..d80c67 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=11.16KiB triediffs=89.35KiB triedirty=0.00B
+WARN [01-01|00:02:19.025] Ignoring already known beacon payload    number=47 hash=e2cd89..d80c67 age=0
+INFO [01-01|00:02:19.027] Chain head was updated                   number=47 hash=e2cd89..d80c67 root=7d59f4..e80b7f elapsed=0s
+ERROR[01-01|00:02:19.027] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:21.001] Ignoring beacon update to old head       number=46 hash=0d4f7a..10511c age=4s  have=47
+INFO [01-01|00:02:21.003] Starting work on payload                 id=0x031610bf3f69c67e
+INFO [01-01|00:02:21.003] Updated payload                          id=0x031610bf3f69c67e number=48 hash=ed6ec0..c3691d txs=0 withdrawals=0 gas=0 fees=0 root=ddc8e8..44e6f3 elapsed=0s
+INFO [01-01|00:02:21.018] Stopping work on payload                 id=0x031610bf3f69c67e reason=delivery
+INFO [01-01|00:02:21.024] Imported new potential chain segment     number=48 hash=ed6ec0..c3691d blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=11.36KiB triediffs=91.04KiB triedirty=0.00B
+WARN [01-01|00:02:21.025] Ignoring already known beacon payload    number=48 hash=ed6ec0..c3691d age=0
+INFO [01-01|00:02:21.027] Chain head was updated                   number=48 hash=ed6ec0..c3691d root=ddc8e8..44e6f3 elapsed=0s
+ERROR[01-01|00:02:21.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:22.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:23.001] Stopping work on payload                 id=0x039b56989abfaebc reason=timeout
+INFO [01-01|00:02:23.001] Ignoring beacon update to old head       number=47 hash=e2cd89..d80c67 age=4s  have=48
+INFO [01-01|00:02:23.003] Starting work on payload                 id=0x03728c77a22e27ea
+INFO [01-01|00:02:23.003] Updated payload                          id=0x03728c77a22e27ea number=49 hash=521bd9..0192bf txs=0 withdrawals=0 gas=0 fees=0 root=74a1c5..f2572d elapsed=0s
+INFO [01-01|00:02:23.018] Stopping work on payload                 id=0x03728c77a22e27ea reason=delivery
+INFO [01-01|00:02:23.024] Imported new potential chain segment     number=49 hash=521bd9..0192bf blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=11.55KiB triediffs=92.83KiB triedirty=0.00B
+WARN [01-01|00:02:23.025] Ignoring already known beacon payload    number=49 hash=521bd9..0192bf age=0
+INFO [01-01|00:02:23.027] Chain head was updated                   number=49 hash=521bd9..0192bf root=74a1c5..f2572d elapsed=0s
+ERROR[01-01|00:02:23.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:25.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:25.001] Ignoring beacon update to old head       number=48 hash=ed6ec0..c3691d age=4s  have=49
+INFO [01-01|00:02:25.001] Stopping work on payload                 id=0x03ee3e743a42f3bd reason=timeout
+INFO [01-01|00:02:25.003] Starting work on payload                 id=0x03fe003061da37f4
+INFO [01-01|00:02:25.003] Updated payload                          id=0x03fe003061da37f4 number=50 hash=728dde..ebd876 txs=0 withdrawals=0 gas=0 fees=0 root=461f9a..7d80f9 elapsed=0s
+INFO [01-01|00:02:27.001] Starting work on payload                 id=0x03643a242c759912
+INFO [01-01|00:02:27.001] Updated payload                          id=0x03643a242c759912 number=50 hash=d7f1f8..0509ab txs=0 withdrawals=0 gas=0 fees=0 root=ec29fc..5122d3 elapsed=0s
+INFO [01-01|00:02:27.014] Stopping work on payload                 id=0x03fe003061da37f4 reason=delivery
+INFO [01-01|00:02:27.020] Imported new potential chain segment     number=50 hash=728dde..ebd876 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=11.75KiB triediffs=94.59KiB triedirty=0.00B
+WARN [01-01|00:02:27.021] Ignoring already known beacon payload    number=50 hash=728dde..ebd876 age=0
+INFO [01-01|00:02:27.022] Chain head was updated                   number=50 hash=728dde..ebd876 root=461f9a..7d80f9 elapsed=0s
+ERROR[01-01|00:02:27.022] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:27.023] Starting work on payload                 id=0x03ba81bf2b08b91c
+INFO [01-01|00:02:27.023] Updated payload                          id=0x03ba81bf2b08b91c number=51 hash=2b285a..aec8c5 txs=0 withdrawals=0 gas=0 fees=0 root=305560..2fa79e elapsed=0s
+ERROR[01-01|00:02:28.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:29.001] Starting work on payload                 id=0x0389b6f518c08b8f
+INFO [01-01|00:02:29.001] Stopping work on payload                 id=0x03052eeb3a2032a8 reason=timeout
+INFO [01-01|00:02:29.001] Updated payload                          id=0x0389b6f518c08b8f number=51 hash=bde840..64f76a txs=0 withdrawals=0 gas=0 fees=0 root=f843ca..84ca7c elapsed=0s
+INFO [01-01|00:02:29.016] Stopping work on payload                 id=0x03ba81bf2b08b91c reason=delivery
+INFO [01-01|00:02:29.022] Imported new potential chain segment     number=51 hash=2b285a..aec8c5 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=11.95KiB triediffs=96.35KiB triedirty=0.00B
+INFO [01-01|00:02:29.024] Chain head was updated                   number=51 hash=2b285a..aec8c5 root=305560..2fa79e elapsed=0s
+ERROR[01-01|00:02:29.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:29.204] Ignoring already known beacon payload    number=51 hash=2b285a..aec8c5 age=0
+ERROR[01-01|00:02:31.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:31.001] Starting work on payload                 id=0x037d3ce28d621299
+INFO [01-01|00:02:31.001] Updated payload                          id=0x037d3ce28d621299 number=52 hash=4cca88..39d87f txs=0 withdrawals=0 gas=0 fees=0 root=920663..5ab637 elapsed=0s
+INFO [01-01|00:02:31.014] Stopping work on payload                 id=0x0389b6f518c08b8f reason=delivery
+INFO [01-01|00:02:31.020] Imported new potential chain segment     number=51 hash=bde840..64f76a blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=12.15KiB triediffs=98.35KiB triedirty=0.00B
+WARN [01-01|00:02:31.021] Ignoring already known beacon payload    number=51 hash=bde840..64f76a age=0
+INFO [01-01|00:02:31.022] Chain reorg detected                     number=50 hash=728dde..ebd876 drop=1 dropfrom=2b285a..aec8c5 add=1 addfrom=bde840..64f76a
+INFO [01-01|00:02:31.022] Chain head was updated                   number=51 hash=bde840..64f76a root=f843ca..84ca7c elapsed=0s
+ERROR[01-01|00:02:31.022] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:31.023] Starting work on payload                 id=0x03af42458906ca82
+INFO [01-01|00:02:31.023] Updated payload                          id=0x03af42458906ca82 number=52 hash=f83bf8..508234 txs=0 withdrawals=0 gas=0 fees=0 root=efc7f3..cbfae1 elapsed=0s
+INFO [01-01|00:02:33.001] Starting work on payload                 id=0x033e8a14019fba6a
+INFO [01-01|00:02:33.001] Updated payload                          id=0x033e8a14019fba6a number=52 hash=90784a..8560d6 txs=0 withdrawals=0 gas=0 fees=0 root=7e47e6..c78873 elapsed=0s
+INFO [01-01|00:02:33.016] Stopping work on payload                 id=0x03af42458906ca82 reason=delivery
+INFO [01-01|00:02:33.022] Imported new potential chain segment     number=52 hash=f83bf8..508234 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=12.35KiB triediffs=100.23KiB triedirty=0.00B
+INFO [01-01|00:02:33.024] Chain head was updated                   number=52 hash=f83bf8..508234 root=efc7f3..cbfae1 elapsed=0s
+ERROR[01-01|00:02:33.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:33.404] Ignoring already known beacon payload    number=52 hash=f83bf8..508234 age=0
+ERROR[01-01|00:02:34.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:35.001] Starting work on payload                 id=0x035a9170eba94a5d
+INFO [01-01|00:02:35.001] Starting work on payload                 id=0x0376d86e774db3b3
+INFO [01-01|00:02:35.001] Updated payload                          id=0x035a9170eba94a5d number=53 hash=f17fc8..68315b txs=0 withdrawals=0 gas=0 fees=0 root=7543ba..57567d elapsed=0s
+INFO [01-01|00:02:35.001] Updated payload                          id=0x0376d86e774db3b3 number=53 hash=ea18c5..948457 txs=0 withdrawals=0 gas=0 fees=0 root=16625d..b3cc55 elapsed=0s
+INFO [01-01|00:02:35.018] Stopping work on payload                 id=0x0376d86e774db3b3 reason=delivery
+INFO [01-01|00:02:35.022] Imported new potential chain segment     number=53 hash=ea18c5..948457 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=12.55KiB triediffs=102.30KiB triedirty=0.00B
+WARN [01-01|00:02:35.023] Ignoring already known beacon payload    number=53 hash=ea18c5..948457 age=0
+INFO [01-01|00:02:35.024] Chain head was updated                   number=53 hash=ea18c5..948457 root=16625d..b3cc55 elapsed=0s
+ERROR[01-01|00:02:35.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:37.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:37.001] Starting work on payload                 id=0x035f423e2b6252f2
+INFO [01-01|00:02:37.001] Starting work on payload                 id=0x03a8b2a6a6a5ebe5
+INFO [01-01|00:02:37.001] Updated payload                          id=0x035f423e2b6252f2 number=54 hash=106642..afd449 txs=0 withdrawals=0 gas=0 fees=0 root=a6fdd1..5f6bcf elapsed=0s
+INFO [01-01|00:02:37.001] Updated payload                          id=0x03a8b2a6a6a5ebe5 number=54 hash=deb3fa..ffede0 txs=0 withdrawals=0 gas=0 fees=0 root=c90604..7be1ae elapsed=0s
+INFO [01-01|00:02:37.018] Stopping work on payload                 id=0x035f423e2b6252f2 reason=delivery
+INFO [01-01|00:02:37.024] Imported new potential chain segment     number=54 hash=106642..afd449 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=12.75KiB triediffs=104.37KiB triedirty=0.00B
+INFO [01-01|00:02:37.026] Chain head was updated                   number=54 hash=106642..afd449 root=a6fdd1..5f6bcf elapsed=0s
+ERROR[01-01|00:02:37.026] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:37.604] Ignoring already known beacon payload    number=54 hash=106642..afd449 age=0
+INFO [01-01|00:02:39.001] Ignoring beacon update to old head       number=53 hash=ea18c5..948457 age=4s  have=54
+INFO [01-01|00:02:39.001] Stopping work on payload                 id=0x03643a242c759912 reason=timeout
+INFO [01-01|00:02:39.003] Starting work on payload                 id=0x0333b38c4b7e370e
+INFO [01-01|00:02:39.003] Updated payload                          id=0x0333b38c4b7e370e number=55 hash=7bb796..87fb91 txs=0 withdrawals=0 gas=0 fees=0 root=6c4489..4b6ea6 elapsed=0s
+INFO [01-01|00:02:39.022] Stopping work on payload                 id=0x0333b38c4b7e370e reason=delivery
+INFO [01-01|00:02:39.028] Imported new potential chain segment     number=55 hash=7bb796..87fb91 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=12.95KiB triediffs=106.12KiB triedirty=0.00B
+WARN [01-01|00:02:39.029] Ignoring already known beacon payload    number=55 hash=7bb796..87fb91 age=0
+INFO [01-01|00:02:39.031] Chain head was updated                   number=55 hash=7bb796..87fb91 root=6c4489..4b6ea6 elapsed=0s
+ERROR[01-01|00:02:39.031] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:40.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:41.001] Ignoring beacon update to old head       number=54 hash=106642..afd449 age=4s  have=55
+INFO [01-01|00:02:41.003] Starting work on payload                 id=0x035387dc39bab53d
+INFO [01-01|00:02:41.003] Updated payload                          id=0x035387dc39bab53d number=56 hash=9fde9b..2679fa txs=0 withdrawals=0 gas=0 fees=0 root=62b733..f09a39 elapsed=0s
+INFO [01-01|00:02:41.018] Stopping work on payload                 id=0x035387dc39bab53d reason=delivery
+INFO [01-01|00:02:41.024] Imported new potential chain segment     number=56 hash=9fde9b..2679fa blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=13.15KiB triediffs=107.70KiB triedirty=0.00B
+WARN [01-01|00:02:41.025] Ignoring already known beacon payload    number=56 hash=9fde9b..2679fa age=0
+INFO [01-01|00:02:41.027] Chain head was updated                   number=56 hash=9fde9b..2679fa root=62b733..f09a39 elapsed=0s
+ERROR[01-01|00:02:41.027] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:43.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:43.001] Ignoring beacon update to old head       number=55 hash=7bb796..87fb91 age=4s  have=56
+INFO [01-01|00:02:43.001] Stopping work on payload                 id=0x037d3ce28d621299 reason=timeout
+INFO [01-01|00:02:43.003] Starting work on payload                 id=0x036eb8746d7678b1
+INFO [01-01|00:02:43.003] Updated payload                          id=0x036eb8746d7678b1 number=57 hash=3ccfca..4cf3ec txs=0 withdrawals=0 gas=0 fees=0 root=f623e7..7fc742 elapsed=0s
+INFO [01-01|00:02:43.018] Stopping work on payload                 id=0x036eb8746d7678b1 reason=delivery
+INFO [01-01|00:02:43.024] Imported new potential chain segment     number=57 hash=3ccfca..4cf3ec blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=13.35KiB triediffs=109.46KiB triedirty=0.00B
+WARN [01-01|00:02:43.025] Ignoring already known beacon payload    number=57 hash=3ccfca..4cf3ec age=0
+INFO [01-01|00:02:43.027] Chain head was updated                   number=57 hash=3ccfca..4cf3ec root=f623e7..7fc742 elapsed=0s
+ERROR[01-01|00:02:43.027] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:45.001] Starting work on payload                 id=0x03e27db96ed5a20b
+INFO [01-01|00:02:45.001] Starting work on payload                 id=0x037315905a5b880d
+INFO [01-01|00:02:45.001] Stopping work on payload                 id=0x033e8a14019fba6a reason=timeout
+INFO [01-01|00:02:45.001] Updated payload                          id=0x03e27db96ed5a20b number=58 hash=ec2db8..936c35 txs=0 withdrawals=0 gas=0 fees=0 root=1a9956..dcedba elapsed=0s
+INFO [01-01|00:02:45.001] Updated payload                          id=0x037315905a5b880d number=58 hash=9208ed..ebadc2 txs=0 withdrawals=0 gas=0 fees=0 root=5363f5..5bb932 elapsed=0s
+INFO [01-01|00:02:45.018] Stopping work on payload                 id=0x037315905a5b880d reason=delivery
+INFO [01-01|00:02:45.022] Imported new potential chain segment     number=58 hash=9208ed..ebadc2 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=13.55KiB triediffs=111.59KiB triedirty=0.00B
+WARN [01-01|00:02:45.023] Ignoring already known beacon payload    number=58 hash=9208ed..ebadc2 age=0
+INFO [01-01|00:02:45.024] Chain head was updated                   number=58 hash=9208ed..ebadc2 root=5363f5..5bb932 elapsed=0s
+ERROR[01-01|00:02:45.024] Nil finalized block cannot evict old blobs
+ERROR[01-01|00:02:46.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:47.001] Starting work on payload                 id=0x030d65fd1595fd73
+INFO [01-01|00:02:47.001] Starting work on payload                 id=0x03082316f653e54e
+INFO [01-01|00:02:47.001] Stopping work on payload                 id=0x035a9170eba94a5d reason=timeout
+INFO [01-01|00:02:47.001] Updated payload                          id=0x030d65fd1595fd73 number=59 hash=adcc30..6db54e txs=0 withdrawals=0 gas=0 fees=0 root=7c6cd4..385207 elapsed=0s
+INFO [01-01|00:02:47.001] Updated payload                          id=0x03082316f653e54e number=59 hash=397921..9cc9d4 txs=0 withdrawals=0 gas=0 fees=0 root=4f07d8..020bb4 elapsed=0s
+INFO [01-01|00:02:47.020] Stopping work on payload                 id=0x030d65fd1595fd73 reason=delivery
+INFO [01-01|00:02:47.026] Imported new potential chain segment     number=59 hash=adcc30..6db54e blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=13.75KiB triediffs=113.76KiB triedirty=0.00B
+INFO [01-01|00:02:47.028] Chain head was updated                   number=59 hash=adcc30..6db54e root=7c6cd4..385207 elapsed=0s
+ERROR[01-01|00:02:47.028] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:47.404] Ignoring already known beacon payload    number=59 hash=adcc30..6db54e age=0
+ERROR[01-01|00:02:49.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:49.001] Ignoring beacon update to old head       number=58 hash=9208ed..ebadc2 age=4s  have=59
+INFO [01-01|00:02:49.001] Stopping work on payload                 id=0x03a8b2a6a6a5ebe5 reason=timeout
+INFO [01-01|00:02:49.003] Starting work on payload                 id=0x03696dc1afbd52cb
+INFO [01-01|00:02:49.003] Updated payload                          id=0x03696dc1afbd52cb number=60 hash=59db31..d9576b txs=0 withdrawals=0 gas=0 fees=0 root=d65fea..64e02e elapsed=0s
+INFO [01-01|00:02:49.016] Stopping work on payload                 id=0x03696dc1afbd52cb reason=delivery
+INFO [01-01|00:02:49.020] Imported new potential chain segment     number=60 hash=59db31..d9576b blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=13.95KiB triediffs=115.79KiB triedirty=0.00B
+WARN [01-01|00:02:49.021] Ignoring already known beacon payload    number=60 hash=59db31..d9576b age=0
+INFO [01-01|00:02:49.023] Chain head was updated                   number=60 hash=59db31..d9576b root=d65fea..64e02e elapsed=0s
+ERROR[01-01|00:02:49.023] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:51.001] Starting work on payload                 id=0x03dff211718f05a9
+INFO [01-01|00:02:51.001] Updated payload                          id=0x03dff211718f05a9 number=61 hash=4558f3..cfc4df txs=0 withdrawals=0 gas=0 fees=0 root=d36647..e8a300 elapsed=0s
+ERROR[01-01|00:02:52.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:53.001] Starting work on payload                 id=0x03c5b571a6014e71
+INFO [01-01|00:02:53.001] Updated payload                          id=0x03c5b571a6014e71 number=61 hash=855f24..442cfc txs=0 withdrawals=0 gas=0 fees=0 root=4af806..527312 elapsed=0s
+INFO [01-01|00:02:53.016] Stopping work on payload                 id=0x03dff211718f05a9 reason=delivery
+INFO [01-01|00:02:53.022] Imported new potential chain segment     number=61 hash=4558f3..cfc4df blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=14.14KiB triediffs=117.98KiB triedirty=0.00B
+INFO [01-01|00:02:53.024] Chain head was updated                   number=61 hash=4558f3..cfc4df root=d36647..e8a300 elapsed=0s
+ERROR[01-01|00:02:53.024] Nil finalized block cannot evict old blobs
+WARN [01-01|00:02:53.704] Ignoring already known beacon payload    number=61 hash=4558f3..cfc4df age=0
+INFO [01-01|00:02:53.706] Starting work on payload                 id=0x033b42f0d6aff347
+INFO [01-01|00:02:53.706] Updated payload                          id=0x033b42f0d6aff347 number=62 hash=3cd1b2..756b40 txs=0 withdrawals=0 gas=0 fees=0 root=b218f9..8fe7a4 elapsed=0s
+ERROR[01-01|00:02:55.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:55.001] Starting work on payload                 id=0x03a9ab795333db66
+INFO [01-01|00:02:55.001] Updated payload                          id=0x03a9ab795333db66 number=62 hash=6cd5a3..2f9c92 txs=0 withdrawals=0 gas=0 fees=0 root=3593a5..90d583 elapsed=0s
+INFO [01-01|00:02:55.014] Stopping work on payload                 id=0x033b42f0d6aff347 reason=delivery
+INFO [01-01|00:02:55.020] Imported new potential chain segment     number=62 hash=3cd1b2..756b40 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=14.34KiB triediffs=119.76KiB triedirty=0.00B
+WARN [01-01|00:02:55.021] Ignoring already known beacon payload    number=62 hash=3cd1b2..756b40 age=0
+INFO [01-01|00:02:55.022] Chain head was updated                   number=62 hash=3cd1b2..756b40 root=b218f9..8fe7a4 elapsed=0s
+ERROR[01-01|00:02:55.022] Nil finalized block cannot evict old blobs
+INFO [01-01|00:02:57.001] Starting work on payload                 id=0x0340606af442685a
+INFO [01-01|00:02:57.001] Stopping work on payload                 id=0x03e27db96ed5a20b reason=timeout
+INFO [01-01|00:02:57.001] Updated payload                          id=0x0340606af442685a number=63 hash=ed7c05..94a202 txs=0 withdrawals=0 gas=0 fees=0 root=e61253..c0d20a elapsed=0s
+INFO [01-01|00:02:57.016] Stopping work on payload                 id=0x03a9ab795333db66 reason=delivery
+INFO [01-01|00:02:57.022] Imported new potential chain segment     number=62 hash=6cd5a3..2f9c92 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=14.54KiB triediffs=121.83KiB triedirty=0.00B
+WARN [01-01|00:02:57.204] Ignoring already known beacon payload    number=62 hash=6cd5a3..2f9c92 age=0
+ERROR[01-01|00:02:58.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:02:59.001] Starting work on payload                 id=0x0317241c175e375b
+INFO [01-01|00:02:59.001] Stopping work on payload                 id=0x03082316f653e54e reason=timeout
+INFO [01-01|00:02:59.001] Updated payload                          id=0x0317241c175e375b number=63 hash=e168fa..760a20 txs=0 withdrawals=0 gas=0 fees=0 root=1177c5..d10fcc elapsed=0s
+INFO [01-01|00:02:59.018] Stopping work on payload                 id=0x0340606af442685a reason=delivery
+INFO [01-01|00:02:59.024] Imported new potential chain segment     number=63 hash=ed7c05..94a202 blocks=1 txs=0 mgas=0.000 elapsed=0s mgasps=NaN snapdiffs=14.74KiB triediffs=123.92KiB triedirty=0.00B
+WARN [01-01|00:02:59.025] Ignoring already known beacon payload    number=63 hash=ed7c05..94a202 age=0
+INFO [01-01|00:02:59.026] Chain head was updated                   number=63 hash=ed7c05..94a202 root=e61253..c0d20a elapsed=0s
+INFO [01-01|00:02:59.026] Starting work on payload                 id=0x03bdbfdc5569098d
+INFO [01-01|00:02:59.026] Updated payload                          id=0x03bdbfdc5569098d number=64 hash=8b01f0..90e0a1 txs=0 withdrawals=0 gas=0 fees=0 root=48c6e8..caf1ad elapsed=0s
+ERROR[01-01|00:02:59.026] Nil finalized block cannot evict old blobs

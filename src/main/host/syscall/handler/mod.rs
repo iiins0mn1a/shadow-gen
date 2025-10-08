@@ -37,6 +37,7 @@ mod file;
 mod fileat;
 mod futex;
 mod ioctl;
+mod inotify;
 mod mman;
 mod poll;
 mod prctl;
@@ -439,6 +440,10 @@ impl SyscallHandler {
             SyscallNum::NR_ioctl => handle!(ioctl),
             SyscallNum::NR_kill => handle!(kill),
             SyscallNum::NR_linkat => handle!(linkat),
+            // inotify minimal stubs
+            SyscallNum::NR_inotify_add_watch => handle!(inotify_add_watch),
+            SyscallNum::NR_inotify_rm_watch => handle!(inotify_rm_watch),
+            SyscallNum::NR_inotify_init1 => handle!(inotify_init1),
             SyscallNum::NR_listen => handle!(listen),
             SyscallNum::NR_lseek => handle!(lseek),
             SyscallNum::NR_mkdirat => handle!(mkdirat),

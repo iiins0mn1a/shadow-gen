@@ -1,0 +1,429 @@
+time="2000-01-01 00:00:21" level=info msg="Finished reading JWT secret from /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/jwtsecret" prefix=execution
+time="2000-01-01 00:00:21" level=warning msg="Running on custom Ethereum network specified in a chain configuration yaml file" prefix=flags
+time="2000-01-01 00:00:21" level=warning msg="Fee recipient 0x123463a4b065722e99115d6c222f267d9cabb524 is not a checksum Ethereum address. The checksummed address is 0x123463a4B065722E99115D6c222f267d9cABb524 and will be used as the fee recipient. We recommend using a mixed-case address (checksum) to prevent spelling mistakes in your fee recipient Ethereum address" prefix=node
+time="2000-01-01 00:00:21" level=info msg="Default fee recipient is set to 0x123463a4B065722E99115D6c222f267d9cABb524, recipient may be overwritten from validator client and persist in db. Default fee recipient will be used as a fall back" prefix=node
+time="2000-01-01 00:00:21" level=info msg="Checking DB" databasePath="/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/beacondata/beaconchaindata" prefix=node
+time="2000-01-01 00:00:21" level=info msg="Opening Bolt DB" path="/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/beacondata/beaconchaindata/beaconchain.db" prefix=db
+time="2000-01-01 00:00:21" level=info msg="Loading genesis state from disk." hash=0x3d02b2ee2082418b7e6301859806f227d8ea07eb96a1a362acde8f1c551a7334 prefix=genesis
+time="2000-01-01 00:00:21" level=info msg="Deposit contract" address=0x4242424242424242424242424242424242424242 prefix=node
+time="2000-01-01 00:00:21" level=error msg="Invalid address of enode://1234567890123456789012345678901234567890123456789012345678901234@11.0.0.3:30301 provided" error="failed to parse multiaddr "enode://1234567890123456789012345678901234567890123456789012345678901234@11.0.0.3:30301": must begin with /" prefix=p2p
+time="2000-01-01 00:00:21" level=warning msg="No bootstrap addresses supplied" prefix=p2p
+time="2000-01-01 00:00:21" level=info msg="Running node with peer id of 16Uiu2HAm7gfQyxUA3iAVpnB7o4a4XrfiWbHTBcxNg6FFQ3PZ5CSN " prefix=p2p
+time="2000-01-01 00:00:21" level=info msg="Blob filesystem cache warm-up complete." elapsed=0s prefix=filesystem
+time="2000-01-01 00:00:21" level=info msg="gRPC server listening on port" address="11.0.0.21:4001" prefix=rpc
+time="2000-01-01 00:00:21" level=warning msg="You are using an insecure gRPC server. If you are running your beacon node and validator on the same machines, you can ignore this message. If you want to know how to enable secure connections, see: https://docs.prylabs.network/docs/prysm-usage/secure-grpc" prefix=rpc
+time="2000-01-01 00:00:21" level=info msg="Starting beacon node" prefix=node version="Prysm/Unknown/Local build. Built at: Moments ago"
+time="2000-01-01 00:00:21" level=info msg="Backfill service not enabled" prefix=backfill
+time="2000-01-01 00:00:21" level=info msg="Blockchain data already exists in DB, initializing..." prefix=blockchain
+time="2000-01-01 00:00:21" level=info msg="Waiting for state to be initialized" prefix=initial-sync
+time="2000-01-01 00:00:21" level=info msg="Received state initialized event" prefix=initial-sync
+time="2000-01-01 00:00:21" level=info msg="Due to number of peers required for sync being set at 0, entering regular sync immediately." genesisTime=2000-01-01 00:00:01 +0000 UTC prefix=initial-sync
+time="2000-01-01 00:00:21" level=info msg="Starting HTTP server" address="11.0.0.21:4101" prefix=httprest
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_block/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_aggregate_and_proof/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/voluntary_exit/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/proposer_slashing/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/attester_slashing/ssz_snappy"
+time="2000-01-01 00:00:21" level=warning msg="rate is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/sync_committee_contribution_and_proof/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/bls_to_execution_change/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/blob_sidecar_0/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/blob_sidecar_1/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/blob_sidecar_2/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/blob_sidecar_3/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/blob_sidecar_4/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/blob_sidecar_5/ssz_snappy"
+time="2000-01-01 00:00:21" level=info msg="Started discovery v5" ENR="enr:-MG4QPXqHTJR9xMzME58St-sUJyep_szJrvZDlOwtT4ny1-RaWoxqfCs2Zk8FD-7JqDraNnT970EAFjk_6dhc6Y-m2OF3GrP_gmHYXR0bmV0c4gAAAAAAAAAAIRldGgykBzu-VogAACU__________-CaWSCdjSCaXCECwAAFYlzZWNwMjU2azGhArYjUMvp-h6XxJL6ju696JpiTk1BKtlU9TKlb84O_JCriHN5bmNuZXRzAIN0Y3CCEGmDdWRwghDN" prefix=p2p
+time="2000-01-01 00:00:21" level=info msg="Node started p2p server" multiAddr="/ip4/11.0.0.21/tcp/4201/p2p/16Uiu2HAm7gfQyxUA3iAVpnB7o4a4XrfiWbHTBcxNg6FFQ3PZ5CSN" prefix=p2p
+time="2000-01-01 00:00:21" level=info msg="Node started external p2p server" multiAddr="/ip4/11.0.0.21/tcp/4201/p2p/16Uiu2HAm7gfQyxUA3iAVpnB7o4a4XrfiWbHTBcxNg6FFQ3PZ5CSN" prefix=p2p
+time="2000-01-01 00:00:23" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:23" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_39/ssz_snappy"
+time="2000-01-01 00:00:23" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:23" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_40/ssz_snappy"
+time="2000-01-01 00:00:26" level=info msg="gRPC client connected to beacon node" addr="11.0.0.31:16025" prefix=rpc
+time="2000-01-01 00:00:27" level=warning msg="rate is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/sync_committee_0/ssz_snappy"
+time="2000-01-01 00:00:27" level=warning msg="rate is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/sync_committee_1/ssz_snappy"
+time="2000-01-01 00:00:27" level=warning msg="rate is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/sync_committee_2/ssz_snappy"
+time="2000-01-01 00:00:27" level=warning msg="rate is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/sync_committee_3/ssz_snappy"
+time="2000-01-01 00:00:27" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_15/ssz_snappy"
+time="2000-01-01 00:00:27" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_22/ssz_snappy"
+time="2000-01-01 00:00:27" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:00:27" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_25/ssz_snappy"
+time="2000-01-01 00:00:27" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=13
+time="2000-01-01 00:00:27" level=warning msg="Beacon Node is no longer connected to an ETH1 chain, so ETH1 data votes are now mocked." prefix="rpc/validator"
+time="2000-01-01 00:00:27" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=23ms slot=13 validator=6
+time="2000-01-01 00:00:27" level=info msg="Synced new block" block=0x807741b0... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=13
+time="2000-01-01 00:00:27" level=info msg="Finished applying state transition" payloadHash=0x4b216af6d526 prefix=blockchain slot=13 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:29" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x807741b039fc headSlot=13 payloadID=0x0317c0df1cd5 prefix=blockchain
+time="2000-01-01 00:00:29" level=info msg="Synced new block" block=0x505158bd... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=14
+time="2000-01-01 00:00:29" level=info msg="Finished applying state transition" payloadHash=0x7d507d67a6b5 prefix=blockchain slot=14 syncBitsCount=128 txCount=0
+time="2000-01-01 00:00:31" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x4b216af6d52690f9b6df70401ab75f43ac0e6333868e76746368c4a654bd8c65 prefix=blockchain slot=13
+time="2000-01-01 00:00:31" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x505158bd58a6fe3953994669678743e7436c19a19b397c15cb1450441521111b weight=0
+time="2000-01-01 00:00:31" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x505158bd58a6 headSlot=14 payloadID=0x0301e88f18f0 prefix=blockchain
+time="2000-01-01 00:00:31" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=15
+time="2000-01-01 00:00:31" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=21ms slot=15 validator=5
+time="2000-01-01 00:00:31" level=info msg="Synced new block" block=0xef01fb69... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=15
+time="2000-01-01 00:00:31" level=info msg="Finished applying state transition" payloadHash=0xe2168a459488 prefix=blockchain slot=15 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:33" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x7d507d67a6b5cae6bf2dfb51fb0ae4512ac6251bd463d6e3486a88ea2f57d896 prefix=blockchain slot=14
+time="2000-01-01 00:00:33" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xef01fb6968b671141aed4f8d8dad51af43c9d822fad92cf31591580a78c63edc weight=0
+time="2000-01-01 00:00:33" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xef01fb6968b6 headSlot=15 payloadID=0x037a85b4a5a5 prefix=blockchain
+time="2000-01-01 00:00:33" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=16
+time="2000-01-01 00:00:33" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=16 validator=7
+time="2000-01-01 00:00:33" level=info msg="Synced new block" block=0x9b1f5d40... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=16
+time="2000-01-01 00:00:33" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x8d0a9a2f2419 prefix=blockchain slot=16 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:35" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xe2168a459488fbe39b82c97a9bf8abfc4b84696e98e6192ee006bc33714fb4a6 prefix=blockchain slot=15
+time="2000-01-01 00:00:35" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x9b1f5d4039dff03ff1ea87da74cadd5115a04b4db3029a3f6a2c2edf75aa33ef weight=0
+time="2000-01-01 00:00:35" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x9b1f5d4039df headSlot=16 payloadID=0x036b246fc3bf prefix=blockchain
+time="2000-01-01 00:00:35" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=17
+time="2000-01-01 00:00:35" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=17 validator=7
+time="2000-01-01 00:00:35" level=info msg="Synced new block" block=0xad21418c... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=17
+time="2000-01-01 00:00:35" level=info msg="Finished applying state transition" payloadHash=0xd12c01e95c03 prefix=blockchain slot=17 syncBitsCount=64 txCount=0
+time="2000-01-01 00:00:36" level=info msg="Connected to new endpoint" endpoint="http://11.0.0.10:8200" prefix=execution
+time="2000-01-01 00:00:36" level=error msg="Beacon node is not respecting the follow distance. EL client is syncing." lastBlockNumber=5 prefix=execution
+time="2000-01-01 00:00:37" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x8d0a9a2f2419164da9994ca29794775a0f1ca38387525edf27a366375c227866 prefix=blockchain slot=16
+time="2000-01-01 00:00:37" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xad21418c59787ab2c7c34f23d24cd203b95a542ed6a1ddc050f64b0cd7b7124a weight=0
+time="2000-01-01 00:00:37" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xad21418c5978 headSlot=17 payloadID=0x0390397a2bf9 prefix=blockchain
+time="2000-01-01 00:00:37" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=18
+time="2000-01-01 00:00:37" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=18 validator=8
+time="2000-01-01 00:00:37" level=info msg="Synced new block" block=0xf3274db5... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=18
+time="2000-01-01 00:00:37" level=info msg="Finished applying state transition" payloadHash=0x752e2cfdbe7a prefix=blockchain slot=18 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:39" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xf3274db58b8307934187a7a64a850db81126d315d9a947266e712ecb33039796 weight=0
+time="2000-01-01 00:00:39" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf3274db58b83 headSlot=18 payloadID=0x03a3b9fb18ce prefix=blockchain
+time="2000-01-01 00:00:39" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=19
+time="2000-01-01 00:00:39" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=19 validator=6
+time="2000-01-01 00:00:39" level=info msg="Synced new block" block=0x55956496... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=19
+time="2000-01-01 00:00:39" level=info msg="Finished applying state transition" payloadHash=0xb547dd468343 prefix=blockchain slot=19 syncBitsCount=64 txCount=0
+time="2000-01-01 00:00:41" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x559564963e91 headSlot=19 payloadID=0x0313c7461647 prefix=blockchain
+time="2000-01-01 00:00:41" level=info msg="Synced new block" block=0xfc7819cb... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=20
+time="2000-01-01 00:00:41" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x15e4cdb8d23f prefix=blockchain slot=20 syncBitsCount=64 txCount=0
+time="2000-01-01 00:00:43" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xb547dd4683439358e507d3f1e5ecb80417dd750fefb4eb8483bf6c45e5fd6dbf prefix=blockchain slot=19
+time="2000-01-01 00:00:43" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xfc7819cb19303110278085234d8b6fcd7dd2dc3d527a2c316643ec66291dbdec weight=0
+time="2000-01-01 00:00:43" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xfc7819cb1930 headSlot=20 payloadID=0x03e511631b7a prefix=blockchain
+time="2000-01-01 00:00:43" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=21
+time="2000-01-01 00:00:43" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=21 validator=7
+time="2000-01-01 00:00:43" level=info msg="Synced new block" block=0xa03c6ae2... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=21
+time="2000-01-01 00:00:43" level=info msg="Finished applying state transition" payloadHash=0x5c5eb225e866 prefix=blockchain slot=21 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:45" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xa03c6ae26788e66331b183f993beca1ae72bd3020efdecdba4b16472b3870cc0 weight=0
+time="2000-01-01 00:00:45" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xa03c6ae26788 headSlot=21 payloadID=0x031f53175aa8 prefix=blockchain
+time="2000-01-01 00:00:45" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=22
+time="2000-01-01 00:00:45" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=23ms slot=22 validator=5
+time="2000-01-01 00:00:45" level=info msg="Synced new block" block=0x6294eefc... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=22
+time="2000-01-01 00:00:45" level=info msg="Finished applying state transition" payloadHash=0x64323ed2337a prefix=blockchain slot=22 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:47" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x6294eefce11e headSlot=22 payloadID=0x038438d4306b prefix=blockchain
+time="2000-01-01 00:00:47" level=info msg="Synced new block" block=0xe29044a5... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=23
+time="2000-01-01 00:00:47" level=info msg="Finished applying state transition" attestations=1 payloadHash=0xe5a3163950c0 prefix=blockchain slot=23 syncBitsCount=64 txCount=0
+time="2000-01-01 00:00:49" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x64323ed2337a64df43e4b2353242c0abbe65c2d109fb65d24464c2d80c6f68b7 prefix=blockchain slot=22
+time="2000-01-01 00:00:49" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xe29044a51f51 headSlot=23 payloadID=0x0303ba67fa91 prefix=blockchain
+time="2000-01-01 00:00:49" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=24
+time="2000-01-01 00:00:49" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=24 validator=7
+time="2000-01-01 00:00:49" level=info msg="Synced new block" block=0xaf9f476c... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=24
+time="2000-01-01 00:00:49" level=info msg="Finished applying state transition" payloadHash=0x9c766525d29e prefix=blockchain slot=24 syncBitsCount=0 txCount=0
+time="2000-01-01 00:00:51" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xe29044a51f51 headSlot=23 payloadID=0x03a04bef79d1 prefix=blockchain
+time="2000-01-01 00:00:51" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=25
+time="2000-01-01 00:00:51" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=21ms slot=25 validator=7
+time="2000-01-01 00:00:51" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xbb1edc3d8899 headSlot=25 payloadID=0x03d731d66348 prefix=blockchain
+time="2000-01-01 00:00:51" level=info msg="Synced new block" block=0xbb1edc3d... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=25
+time="2000-01-01 00:00:51" level=info msg="Finished applying state transition" payloadHash=0x2cbc2670c336 prefix=blockchain slot=25 syncBitsCount=256 txCount=0
+time="2000-01-01 00:00:53" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=26
+time="2000-01-01 00:00:53" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=26 validator=5
+time="2000-01-01 00:00:53" level=info msg="Synced new block" block=0xaa694c29... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=26
+time="2000-01-01 00:00:53" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x3be6db41a00b prefix=blockchain slot=26 syncBitsCount=384 txCount=0
+time="2000-01-01 00:00:55" level=info msg="Chain reorg occurred" commonAncestorRoot=0xbb1edc3d8899c3e12073db3e7520c36fc092ddf7b8bb3aff33fa7149bfa4c763 depth=2 distance=3 newRoot=0xd6b68594e6ed69af28a249858024456f6308dfe0553c8bf5721070d5a35eb2c2 newSlot=27 newWeight=0 oldRoot=0xaa694c2936fc23a222a053fdb7ffc81ed7c7f17474fe9713b34d9bd229bb4737 oldSlot=26 oldWeight=0 prefix=blockchain
+time="2000-01-01 00:00:55" level=info msg="Synced new block" block=0xd6b68594... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=27
+time="2000-01-01 00:00:55" level=info msg="Finished applying state transition" payloadHash=0xba2e2db86aa3 prefix=blockchain slot=27 syncBitsCount=193 txCount=0
+time="2000-01-01 00:00:57" level=info msg="Synced new block" block=0xaf381d95... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=28
+time="2000-01-01 00:00:57" level=info msg="Finished applying state transition" payloadHash=0x1e7ec26158db prefix=blockchain slot=28 syncBitsCount=384 txCount=0
+time="2000-01-01 00:00:59" level=info msg="Synced new block" block=0x3f7c46d1... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=29
+time="2000-01-01 00:00:59" level=info msg="Finished applying state transition" attestations=1 payloadHash=0xa88f9e3508d6 prefix=blockchain slot=29 syncBitsCount=128 txCount=0
+time="2000-01-01 00:01:01" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x3f7c46d191aa headSlot=29 payloadID=0x0311a1d9c3c7 prefix=blockchain
+time="2000-01-01 00:01:01" level=info msg="Synced new block" block=0x808ea1f5... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=30
+time="2000-01-01 00:01:01" level=info msg="Finished applying state transition" payloadHash=0xb43381cc4cc7 prefix=blockchain slot=30 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:03" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x808ea1f5e1ad13a2ed3bac642fb03c62ed5d2e2b8c3b829b93100e7ee456dd2a weight=0
+time="2000-01-01 00:01:03" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x808ea1f5e1ad headSlot=30 payloadID=0x0373177629d0 prefix=blockchain
+time="2000-01-01 00:01:03" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=29ms slot=31
+time="2000-01-01 00:01:03" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=33ms slot=31 validator=9
+time="2000-01-01 00:01:03" level=info msg="Synced new block" block=0x18b57bbf... epoch=0 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=31
+time="2000-01-01 00:01:03" level=info msg="Finished applying state transition" payloadHash=0xb310854df375 prefix=blockchain slot=31 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:05" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:01:05" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_9/ssz_snappy"
+time="2000-01-01 00:01:05" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:01:05" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_19/ssz_snappy"
+time="2000-01-01 00:01:05" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:01:05" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_25/ssz_snappy"
+time="2000-01-01 00:01:05" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:01:05" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_28/ssz_snappy"
+time="2000-01-01 00:01:05" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:01:05" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_31/ssz_snappy"
+time="2000-01-01 00:01:05" level=error msg="could not process new slot" error="0x0000000000000000000000000000000000000000000000000000000000000000: unknown finalized root" prefix=blockchain
+time="2000-01-01 00:01:05" level=info msg="Synced new block" block=0x0ff0423f... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=32
+time="2000-01-01 00:01:05" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x41d8d6931601 prefix=blockchain slot=32 syncBitsCount=256 txCount=0
+time="2000-01-01 00:01:07" level=info msg="Chain reorg occurred" commonAncestorRoot=0x18b57bbfad6df6eb540bdc6abd4091c0ab25444be48d42ac26868fd8cc49db4f depth=2 distance=3 newRoot=0xcd799e3eff67ffeeb22d32f113e5b7477d41796f41dd68f2566126a289053066 newSlot=33 newWeight=0 oldRoot=0x0ff0423ff6db139b0f8e47ecf546a2aa85fbdedfb831fe428b0583db6bbaf64b oldSlot=32 oldWeight=0 prefix=blockchain
+time="2000-01-01 00:01:07" level=info msg="Synced new block" block=0xcd799e3e... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=33
+time="2000-01-01 00:01:07" level=info msg="Finished applying state transition" payloadHash=0x33baa672f9b5 prefix=blockchain slot=33 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:09" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xcd799e3eff67 headSlot=33 payloadID=0x03a80db33b9d prefix=blockchain
+time="2000-01-01 00:01:09" level=info msg="Synced new block" block=0xa0df23f5... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=34
+time="2000-01-01 00:01:09" level=info msg="Finished applying state transition" payloadHash=0xfd2694326b2d prefix=blockchain slot=34 syncBitsCount=128 txCount=0
+time="2000-01-01 00:01:11" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x33baa672f9b50377ff59800dfd227dd696c97f7c70f488aeae34a2f7839620b9 prefix=blockchain slot=33
+time="2000-01-01 00:01:11" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xa0df23f5c6bf39efd01f439f491ae985eac023673d12d80de99b2a432a1bee70 weight=0
+time="2000-01-01 00:01:11" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xa0df23f5c6bf headSlot=34 payloadID=0x034e76351539 prefix=blockchain
+time="2000-01-01 00:01:11" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=35
+time="2000-01-01 00:01:11" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=35 validator=8
+time="2000-01-01 00:01:11" level=info msg="Synced new block" block=0xcc82c643... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=35
+time="2000-01-01 00:01:11" level=info msg="Finished applying state transition" payloadHash=0x96eeb2628744 prefix=blockchain slot=35 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:13" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xfd2694326b2d967f5f50badd6e27622c800c5739ecb8549c53f3e0b2c776c4cd prefix=blockchain slot=34
+time="2000-01-01 00:01:13" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xcc82c643a9fb70f162353a9076ded29989675fd84f9aaf960aa85380b837572e weight=0
+time="2000-01-01 00:01:13" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xcc82c643a9fb headSlot=35 payloadID=0x0362dfd63636 prefix=blockchain
+time="2000-01-01 00:01:13" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=36
+time="2000-01-01 00:01:13" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=36 validator=9
+time="2000-01-01 00:01:13" level=info msg="Synced new block" block=0x2b52c48e... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=36
+time="2000-01-01 00:01:13" level=info msg="Finished applying state transition" attestations=1 payloadHash=0xe16102e9bf35 prefix=blockchain slot=36 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:15" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x96eeb26287448bdbf64556f826fd6c52c59f005442fac45d0d44d1cc0548d49a prefix=blockchain slot=35
+time="2000-01-01 00:01:15" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x2b52c48e242f headSlot=36 payloadID=0x039d85236d5c prefix=blockchain
+time="2000-01-01 00:01:15" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=37
+time="2000-01-01 00:01:15" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=37 validator=7
+time="2000-01-01 00:01:17" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x2b52c48e242f headSlot=36 payloadID=0x03e0e09e04fe prefix=blockchain
+time="2000-01-01 00:01:17" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=38
+time="2000-01-01 00:01:17" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=38 validator=9
+time="2000-01-01 00:01:17" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xd07ca21fc7e7 headSlot=38 payloadID=0x0393b88f1ac1 prefix=blockchain
+time="2000-01-01 00:01:17" level=info msg="Synced new block" block=0xd07ca21f... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=38
+time="2000-01-01 00:01:17" level=info msg="Finished applying state transition" payloadHash=0x5d553a57676d prefix=blockchain slot=38 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:19" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=39
+time="2000-01-01 00:01:19" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=39 validator=6
+time="2000-01-01 00:01:19" level=info msg="Synced new block" block=0xe4e7597a... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=39
+time="2000-01-01 00:01:19" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x11983b4651b1 prefix=blockchain slot=39 syncBitsCount=256 txCount=0
+time="2000-01-01 00:01:21" level=info msg="Connected peers" inboundTCP=0 outboundTCP=1 prefix=p2p total=1
+time="2000-01-01 00:01:21" level=info msg="Synced new block" block=0x070a9686... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=40
+time="2000-01-01 00:01:21" level=info msg="Finished applying state transition" payloadHash=0x266e9ffc19e9 prefix=blockchain slot=40 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:23" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xe4e7597a358f headSlot=39 payloadID=0x03389cb887cb prefix=blockchain
+time="2000-01-01 00:01:24" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf3bca6dd5740 headSlot=41 payloadID=0x03a71e7f9df5 prefix=blockchain
+time="2000-01-01 00:01:24" level=info msg="Synced new block" block=0xf3bca6dd... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=41
+time="2000-01-01 00:01:24" level=info msg="Finished applying state transition" payloadHash=0xd5a5fd653e85 prefix=blockchain slot=41 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:25" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=42
+time="2000-01-01 00:01:25" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=42 validator=6
+time="2000-01-01 00:01:25" level=info msg="Synced new block" block=0xf110161d... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=42
+time="2000-01-01 00:01:25" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x2aa85e7c6808 prefix=blockchain slot=42 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:27" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf110161dfaaf headSlot=42 payloadID=0x03b5620bc500 prefix=blockchain
+time="2000-01-01 00:01:27" level=info msg="Synced new block" block=0xc504d2fb... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=43
+time="2000-01-01 00:01:27" level=info msg="Finished applying state transition" payloadHash=0x4304a582b857 prefix=blockchain slot=43 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:29" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x2aa85e7c6808300a3845cb3b4f610a53d744c499279274ded9421a5301826ccb prefix=blockchain slot=42
+time="2000-01-01 00:01:29" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xc504d2fbaeaebddc37a47bd3d45fc3a098cd18778a9d762c915ea5660ad244cc weight=0
+time="2000-01-01 00:01:29" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xc504d2fbaeae headSlot=43 payloadID=0x032e23f2d603 prefix=blockchain
+time="2000-01-01 00:01:29" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=44
+time="2000-01-01 00:01:29" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=44 validator=7
+time="2000-01-01 00:01:29" level=info msg="Synced new block" block=0xd0f5d32c... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=44
+time="2000-01-01 00:01:29" level=info msg="Finished applying state transition" payloadHash=0x6741705420fa prefix=blockchain slot=44 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:31" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xd0f5d32c7d90feb4e0e2d12517608dda40b8ecae26cf13744258af7319215192 weight=0
+time="2000-01-01 00:01:31" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xd0f5d32c7d90 headSlot=44 payloadID=0x03175585d2c9 prefix=blockchain
+time="2000-01-01 00:01:31" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=45
+time="2000-01-01 00:01:31" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=45 validator=8
+time="2000-01-01 00:01:31" level=info msg="Synced new block" block=0xe00c3026... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=45
+time="2000-01-01 00:01:31" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x1a9111e6e459 prefix=blockchain slot=45 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:33" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xe00c3026b2a4 headSlot=45 payloadID=0x036dcd759634 prefix=blockchain
+time="2000-01-01 00:01:33" level=info msg="Synced new block" block=0xaf35a91e... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=46
+time="2000-01-01 00:01:33" level=info msg="Finished applying state transition" payloadHash=0xe252965718e5 prefix=blockchain slot=46 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:35" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=47
+time="2000-01-01 00:01:35" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=47 validator=5
+time="2000-01-01 00:01:35" level=info msg="Synced new block" block=0x9008e429... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=47
+time="2000-01-01 00:01:35" level=info msg="Finished applying state transition" payloadHash=0x4c5331aa33fc prefix=blockchain slot=47 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:37" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x9008e4299496 headSlot=47 payloadID=0x03e83780b95d prefix=blockchain
+time="2000-01-01 00:01:37" level=info msg="Synced new block" block=0xb6823b8e... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=48
+time="2000-01-01 00:01:37" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x47a05c74ff93 prefix=blockchain slot=48 syncBitsCount=256 txCount=0
+time="2000-01-01 00:01:39" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=49
+time="2000-01-01 00:01:39" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=49 validator=6
+time="2000-01-01 00:01:39" level=info msg="Synced new block" block=0x3705d468... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=49
+time="2000-01-01 00:01:39" level=info msg="Finished applying state transition" payloadHash=0x9c13470a4133 prefix=blockchain slot=49 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:41" level=info msg="Synced new block" block=0x23383ce1... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=50
+time="2000-01-01 00:01:41" level=info msg="Finished applying state transition" payloadHash=0xfdd9e426ec94 prefix=blockchain slot=50 syncBitsCount=384 txCount=0
+time="2000-01-01 00:01:43" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x23383ce1ab6a headSlot=50 payloadID=0x031f6c2ee03d prefix=blockchain
+time="2000-01-01 00:01:43" level=info msg="Synced new block" block=0x23b45707... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=51
+time="2000-01-01 00:01:43" level=info msg="Finished applying state transition" payloadHash=0x272953a4f6e5 prefix=blockchain slot=51 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:45" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x23b457077a90e290a1ce5819df514ba40585c82b584ca77516062c3ed35bc19e weight=0
+time="2000-01-01 00:01:45" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x23b457077a90 headSlot=51 payloadID=0x0317475f812c prefix=blockchain
+time="2000-01-01 00:01:45" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=52
+time="2000-01-01 00:01:45" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=52 validator=6
+time="2000-01-01 00:01:45" level=info msg="Synced new block" block=0x8909ce2e... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=52
+time="2000-01-01 00:01:45" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x450ca40a1794 prefix=blockchain slot=52 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:47" level=info msg="Synced new block" block=0x75597ae7... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=53
+time="2000-01-01 00:01:47" level=info msg="Finished applying state transition" payloadHash=0xc3b8f957a559 prefix=blockchain slot=53 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:49" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x75597ae786df headSlot=53 payloadID=0x038890924488 prefix=blockchain
+time="2000-01-01 00:01:49" level=info msg="Synced new block" block=0xbb7fdd82... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=54
+time="2000-01-01 00:01:49" level=info msg="Finished applying state transition" payloadHash=0x1bf45987cd26 prefix=blockchain slot=54 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:51" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xbb7fdd82bc46d5df224aff4fc23d7e8fbe74337afc475d7f08ab8188106766fd weight=0
+time="2000-01-01 00:01:51" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xbb7fdd82bc46 headSlot=54 payloadID=0x03af624eb8bc prefix=blockchain
+time="2000-01-01 00:01:51" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=55
+time="2000-01-01 00:01:51" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=55 validator=8
+time="2000-01-01 00:01:51" level=info msg="Synced new block" block=0x964baf49... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=55
+time="2000-01-01 00:01:51" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x4430ae585dfe prefix=blockchain slot=55 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:53" level=info msg="Chain reorg occurred" commonAncestorRoot=0xbb7fdd82bc46d5df224aff4fc23d7e8fbe74337afc475d7f08ab8188106766fd depth=2 distance=3 newRoot=0xc810bf2910812f1adca205bc91fc057fc84dacabb54761a5e59997359a871594 newSlot=56 newWeight=0 oldRoot=0x964baf4986a1400bfb60f155ee5645581df93f6891056e1b37ac93dba4fb1388 oldSlot=55 oldWeight=0 prefix=blockchain
+time="2000-01-01 00:01:53" level=info msg="Synced new block" block=0xc810bf29... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=56
+time="2000-01-01 00:01:53" level=info msg="Finished applying state transition" payloadHash=0x1c9c8dcedfa3 prefix=blockchain slot=56 syncBitsCount=64 txCount=0
+time="2000-01-01 00:01:55" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xc810bf291081 headSlot=56 payloadID=0x03b433ece92d prefix=blockchain
+time="2000-01-01 00:01:55" level=info msg="Synced new block" block=0xf3f4a97c... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=57
+time="2000-01-01 00:01:55" level=info msg="Finished applying state transition" payloadHash=0x9b203721c827 prefix=blockchain slot=57 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:57" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xf3f4a97ca4f91f5f00b0417a78551a2ab38647799a24f5dc0628b95b64dacc54 weight=0
+time="2000-01-01 00:01:57" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf3f4a97ca4f9 headSlot=57 payloadID=0x0346fc510fc6 prefix=blockchain
+time="2000-01-01 00:01:57" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=58
+time="2000-01-01 00:01:57" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=58 validator=8
+time="2000-01-01 00:01:57" level=info msg="Synced new block" block=0x56cba4bf... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=58
+time="2000-01-01 00:01:57" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x07af6fea7db2 prefix=blockchain slot=58 syncBitsCount=0 txCount=0
+time="2000-01-01 00:01:59" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x56cba4bfab6f headSlot=58 payloadID=0x032ba9a58449 prefix=blockchain
+time="2000-01-01 00:01:59" level=info msg="Synced new block" block=0x45133964... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=59
+time="2000-01-01 00:01:59" level=info msg="Finished applying state transition" payloadHash=0xe4539880cfdb prefix=blockchain slot=59 syncBitsCount=64 txCount=0
+time="2000-01-01 00:02:01" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x45133964e018301f15390777be1b5f6da716ca490a48957322ff6a70da52b558 weight=0
+time="2000-01-01 00:02:01" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x45133964e018 headSlot=59 payloadID=0x031071da9814 prefix=blockchain
+time="2000-01-01 00:02:01" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=60
+time="2000-01-01 00:02:01" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=60 validator=5
+time="2000-01-01 00:02:01" level=info msg="Synced new block" block=0x83d5aacc... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=60
+time="2000-01-01 00:02:01" level=info msg="Finished applying state transition" payloadHash=0x8a0c29d705eb prefix=blockchain slot=60 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:03" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x83d5aaccdd4e headSlot=60 payloadID=0x0393edd2c900 prefix=blockchain
+time="2000-01-01 00:02:03" level=info msg="Synced new block" block=0x33dd9e69... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=61
+time="2000-01-01 00:02:03" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x42d8be61923a prefix=blockchain slot=61 syncBitsCount=64 txCount=0
+time="2000-01-01 00:02:05" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x8a0c29d705ebda27cdaed6d8e839520bf819a422d50ef8edb351791119dca2f2 prefix=blockchain slot=60
+time="2000-01-01 00:02:05" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x33dd9e697dcd headSlot=61 payloadID=0x03b265862923 prefix=blockchain
+time="2000-01-01 00:02:05" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=62
+time="2000-01-01 00:02:05" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=62 validator=5
+time="2000-01-01 00:02:05" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x67a500d207db headSlot=62 payloadID=0x03ab1c431362 prefix=blockchain
+time="2000-01-01 00:02:05" level=info msg="Chain reorg occurred" commonAncestorRoot=0x83d5aaccdd4ed5b25da93e87d4d326f5a4ed4c1c23b4670f4823991b8628f641 depth=2 distance=3 newRoot=0x67a500d207db0f17dfa587fb97ebb37dea8f7cb4953d0874ff8d9ac5350d0f4f newSlot=62 newWeight=0 oldRoot=0x33dd9e697dcd13cbaf5b9392b6bfb7b4f1127b2b198eea9a929bc10a86d71a48 oldSlot=61 oldWeight=0 prefix=blockchain
+time="2000-01-01 00:02:05" level=info msg="Synced new block" block=0x67a500d2... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=62
+time="2000-01-01 00:02:05" level=info msg="Finished applying state transition" payloadHash=0xe6b4e1228653 prefix=blockchain slot=62 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:07" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=31ms slot=63
+time="2000-01-01 00:02:07" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=33ms slot=63 validator=8
+time="2000-01-01 00:02:07" level=info msg="Synced new block" block=0x5df0a39e... epoch=1 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=63
+time="2000-01-01 00:02:07" level=info msg="Finished applying state transition" payloadHash=0x74133c381a56 prefix=blockchain slot=63 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:09" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:02:09" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_12/ssz_snappy"
+time="2000-01-01 00:02:09" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:02:09" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_15/ssz_snappy"
+time="2000-01-01 00:02:09" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:02:09" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_25/ssz_snappy"
+time="2000-01-01 00:02:09" level=warning msg="Subnet weight is 0, skipping initializing topic scoring" prefix=p2p
+time="2000-01-01 00:02:09" level=info msg="Subscribed to" prefix=sync topic="/eth2/1ceef95a/beacon_attestation_28/ssz_snappy"
+time="2000-01-01 00:02:09" level=error msg="could not process new slot" error="0x0000000000000000000000000000000000000000000000000000000000000000: unknown finalized root" prefix=blockchain
+time="2000-01-01 00:02:09" level=info msg="Synced new block" block=0xbd7fb3ec... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=64
+time="2000-01-01 00:02:09" level=info msg="Finished applying state transition" attestations=1 payloadHash=0xab33b831d335 prefix=blockchain slot=64 syncBitsCount=384 txCount=0
+time="2000-01-01 00:02:11" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xbd7fb3ec0c39 headSlot=64 payloadID=0x039b56989abf prefix=blockchain
+time="2000-01-01 00:02:11" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xe97faddb909a headSlot=65 payloadID=0x036acf3ac77e prefix=blockchain
+time="2000-01-01 00:02:11" level=info msg="Chain reorg occurred" commonAncestorRoot=0x5df0a39ed258848ab39fe88f743246396413989a64e3e352ab1799ba65ee1163 depth=2 distance=3 newRoot=0xe97faddb909abf0a37a6ee24823928b394da25a5c8427807829572f6acf418f4 newSlot=65 newWeight=0 oldRoot=0xbd7fb3ec0c39e0c65eb538caec906a1715d0f2480be4c97ae6eaf30ae902f79a oldSlot=64 oldWeight=0 prefix=blockchain
+time="2000-01-01 00:02:11" level=info msg="Synced new block" block=0xe97faddb... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=65
+time="2000-01-01 00:02:11" level=info msg="Finished applying state transition" payloadHash=0x4627db5405be prefix=blockchain slot=65 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:13" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=66
+time="2000-01-01 00:02:13" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=66 validator=9
+time="2000-01-01 00:02:13" level=info msg="Synced new block" block=0x6c8cc106... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=66
+time="2000-01-01 00:02:13" level=info msg="Finished applying state transition" payloadHash=0x6b26ae17ac82 prefix=blockchain slot=66 syncBitsCount=64 txCount=0
+time="2000-01-01 00:02:15" level=info msg="Synced new block" block=0xefd645d9... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=67
+time="2000-01-01 00:02:15" level=info msg="Finished applying state transition" payloadHash=0xec2c2fe65b57 prefix=blockchain slot=67 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:17" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xefd645d9abaa headSlot=67 payloadID=0x03052eeb3a20 prefix=blockchain
+time="2000-01-01 00:02:17" level=info msg="Synced new block" block=0xfd0d0d7c... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=68
+time="2000-01-01 00:02:17" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x0d4f7a3e8002 prefix=blockchain slot=68 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:19" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xec2c2fe65b57e11222948fb4eb5aaa89ef6df4b58d598695e496ce0a14768c7c prefix=blockchain slot=67
+time="2000-01-01 00:02:19" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xfd0d0d7cec298c871049fe7e3d91169c9176da20a12bcb12fa5c81904c27ecda weight=0
+time="2000-01-01 00:02:19" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xfd0d0d7cec29 headSlot=68 payloadID=0x03c24abcb2af prefix=blockchain
+time="2000-01-01 00:02:19" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=69
+time="2000-01-01 00:02:19" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=69 validator=8
+time="2000-01-01 00:02:19" level=info msg="Synced new block" block=0x7d0c2de1... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=69
+time="2000-01-01 00:02:19" level=info msg="Finished applying state transition" payloadHash=0xe2cd89af72d9 prefix=blockchain slot=69 syncBitsCount=128 txCount=0
+time="2000-01-01 00:02:21" level=info msg="Connected peers" inboundTCP=0 outboundTCP=1 prefix=p2p total=1
+time="2000-01-01 00:02:21" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x0d4f7a3e80025c78cfaf9186d4901262cbfe79f4001cbe19ca2ff2a82110511c prefix=blockchain slot=68
+time="2000-01-01 00:02:21" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x7d0c2de11c775606cafb49ee82e0714a7b99764fb4e0403c66eed570d78db483 weight=0
+time="2000-01-01 00:02:21" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x7d0c2de11c77 headSlot=69 payloadID=0x031610bf3f69 prefix=blockchain
+time="2000-01-01 00:02:21" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=70
+time="2000-01-01 00:02:21" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=70 validator=6
+time="2000-01-01 00:02:21" level=info msg="Synced new block" block=0xe4186825... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=70
+time="2000-01-01 00:02:21" level=info msg="Finished applying state transition" payloadHash=0xed6ec08adc86 prefix=blockchain slot=70 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:23" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xe2cd89af72d9e45e616cd30e8f9d6d3826bced3980402a8fd3deba18b5d80c67 prefix=blockchain slot=69
+time="2000-01-01 00:02:23" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xe41868257c58773328c20a8b7434954d92d2ba7a101dee037594dbd712ef88f0 weight=0
+time="2000-01-01 00:02:23" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xe41868257c58 headSlot=70 payloadID=0x03728c77a22e prefix=blockchain
+time="2000-01-01 00:02:23" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=71
+time="2000-01-01 00:02:23" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=71 validator=6
+time="2000-01-01 00:02:23" level=info msg="Synced new block" block=0x023b3c15... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=71
+time="2000-01-01 00:02:23" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x521bd9157a6b prefix=blockchain slot=71 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:25" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xed6ec08adc863347cf622423030105ac90e581cad42b211c1d5c8c6ef3c3691d prefix=blockchain slot=70
+time="2000-01-01 00:02:25" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x023b3c154d89 headSlot=71 payloadID=0x03fe003061da prefix=blockchain
+time="2000-01-01 00:02:25" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=72
+time="2000-01-01 00:02:25" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=72 validator=8
+time="2000-01-01 00:02:27" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=73
+time="2000-01-01 00:02:27" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=73 validator=8
+time="2000-01-01 00:02:27" level=info msg="Synced new block" block=0x853a35a0... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=73
+time="2000-01-01 00:02:27" level=info msg="Finished applying state transition" payloadHash=0x728dde5773a4 prefix=blockchain slot=73 syncBitsCount=256 txCount=0
+time="2000-01-01 00:02:29" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x853a35a0f7b8 headSlot=73 payloadID=0x0389b6f518c0 prefix=blockchain
+time="2000-01-01 00:02:29" level=info msg="Synced new block" block=0x5fc4f5ea... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=74
+time="2000-01-01 00:02:29" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x2b285a5ed5b8 prefix=blockchain slot=74 syncBitsCount=128 txCount=0
+time="2000-01-01 00:02:31" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=75
+time="2000-01-01 00:02:31" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=75 validator=5
+time="2000-01-01 00:02:31" level=info msg="Chain reorg occurred" commonAncestorRoot=0x853a35a0f7b8fcdb7121df00701a37f3b96c98e7dad64605d65fa2ef47ef13d1 depth=2 distance=3 newRoot=0x64679aad221befa9338e2719e80fc93fbc59734a4ceff8d8263e70fc6f79c7ca newSlot=75 newWeight=0 oldRoot=0x5fc4f5ea631df6936c3e2421aa50f149d427c114f15aa81df84f4c8bd9eeb201 oldSlot=74 oldWeight=0 prefix=blockchain
+time="2000-01-01 00:02:31" level=info msg="Synced new block" block=0x64679aad... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=75
+time="2000-01-01 00:02:31" level=info msg="Finished applying state transition" payloadHash=0xbde84056c241 prefix=blockchain slot=75 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:33" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x64679aad221b headSlot=75 payloadID=0x033e8a14019f prefix=blockchain
+time="2000-01-01 00:02:33" level=info msg="Synced new block" block=0x0150d99d... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=76
+time="2000-01-01 00:02:33" level=info msg="Finished applying state transition" payloadHash=0xf83bf8851bea prefix=blockchain slot=76 syncBitsCount=256 txCount=0
+time="2000-01-01 00:02:35" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x0150d99d27a9640967684b8de80026444ee04f740732f9d714beca473f6ab768 weight=0
+time="2000-01-01 00:02:35" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x0150d99d27a9 headSlot=76 payloadID=0x0376d86e774d prefix=blockchain
+time="2000-01-01 00:02:35" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=77
+time="2000-01-01 00:02:35" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=77 validator=6
+time="2000-01-01 00:02:35" level=info msg="Synced new block" block=0xfbea24c3... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=77
+time="2000-01-01 00:02:35" level=info msg="Finished applying state transition" attestations=1 payloadHash=0xea18c588d3d1 prefix=blockchain slot=77 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:37" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xfbea24c3150f headSlot=77 payloadID=0x03a8b2a6a6a5 prefix=blockchain
+time="2000-01-01 00:02:37" level=info msg="Synced new block" block=0x3325d7d6... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=78
+time="2000-01-01 00:02:37" level=info msg="Finished applying state transition" payloadHash=0x10664263d08d prefix=blockchain slot=78 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:39" level=error msg="Received nil payload ID on VALID engine response" blockHash=0xea18c588d3d103bfdc3bb25c50bda9ef9299867ee728f70e74dceac43f948457 prefix=blockchain slot=77
+time="2000-01-01 00:02:39" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x3325d7d6fd46bac90ece6c78442ebee909b21e41a4c70c614980efee950cec9f weight=0
+time="2000-01-01 00:02:39" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x3325d7d6fd46 headSlot=78 payloadID=0x0333b38c4b7e prefix=blockchain
+time="2000-01-01 00:02:39" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=79
+time="2000-01-01 00:02:39" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=23ms slot=79 validator=5
+time="2000-01-01 00:02:39" level=info msg="Synced new block" block=0x450fb779... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=79
+time="2000-01-01 00:02:39" level=info msg="Finished applying state transition" payloadHash=0x7bb796ef2d03 prefix=blockchain slot=79 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:41" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x10664263d08dc2290fc88c693625a26e8b690211a8023b69ba16f83039afd449 prefix=blockchain slot=78
+time="2000-01-01 00:02:41" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x450fb779b5865b4b776c0b2d8c12e8b0071e16ebf3706f73caa308d5f6cd73c2 weight=0
+time="2000-01-01 00:02:41" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x450fb779b586 headSlot=79 payloadID=0x035387dc39ba prefix=blockchain
+time="2000-01-01 00:02:41" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=80
+time="2000-01-01 00:02:41" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=80 validator=6
+time="2000-01-01 00:02:41" level=info msg="Synced new block" block=0xdc3253f7... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=80
+time="2000-01-01 00:02:41" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x9fde9bd7ddcc prefix=blockchain slot=80 syncBitsCount=64 txCount=0
+time="2000-01-01 00:02:43" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x7bb796ef2d0368e4d4e8801f62d94c67618efa8f4513dc436eeccdb78387fb91 prefix=blockchain slot=79
+time="2000-01-01 00:02:43" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xdc3253f7f7c3625bbe5fac7767f10444380405e8490d899bbe1cde6f428cb40c weight=0
+time="2000-01-01 00:02:43" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xdc3253f7f7c3 headSlot=80 payloadID=0x036eb8746d76 prefix=blockchain
+time="2000-01-01 00:02:43" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=81
+time="2000-01-01 00:02:43" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=81 validator=8
+time="2000-01-01 00:02:43" level=info msg="Synced new block" block=0xf234da03... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=81
+time="2000-01-01 00:02:43" level=info msg="Finished applying state transition" payloadHash=0x3ccfcaa6b988 prefix=blockchain slot=81 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:45" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0xf234da031def45753a9d68ece33472ade9d210a243b3191d2eac814f6476ce2b weight=0
+time="2000-01-01 00:02:45" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf234da031def headSlot=81 payloadID=0x037315905a5b prefix=blockchain
+time="2000-01-01 00:02:45" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=82
+time="2000-01-01 00:02:45" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=82 validator=8
+time="2000-01-01 00:02:45" level=info msg="Synced new block" block=0xd2de58c4... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=82
+time="2000-01-01 00:02:45" level=info msg="Finished applying state transition" payloadHash=0x9208edfbeffd prefix=blockchain slot=82 syncBitsCount=128 txCount=0
+time="2000-01-01 00:02:47" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xd2de58c4f3c7 headSlot=82 payloadID=0x03082316f653 prefix=blockchain
+time="2000-01-01 00:02:47" level=info msg="Synced new block" block=0x977da417... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=83
+time="2000-01-01 00:02:47" level=info msg="Finished applying state transition" payloadHash=0xadcc308740b6 prefix=blockchain slot=83 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:49" level=error msg="Received nil payload ID on VALID engine response" blockHash=0x9208edfbeffd387369a8c0c9cd7d9607e7b0b8f103387bee25831bcb1cebadc2 prefix=blockchain slot=82
+time="2000-01-01 00:02:49" level=info msg="Attempted late block reorg aborted due to attestations at 2 seconds" prefix=blockchain root=0x977da417b1c4958d61d8ae02c7dfb532072bccade51e277205ac28af09c4875c weight=0
+time="2000-01-01 00:02:49" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x977da417b1c4 headSlot=83 payloadID=0x03696dc1afbd prefix=blockchain
+time="2000-01-01 00:02:49" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=84
+time="2000-01-01 00:02:49" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=84 validator=6
+time="2000-01-01 00:02:49" level=info msg="Synced new block" block=0x03cca418... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=84
+time="2000-01-01 00:02:49" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x59db313d0b4e prefix=blockchain slot=84 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:51" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=85
+time="2000-01-01 00:02:51" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=85 validator=6
+time="2000-01-01 00:02:53" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x03cca4184c52 headSlot=84 payloadID=0x03c5b571a601 prefix=blockchain
+time="2000-01-01 00:02:53" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0x9da06d59f573 headSlot=86 payloadID=0x033b42f0d6af prefix=blockchain
+time="2000-01-01 00:02:53" level=info msg="Synced new block" block=0x9da06d59... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=86
+time="2000-01-01 00:02:53" level=info msg="Finished applying state transition" payloadHash=0x4558f3a83db9 prefix=blockchain slot=86 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:55" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=13ms slot=87
+time="2000-01-01 00:02:55" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=15ms slot=87 validator=6
+time="2000-01-01 00:02:55" level=info msg="Synced new block" block=0xf8486abc... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=87
+time="2000-01-01 00:02:55" level=info msg="Finished applying state transition" attestations=1 payloadHash=0x3cd1b20e6142 prefix=blockchain slot=87 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:57" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf8486abcb316 headSlot=87 payloadID=0x0340606af442 prefix=blockchain
+time="2000-01-01 00:02:57" level=info msg="Synced new block" block=0x5e0697e3... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=88
+time="2000-01-01 00:02:57" level=info msg="Finished applying state transition" payloadHash=0x6cd5a3610cbf prefix=blockchain slot=88 syncBitsCount=0 txCount=0
+time="2000-01-01 00:02:59" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xf8486abcb316 headSlot=87 payloadID=0x0317241c175e prefix=blockchain
+time="2000-01-01 00:02:59" level=info msg="Begin building block" prefix="rpc/validator" sinceSlotStartTime=17ms slot=89
+time="2000-01-01 00:02:59" level=info msg="Finished building block" prefix="rpc/validator" sinceSlotStartTime=19ms slot=89 validator=7
+time="2000-01-01 00:02:59" level=info msg="Forkchoice updated with payload attributes for proposal" blockRoot=0xecddc7bcd19e headSlot=89 payloadID=0x03bdbfdc5569 prefix=blockchain
+time="2000-01-01 00:02:59" level=info msg="Synced new block" block=0xecddc7bc... epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... prefix=blockchain slot=89
+time="2000-01-01 00:02:59" level=info msg="Finished applying state transition" payloadHash=0xed7c059acec8 prefix=blockchain slot=89 syncBitsCount=256 txCount=0

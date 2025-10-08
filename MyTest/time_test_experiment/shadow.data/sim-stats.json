@@ -1,0 +1,45 @@
+{
+  "objects": {
+    "alloc_counts": {
+      "TaskRef": 72,
+      "Event": 30,
+      "Timer": 16,
+      "StatusListener": 14,
+      "SysCallCondition": 14,
+      "LegacyDescriptor": 8,
+      "Descriptor": 6,
+      "RegularFile": 6,
+      "Relay": 6,
+      "DescriptorTable": 4,
+      "NetworkInterface": 4,
+      "Epoll": 2,
+      "FutexTable": 2,
+      "Router": 2,
+      "Thread": 2
+    },
+    "dealloc_counts": {
+      "TaskRef": 72,
+      "Event": 30,
+      "Timer": 16,
+      "StatusListener": 14,
+      "SysCallCondition": 14,
+      "LegacyDescriptor": 8,
+      "Descriptor": 6,
+      "RegularFile": 6,
+      "Relay": 6,
+      "DescriptorTable": 4,
+      "NetworkInterface": 4,
+      "Epoll": 2,
+      "FutexTable": 2,
+      "Router": 2,
+      "Thread": 2
+    }
+  },
+  "syscalls": {
+    "unknown-syscall": 14,
+    "exit_group": 2,
+    "nanosleep": 2,
+    "newfstatat": 2,
+    "write": 2
+  }
+}

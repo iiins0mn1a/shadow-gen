@@ -1,0 +1,3 @@
+enode://2808dc1e8aafc4bda485c53a3ab8d4aec3349418f8e626633ecd3e59d27dc2856e5d010f8201998c033a1cb47f7aa1d4e939489b486eba606940a78003afca2f@11.0.0.3:0?discport=30301
+Note: you're using cmd/bootnode, a developer tool.
+We recommend using a regular node as bootstrap node for production deployments.

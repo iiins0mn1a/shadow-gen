@@ -62,6 +62,12 @@ def main():
         action="store_true", dest="do_debug",
         default=False)
 
+    parser_build.add_argument('--build-type',
+        help="CMake build type. Use RelWithDebInfo for a balance of performance and debug symbols.",
+        choices=['Release','RelWithDebInfo','Debug','MinSizeRel'],
+        dest='build_type',
+        default='Release')
+
     parser_build.add_argument('--use-perf-timers',
         help="Compile in timers for tracking the run time of various internal operations.",
         action="store_true", dest="do_use_perf_timers",
@@ -197,7 +203,26 @@ def build(args, remaining):
         return "ON" if b else "OFF"
 
     # other cmake options
-    cmake_cmd.extend(["-D", "CMAKE_BUILD_TYPE=" + ("Debug" if args.do_debug else "Release")])
+    # Respect --debug (highest priority), otherwise use --build-type.
+    # Note: Top-level CMakeLists currently supports only Release/Debug.
+    requested_build_type = 'Debug' if args.do_debug else args.build_type
+    build_type = requested_build_type
+    if requested_build_type not in ['Release', 'Debug']:
+        # Map RelWithDebInfo/MinSizeRel to the closest supported type.
+        # For RelWithDebInfo, also inject debug symbols into Release flags.
+        if requested_build_type == 'RelWithDebInfo':
+            build_type = 'Release'
+            # Enable C/C++ debug symbols with optimization for Release builds
+            cmake_cmd.extend(["-D", "CMAKE_C_FLAGS_RELEASE=-O2 -g"])
+            cmake_cmd.extend(["-D", "CMAKE_CXX_FLAGS_RELEASE=-O2 -g"])
+            # Enable Rust debug info (keeps performance reasonable)
+            os.putenv("RUSTFLAGS", "-C debuginfo=1")
+        elif requested_build_type == 'MinSizeRel':
+            build_type = 'Release'
+            cmake_cmd.extend(["-D", "CMAKE_C_FLAGS_RELEASE=-Os"])
+            cmake_cmd.extend(["-D", "CMAKE_CXX_FLAGS_RELEASE=-Os"])
+
+    cmake_cmd.extend(["-D", "CMAKE_BUILD_TYPE=" + build_type])
     if args.do_verbose: os.putenv("VERBOSE", "1")
     cmake_cmd.extend(["-D", "SHADOW_TEST=" + on_off(args.do_test)])
     cmake_cmd.extend(["-D", "SHADOW_WERROR=" + on_off(args.do_werror)])

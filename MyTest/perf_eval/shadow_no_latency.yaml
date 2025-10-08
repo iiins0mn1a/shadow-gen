@@ -1,0 +1,104 @@
+general:
+  stop_time: 3m
+  model_unblocked_syscall_latency: false
+  log_level: warning
+  parallelism: 16
+  progress: false
+network:
+  graph:
+    # 理想化快速网络（1us延迟，1000Gbit带宽）单节点拓扑
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+          host_bandwidth_up "1000 Gbit"
+          host_bandwidth_down "1000 Gbit"
+        ]
+        edge [
+          source 0
+          target 0
+          latency "1 us"
+          packet_loss 0.0
+        ]
+      ]
+hosts:
+  # 1) 生成共识层genesis（确保后续create-network-db能拷贝到位）
+  prysm-genesis:
+    network_node_id: 0
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/prysm/bazel-bin/cmd/prysmctl/prysmctl_/prysmctl
+      args: testnet generate-genesis --fork=deneb --num-validators=10 --chain-config-file=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/config.yml --geth-genesis-json-in=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/genesis.json --output-ssz=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/genesis.ssz --geth-genesis-json-out=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/genesis.json
+      start_time: 1
+  # 2) 每次运行动态清理并创建网络数据目录（包含the-node、bootnode、jwt等）
+  create-network-db:
+    network_node_id: 0
+    processes:
+    - path: /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/scripts/create-network-db.sh
+      start_time: 5
+  # 3) 生成并启动bootnode（此时目录已就绪）
+  geth-bootnode:
+    network_node_id: 0
+    ip_addr: 11.0.0.3
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/go-ethereum/build/bin/bootnode
+      args: -genkey /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/bootnode/nodekey
+      start_time: 8
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/go-ethereum/build/bin/bootnode
+      args: -nodekey /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/bootnode/nodekey -addr=11.0.0.3:30301 -verbosity=9
+      start_time: 10
+  # 4) 为执行层账户创建账户文件（脚本在每个节点循环内先account new）
+  geth-account:
+    network_node_id: 0
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/go-ethereum/build/bin/geth
+      args: account new --datadir /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution --password /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/geth_password.txt
+      start_time: 12
+  # 5) 初始化执行层genesis（脚本随后geth init）
+  geth-genesis:
+    network_node_id: 0
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/go-ethereum/build/bin/geth
+      args: init --datadir=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution /home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/genesis.json
+      start_time: 14
+  # 6) 启动执行层geth（使用虚拟IP 11.0.0.10，禁用IPC/发现）
+  geth-node:
+    network_node_id: 0
+    ip_addr: 11.0.0.10
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/go-ethereum/build/bin/geth
+      args: --networkid=32382 --http --http.api=eth,net,web3 --http.addr=0.0.0.0 --http.corsdomain="*" --http.port=8000 --port=8400 --metrics.port=8300 --ws --ws.api=eth,net,web3 --ws.addr=0.0.0.0 --ws.origins="*" --ws.port=8100 --authrpc.vhosts="*" --authrpc.addr=0.0.0.0 --authrpc.jwtsecret=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/jwtsecret --authrpc.port=8200 --datadir=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution --password=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/geth_password.txt --identity=node-0 --maxpendpeers=0 --verbosity=3 --syncmode=full --ipcdisable --nodiscover --maxpeers=0 --nat=none
+      start_time: 16
+  # 7) 启动共识层beacon-1（使用虚拟IP 11.0.0.20，连接geth 11.0.0.10:8200）
+  prysm-beacon-1:
+    network_node_id: 0
+    ip_addr: 11.0.0.20
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/prysm/bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain
+      args: --datadir=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/consensus/beacondata --min-sync-peers=0 --p2p-max-peers=5 --genesis-state=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/consensus/genesis.ssz --interop-eth1data-votes --chain-config-file=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/consensus/config.yml --contract-deployment-block=0 --chain-id=32382 --rpc-host=11.0.0.20 --rpc-port=4000 --grpc-gateway-host=11.0.0.20 --grpc-gateway-port=4100 --execution-endpoint=http://11.0.0.10:8200 --accept-terms-of-use --jwt-secret=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/jwtsecret --suggested-fee-recipient=0x123463a4b065722e99115d6c222f267d9cabb524 --minimum-peers-per-subnet=0 --p2p-tcp-port=4200 --p2p-udp-port=4300 --p2p-host-ip=11.0.0.20 --monitoring-port=4400 --verbosity=info --bootstrap-node=enode://1234567890123456789012345678901234567890123456789012345678901234@11.0.0.3:30301
+      start_time: 21
+  # 8) 启动validator-1（使用虚拟IP 11.0.0.30，连接beacon-1 11.0.0.20:4000，管理前5个验证者）
+  prysm-validator-1:
+    network_node_id: 0
+    ip_addr: 11.0.0.30
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/prysm/bazel-bin/cmd/validator/validator_/validator
+      args: --beacon-rpc-provider=11.0.0.20:4000 --datadir=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/consensus/validatordata --accept-terms-of-use --interop-num-validators=5 --interop-start-index=0 --rpc-port=7000 --grpc-gateway-port=7100 --monitoring-port=7200 --graffiti="node-0" --chain-config-file=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/consensus/config.yml
+      start_time: 26
+  # 9) 启动共识层beacon-2（使用虚拟IP 11.0.0.21，共用geth 11.0.0.10:8200）
+  prysm-beacon-2:
+    network_node_id: 0
+    ip_addr: 11.0.0.21
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/prysm/bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain
+      args: --datadir=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/beacondata --min-sync-peers=0 --p2p-max-peers=5 --genesis-state=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/genesis.ssz --interop-eth1data-votes --chain-config-file=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/config.yml --contract-deployment-block=0 --chain-id=32382 --rpc-host=11.0.0.21 --rpc-port=4001 --grpc-gateway-host=11.0.0.21 --grpc-gateway-port=4101 --execution-endpoint=http://11.0.0.10:8200 --accept-terms-of-use --jwt-secret=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/jwtsecret --suggested-fee-recipient=0x123463a4b065722e99115d6c222f267d9cabb524 --minimum-peers-per-subnet=0 --p2p-tcp-port=4201 --p2p-udp-port=4301 --p2p-host-ip=11.0.0.21 --monitoring-port=4401 --verbosity=info --peer=/ip4/11.0.0.20/tcp/4200/p2p/16Uiu2HAmFdE3HSicMFV8Tp2568e3kpJ76iZCmL26MsURJgCY7KLj --bootstrap-node=enode://1234567890123456789012345678901234567890123456789012345678901234@11.0.0.3:30301
+      start_time: 21
+  # 10) 启动validator-2（使用虚拟IP 11.0.0.31，连接beacon-2 11.0.0.21:4001，管理后5个验证者）
+  prysm-validator-2:
+    network_node_id: 0
+    ip_addr: 11.0.0.31
+    processes:
+    - path: /home/ins0/Learning/Testnet/LocalTry/ethereum-pos-testnet/dependencies/prysm/bazel-bin/cmd/validator/validator_/validator
+      args: --beacon-rpc-provider=11.0.0.21:4001 --datadir=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/validatordata --accept-terms-of-use --interop-num-validators=5 --interop-start-index=5 --rpc-port=7000 --grpc-gateway-port=7100 --monitoring-port=7200 --graffiti="node-1" --chain-config-file=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/node-2/consensus/config.yml
+      start_time: 26

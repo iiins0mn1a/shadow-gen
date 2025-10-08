@@ -1,0 +1,14 @@
+INFO [01-01|00:00:14.000] Maximum peer count                       ETH=50 total=50
+INFO [01-01|00:00:14.000] Smartcard socket not found, disabling    err="stat /run/pcscd/pcscd.comm: no such file or directory"
+ERROR[01-01|00:00:14.000] Failed to start filesystem watcher       err="function not implemented"
+INFO [01-01|00:00:14.000] Set global gas cap                       cap=50,000,000
+INFO [01-01|00:00:14.000] Initializing the KZG library             backend=gokzg
+INFO [01-01|00:00:14.000] Defaulting to pebble as the backing database
+INFO [01-01|00:00:14.000] Allocated cache and file handles         database=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/geth/chaindata cache=16.00MiB handles=16
+INFO [01-01|00:00:14.000] Opened ancient database                  database=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/geth/chaindata/ancient/chain readonly=false
+INFO [01-01|00:00:14.000] State schema set to default              scheme=path
+INFO [01-01|00:00:14.000] Opened ancient database                  database=/home/ins0/Learning/Shadow-Test/Test-Alpha/05-testnet-full/network/the-node/execution/geth/chaindata/ancient/state readonly=false
+INFO [01-01|00:00:14.000] Initialized path database                cache=16.00MiB buffer=64.00MiB history=90000
+INFO [01-01|00:00:14.000] Writing custom genesis block
+ERROR[01-01|00:00:14.000] Head block is not reachable
+INFO [01-01|00:00:14.000] Successfully wrote genesis state         database=chaindata hash=7c3032..2c960b

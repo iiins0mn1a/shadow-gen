@@ -37,7 +37,7 @@ impl SyscallHandler {
         Self::eventfd_helper(ctx, init_val, flags)
     }
 
-    fn eventfd_helper(
+    pub(super) fn eventfd_helper(
         ctx: &mut SyscallContext,
         init_val: std::ffi::c_uint,
         flags: std::ffi::c_int,
