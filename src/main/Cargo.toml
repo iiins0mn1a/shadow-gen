@@ -1,6 +1,6 @@
 [package]
 name = "shadow-rs"
-version = "3.2.0"
+version = "3.3.0"
 edition.workspace = true
 publish.workspace = true
 
@@ -10,16 +10,16 @@ path = "lib.rs"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-anyhow = "1.0.99"
+anyhow = "1.0.100"
 asm_util = { path = "../lib/asm-util" }
 atomic_refcell = "0.1"
-backtrace = "0.3.75"
-bitflags = "2.9"
+backtrace = "0.3.76"
+bitflags = "2.10"
 # custom version of the bytes crate required to make the 'try_unsplit' method public
 # issue: https://github.com/tokio-rs/bytes/issues/287
 # pr: https://github.com/tokio-rs/bytes/pull/513
 bytes = { git = "https://github.com/shadow/bytes", rev = "c48bd4439e7e043300521925524ecdcce7ff6bcc" }
-clap = { version = "4.5.47", features = ["derive", "wrap_help"] }
+clap = { version = "4.5.48", features = ["derive", "wrap_help"] }
 crossbeam = "0.8.4"
 gml-parser = { path = "../lib/gml-parser" }
 libc = "0.2"
@@ -45,9 +45,9 @@ rand_core = "0.9.3"
 rand_xoshiro = "0.7.0"
 rayon = "1.11.0"
 regex = "1"
-schemars = "1.0"
+schemars = "1.1"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.143"
+serde_json = "1.0.145"
 serde_yaml = "0.9"
 shadow-build-info = { path = "../lib/shadow-build-info" }
 shadow_shmem = { path = "../lib/shmem" }
@@ -55,7 +55,7 @@ signal-hook = "0.3.18"
 static_assertions = "1.1.0"
 std-util = { path = "../lib/std-util" }
 tcp = { path = "../lib/tcp" }
-tempfile = "3.21"
+tempfile = "3.23"
 vasi-sync = { path = "../lib/vasi-sync" }
 # TODO: switch to upstream crate if/when they merge and release
 # https://github.com/dylanmckay/vsprintf/pull/2
@@ -65,7 +65,7 @@ vasi-sync = { path = "../lib/vasi-sync" }
 # https://github.com/rust-lang/rust/issues/44930
 vsprintf = { git = "https://github.com/shadow/vsprintf", rev = "fa9a307e3043a972501b3157323ed8a9973ad45a" }
 which = "8.0.0"
-bytemuck = "1.23.2"
+bytemuck = "1.24.0"
 rustix = { version = "0.38.44", features = ["event", "mm", "pipe"] }
 
 [features]

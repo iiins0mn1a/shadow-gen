@@ -196,6 +196,8 @@ simple_display_impl!(u8, u16, u32, u64, usize);
 
 deref_pointer_impl!(i8, i16, i32, i64, isize);
 deref_pointer_impl!(u8, u16, u32, u64, usize);
+deref_pointer_impl!(linux_api::resource::rlimit);
+deref_pointer_impl!(linux_api::resource::rlimit64);
 deref_pointer_impl!(linux_api::stat::stat);
 deref_pointer_impl!(linux_api::sched::clone_args);
 deref_pointer_impl!(linux_api::time::timespec);
@@ -212,6 +214,7 @@ safe_pointer_impl!(linux_api::sysinfo::sysinfo);
 safe_pointer_impl!(libc::iovec);
 
 // nix still uses an old bitflags version which isn't supported by `bitflags_impl`
+simple_debug_impl!(linux_api::resource::Resource);
 simple_debug_impl!(linux_api::sched::CloneFlags);
 simple_debug_impl!(linux_api::time::ITimerId);
 simple_debug_impl!(linux_api::time::ClockId);
@@ -281,7 +284,7 @@ fn fmt_string(
     len: Option<usize>,
     mem: &MemoryManager,
 ) -> std::fmt::Result {
-    const DISPLAY_LEN: usize = 40;
+    const DISPLAY_LEN: usize = libc::PATH_MAX as usize;
 
     // the pointer may point to a buffer of unknown length, so we may have to choose our own size
     let len = len.unwrap_or(

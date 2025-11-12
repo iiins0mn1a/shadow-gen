@@ -1,3 +1,5 @@
+include(ExternalProject)
+
 set(RUSTFLAGS "-C force-frame-pointers=y")
 set(CARGO_ENV_VARS "SHADOW_VERSION=\"${SHADOW_VERSION_STRING_CONF}\"")
 
@@ -37,7 +39,6 @@ set(CARGO_ENV_VARS "${CARGO_ENV_VARS} CXXFLAGS=\"${RUST_CXXFLAGS}\"")
 set(CARGO_ENV_VARS "${CARGO_ENV_VARS} CC=\"${CMAKE_C_COMPILER}\"")
 set(CARGO_ENV_VARS "${CARGO_ENV_VARS} CXX=\"${CMAKE_CXX_COMPILER}\"")
 set(TARGETDIR "${CMAKE_CURRENT_BINARY_DIR}/target")
-include(ExternalProject)
 ExternalProject_Add(
     rust-workspace-project
     PREFIX ${CMAKE_CURRENT_BINARY_DIR}
@@ -46,6 +47,7 @@ ExternalProject_Add(
     DOWNLOAD_COMMAND ""
     CONFIGURE_COMMAND ""
     BUILD_COMMAND echo "Building workspace..."
+    COMMAND echo "Building workspace..."
     COMMAND bash -c " \
         ${CARGO_ENV_VARS} \
         cargo build \

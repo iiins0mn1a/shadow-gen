@@ -433,6 +433,7 @@ impl SyscallHandler {
             SyscallNum::NR_getpid => handle!(getpid),
             SyscallNum::NR_getppid => handle!(getppid),
             SyscallNum::NR_getrandom => handle!(getrandom),
+            SyscallNum::NR_getrlimit => handle!(getrlimit),
             SyscallNum::NR_getsid => handle!(getsid),
             SyscallNum::NR_getsockname => handle!(getsockname),
             SyscallNum::NR_getsockopt => handle!(getsockopt),
@@ -471,6 +472,7 @@ impl SyscallHandler {
             SyscallNum::NR_pwritev2 => handle!(pwritev2),
             SyscallNum::NR_read => handle!(read),
             SyscallNum::NR_readahead => handle!(readahead),
+            SyscallNum::NR_readlink => handle!(readlink),
             SyscallNum::NR_readlinkat => handle!(readlinkat),
             SyscallNum::NR_readv => handle!(readv),
             SyscallNum::NR_recvfrom => handle!(recvfrom),
@@ -485,6 +487,7 @@ impl SyscallHandler {
             SyscallNum::NR_select => handle!(select),
             SyscallNum::NR_sendmsg => handle!(sendmsg),
             SyscallNum::NR_sendto => handle!(sendto),
+            SyscallNum::NR_setrlimit => handle!(setrlimit),
             SyscallNum::NR_set_robust_list => handle!(set_robust_list),
             SyscallNum::NR_set_tid_address => handle!(set_tid_address),
             SyscallNum::NR_setitimer => handle!(setitimer),
@@ -553,7 +556,6 @@ impl SyscallHandler {
             | SyscallNum::NR_getgroups
             | SyscallNum::NR_getresgid
             | SyscallNum::NR_getresuid
-            | SyscallNum::NR_getrlimit
             | SyscallNum::NR_getuid
             | SyscallNum::NR_getxattr
             | SyscallNum::NR_lchown
@@ -567,7 +569,6 @@ impl SyscallHandler {
             | SyscallNum::NR_madvise
             | SyscallNum::NR_mkdir
             | SyscallNum::NR_mknod
-            | SyscallNum::NR_readlink
             | SyscallNum::NR_removexattr
             | SyscallNum::NR_rename
             | SyscallNum::NR_rmdir
@@ -579,7 +580,6 @@ impl SyscallHandler {
             | SyscallNum::NR_setresgid
             | SyscallNum::NR_setresuid
             | SyscallNum::NR_setreuid
-            | SyscallNum::NR_setrlimit
             | SyscallNum::NR_setuid
             | SyscallNum::NR_setxattr
             | SyscallNum::NR_stat
