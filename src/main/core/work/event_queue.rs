@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::binary_heap::BinaryHeap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 
@@ -12,11 +13,31 @@ pub struct EventQueue {
     last_popped_event_time: EmulatedTime,
 }
 
+// 简单的原子计数器，用于粗粒度地观测 push/pop 次数和队列长度
+static PUSH_COUNT: AtomicU64 = AtomicU64::new(0);
+static POP_COUNT: AtomicU64 = AtomicU64::new(0);
+
+// 每隔多少次操作打印一次日志，避免刷屏
+const LOG_EVERY: u64 = 1_000;
+
 impl EventQueue {
     pub fn new() -> Self {
         Self {
             queue: BinaryHeap::new(),
             last_popped_event_time: EmulatedTime::SIMULATION_START,
+        }
+    }
+
+    fn log_stats(&self, op: &'static str, count: u64) {
+        if count % LOG_EVERY == 0 {
+            let time_ns = self
+                .last_popped_event_time
+                .duration_since(&EmulatedTime::SIMULATION_START)
+                .as_nanos();
+            eprintln!(
+                "[event-queue] op={} count={} len={} last_pop_time_ns={}",
+                op, count, self.queue.len(), time_ns
+            );
         }
     }
 
@@ -33,6 +54,9 @@ impl EventQueue {
         assert!(event.time() >= self.last_popped_event_time);
 
         self.queue.push(Reverse(event.into()));
+
+        let count = PUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        self.log_stats("push", count);
     }
 
     /// Pop the earliest [`Event`] from the queue.
@@ -44,6 +68,9 @@ impl EventQueue {
             assert!(event.time() >= self.last_popped_event_time);
             self.last_popped_event_time = event.time();
         }
+
+        let count = POP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        self.log_stats("pop", count);
 
         event
     }
