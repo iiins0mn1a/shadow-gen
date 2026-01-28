@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [features]
 perf_timers = []
+enable_perf_logging = []
 
 [dependencies]
 formatting-nostd = { path = "../formatting-nostd" }

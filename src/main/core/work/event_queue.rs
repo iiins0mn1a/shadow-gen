@@ -18,7 +18,7 @@ static PUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static POP_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // 每隔多少次操作打印一次日志，避免刷屏
-const LOG_EVERY: u64 = 1_000;
+const LOG_EVERY: u64 = 0;
 
 impl EventQueue {
     pub fn new() -> Self {
@@ -28,7 +28,12 @@ impl EventQueue {
         }
     }
 
+    #[allow(unused_variables)]
     fn log_stats(&self, op: &'static str, count: u64) {
+        // LOG_EVERY == 0 means skip logging (or disabled)
+        if LOG_EVERY == 0 {
+            return;
+        }
         if count % LOG_EVERY == 0 {
             let time_ns = self
                 .last_popped_event_time
@@ -56,7 +61,9 @@ impl EventQueue {
         self.queue.push(Reverse(event.into()));
 
         let count = PUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        self.log_stats("push", count);
+        if LOG_EVERY > 0 {
+            self.log_stats("push", count);
+        }
     }
 
     /// Pop the earliest [`Event`] from the queue.
@@ -70,7 +77,9 @@ impl EventQueue {
         }
 
         let count = POP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        self.log_stats("pop", count);
+        if LOG_EVERY > 0 {
+            self.log_stats("pop", count);
+        }
 
         event
     }

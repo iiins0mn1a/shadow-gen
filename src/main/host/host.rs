@@ -8,6 +8,10 @@ use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "enable_perf_logging")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "enable_perf_logging")]
+use std::time::Instant;
 
 use asm_util::tsc::Tsc;
 use atomic_refcell::AtomicRefCell;
@@ -28,6 +32,15 @@ use shadow_shim_helper_rs::shim_shmem::{HostShmem, HostShmemProtected, ManagerSh
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shmem::allocator::ShMemBlock;
 use vasi_sync::scmutex::SelfContainedMutexGuard;
+
+// Host::execute 真实时间统计：全局累加，每隔若干次调用打印一次聚合信息。
+// 可通过 ENABLE_PERF_LOGGING feature 启用
+#[cfg(feature = "enable_perf_logging")]
+static HOST_EXEC_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "enable_perf_logging")]
+static HOST_EXEC_ACC_NS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "enable_perf_logging")]
+const HOST_EXEC_LOG_EVERY: u64 = 1_000;
 
 use crate::core::configuration::{ProcessFinalState, QDiscMode};
 use crate::core::sim_config::PcapConfig;
@@ -408,12 +421,12 @@ impl Host {
                         return;
                     };
                     let process = process.borrow(host.root());
-                    let siginfo_t = siginfo_t::new_for_kill(
+                    let siginfo = siginfo_t::new_for_kill(
                         Signal::try_from(shutdown_signal as i32).unwrap(),
                         1,
                         0,
                     );
-                    process.signal(host, None, &siginfo_t);
+                    process.signal(host, None, &siginfo);
                 });
                 host.schedule_task_at_emulated_time(
                     task,
@@ -747,6 +760,10 @@ impl Host {
     }
 
     pub fn execute(&self, until: EmulatedTime) {
+        // 真实运行时间统计：用于分析 Host::execute 的性能开销。
+        #[cfg(feature = "enable_perf_logging")]
+        let real_start = Instant::now();
+
         loop {
             let mut event = {
                 let mut event_queue = self.event_queue.lock().unwrap();
@@ -786,6 +803,29 @@ impl Host {
             }
             self.stop_execution_timer();
             Worker::clear_current_time();
+        }
+
+        #[cfg(feature = "enable_perf_logging")]
+        {
+            let real_elapsed = real_start.elapsed();
+            let real_elapsed_ns = real_elapsed.as_nanos() as u64;
+            let count = HOST_EXEC_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            HOST_EXEC_ACC_NS.fetch_add(real_elapsed_ns, Ordering::Relaxed);
+
+            if count % HOST_EXEC_LOG_EVERY == 0 {
+                let total_ns = HOST_EXEC_ACC_NS.load(Ordering::Relaxed);
+                // 每隔 HOST_EXEC_LOG_EVERY 次调用打印一次聚合信息，避免日志过多。
+                eprintln!(
+                    "[host-exec-agg] calls={} total_ns={} last_ns={} host={} window_end_abs_ns={}",
+                    count,
+                    total_ns,
+                    real_elapsed_ns,
+                    self.name(),
+                    until
+                        .duration_since(&EmulatedTime::SIMULATION_START)
+                        .as_nanos()
+                );
+            }
         }
     }
 

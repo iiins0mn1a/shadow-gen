@@ -108,8 +108,14 @@ fn main() {
     run_cbindgen(&build_common);
     run_bindgen(&build_common);
 
-    build_common
-        .cc_build(Compiler::C)
+    let mut cc_build = build_common.cc_build(Compiler::C);
+    
+    // 如果启用了 enable_perf_logging feature，则定义 ENABLE_PERF_LOGGING 宏
+    if env::var("CARGO_FEATURE_ENABLE_PERF_LOGGING").is_ok() {
+        cc_build.define("ENABLE_PERF_LOGGING", None);
+    }
+    
+    cc_build
         .files(&[
             "patch_vdso.c",
             "shim.c",

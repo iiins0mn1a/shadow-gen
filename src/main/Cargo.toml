@@ -69,7 +69,10 @@ bytemuck = "1.24.0"
 rustix = { version = "0.38.44", features = ["event", "mm", "pipe"] }
 
 [features]
+default = ["enable_run_control"]
 perf_timers = []
+enable_perf_logging = []
+enable_run_control = []
 
 [build-dependencies]
 shadow-build-common = { path = "../lib/shadow-build-common", features = ["bindgen", "cbindgen"] }

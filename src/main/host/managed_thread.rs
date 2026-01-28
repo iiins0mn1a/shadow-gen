@@ -254,7 +254,6 @@ impl ManagedThread {
                 }
                 ShimEventToShadow::Syscall(syscall) => {
                     // Emulate the given syscall.
-
                     // `exit` is tricky since it only exits the *mthread*, and we don't have a way
                     // to be notified that the mthread has exited. We have to "fire and forget"
                     // the command to execute the syscall natively.

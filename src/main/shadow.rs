@@ -15,6 +15,8 @@ use signal_hook::{consts, iterator::Signals};
 
 use crate::core::configuration::{CliOptions, ConfigFileOptions, ConfigOptions};
 use crate::core::controller::Controller;
+#[cfg(feature = "enable_run_control")]
+use crate::core::manager::{RestartRequest, set_restart_run_until};
 use crate::core::logger::shadow_logger;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
@@ -211,12 +213,6 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         pause_for_gdb_attach().context("Could not pause shadow to allow gdb to attach")?;
     }
 
-    let sim_config = SimConfig::new(&shadow_config, &options.debug_hosts.unwrap_or_default())
-        .context("Failed to initialize the simulation")?;
-
-    // allocate and initialize our main simulation driver
-    let controller = Controller::new(sim_config, &shadow_config);
-
     // enable log buffering if not at trace level
     let buffer_log = !log::log_enabled!(log::Level::Trace);
     shadow_logger::set_buffering_enabled(buffer_log);
@@ -224,8 +220,29 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
         log::info!("Log message buffering is enabled for efficiency");
     }
 
-    // run the simulation
-    controller.run().context("Failed to run the simulation")?;
+    let debug_hosts = options.debug_hosts.clone().unwrap_or_default();
+
+    loop {
+        let sim_config = SimConfig::new(&shadow_config, &debug_hosts)
+            .context("Failed to initialize the simulation")?;
+
+        // allocate and initialize our main simulation driver
+        let controller = Controller::new(sim_config, &shadow_config);
+
+        // run the simulation
+        match controller.run() {
+            Ok(()) => break,
+            Err(e) => {
+                #[cfg(feature = "enable_run_control")]
+                if let Some(req) = e.downcast_ref::<RestartRequest>() {
+                    set_restart_run_until(req.run_until_ns);
+                    log::info!("Restarting simulation in-process");
+                    continue;
+                }
+                return Err(e).context("Failed to run the simulation");
+            }
+        }
+    }
 
     // disable log buffering
     shadow_logger::set_buffering_enabled(false);

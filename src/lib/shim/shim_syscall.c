@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <sys/syscall.h>
 
@@ -15,6 +17,14 @@
 #include "lib/shim/shim_seccomp.h"
 #include "lib/shim/shim_sys.h"
 #include "lib/shim/shim_tls.h"
+
+// Syscall 统计：在 shim 一侧统计所有通过 shim_syscall 的系统调用次数。
+// 为降低对行为的影响，目前只做计数，不测量时间。
+// 可通过 ENABLE_PERF_LOGGING 宏启用
+#ifdef ENABLE_PERF_LOGGING
+static _Atomic uint64_t g_shim_syscall_count = 0;
+#define SHIM_SYSCALL_LOG_EVERY 100000
+#endif
 
 // Handle to the real syscall function, initialized once at load-time for
 // thread-safety.
@@ -57,6 +67,17 @@ long shim_syscallv(ucontext_t* ctx, ExecutionContext exe_ctx, long n, va_list ar
               n);
         rv = shim_native_syscallv(n, args);
     }
+
+#ifdef ENABLE_PERF_LOGGING
+    // 仅统计调用次数，避免对 shim 行为和时序产生额外干扰。
+    uint64_t count = atomic_fetch_add_explicit(&g_shim_syscall_count, 1, memory_order_relaxed) + 1;
+    if (count % SHIM_SYSCALL_LOG_EVERY == 0) {
+        fprintf(stderr,
+                "[shim-syscall-agg] calls=%" PRIu64 " last_n=%ld\n",
+                count,
+                n);
+    }
+#endif
 
     return rv;
 }
