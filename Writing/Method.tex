@@ -1,0 +1,123 @@
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}{0.35\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{Figs/DES.drawio.pdf}
+    \caption{Normal DES}
+    \label{fig:des}
+  \end{subfigure}%
+  \hspace{2em}
+  \begin{subfigure}{0.35\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{Figs/DES2.drawio.pdf}
+    \caption{DES running real applications}
+    \label{fig:des-shadow}
+  \end{subfigure}
+  \vspace{-0.5em}
+  \caption{Comparison of conventional discrete-event simulation (DES) and DES with real applications. (a) Normal DES: a network simulator translates network traffic and an abstract node model into discrete events scheduled on a unified timeline. (b) DES running real applications: the simulator retains the same event-driven network core, but replaces the abstract node model with a lightweight virtualization layer that executes real client applications. Application and network events coexist on a single time axis under a shared simulation clock.}
+  \label{fig:DESs}
+\end{figure*}
+
+\section{Event-Driven Testnet}
+\label{sec:edt}
+
+This section presents the key idea behind the \emph{Event-Driven Testnet} (EDT), a hybrid \emph{testbed} that executes real blockchain client software within an event-driven network simulator. EDT treats protocol time as a first-class input controlled by the test runner, rather than as an uncontrollable background parameter bound to wall-clock execution. The design combines the performance advantages of simulators with the implementation fidelity of traditional testnets.
+
+\subsection{Key Idea: Best-of-Both}
+\label{subsec:edt-keyidea}
+
+To address the inefficiency of testing \emph{strongly time-controlled} consensus protocols, EDT combines the strengths of conventional simulators and testnets while mitigating their respective limitations.
+
+\noindent\textbf{Simulators:} Simulators often achieve superior performance when modeling strongly time-controlled protocols. This efficiency arises from two fundamental factors.
+First, simulators deliberately abstract and simplify protocol logic, focusing on essential behavioral properties rather than faithfully executing every implementation detail. This selective abstraction reduces computational cost.
+Second, and more decisively, the dominant \emph{event-driven} architecture (Figure~\ref{fig:DESs}(a)) is well-suited to protocols whose state machine advances at discrete time boundaries and is otherwise idle. Event-driven execution naturally skips empty intervals, enabling dramatic acceleration of simulated time. Simulators also typically provide strong controllability over time and network schedules, which facilitates deterministic and reproducible experiments.
+
+Despite these advantages, simulators have significant limitations: they operate on simplified logic, may diverge from production implementations over time, and thus cannot reliably surface implementation-specific bugs or capture emergent behaviors of deployed client software.
+
+\noindent\textbf{Testnets:} In contrast, testnets execute unmodified, production-grade client software, providing high implementation fidelity. This fidelity makes testnets valuable for uncovering implementation bugs, validating experimental protocol changes, and observing genuine network dynamics under realistic configurations.
+
+However, for strongly time-controlled protocols, testnets inherit substantial temporal redundancy. As shown by our empirical study of Ethereum PoS (Section~\ref{sec:motivation}), nodes spend most wall-clock time idle or waiting between sparse bursts of core-logic execution, which severely limits how quickly experiments can progress over many epochs.
+
+\textbf{The EDT synthesis.} The key insight is to execute \emph{real client applications}, like what testnets do, while leveraging the event-driven control of protocol time, like what simulators do (Figure~\ref{fig:DESs}(b)). Concretely, EDT replaces long idle waiting periods between scheduled time boundaries with instantaneous event-driven time advancement, increasing the density at which the consensus state machine is exercised without sacrificing the realism of production software. In short, EDT aims to realize a best-of-both-worlds testbed: simulator-like efficiency with testnet-like fidelity.
+
+\subsection{Design Principles}
+\label{sec:design_principles}
+
+We define design principles to systematically handle strongly time-controlled testnets with both efficiency and fidelity. EDT is only useful if it improves testing efficiency \emph{without} compromising the causal semantics of the consensus protocol or the fidelity of client behavior.
+We therefore structure Event-Driven Testnet around the following design principles.
+
+\smallskip
+\noindent\textbf{P1: Semantic equivalence of protocol time.}
+The event-driven execution must preserve the protocol's causal semantics induced by its logical clock (slots/epochs) and time-dependent rules.
+In particular, advancing logical time must not skip or reorder mandatory time-triggered transitions, and must maintain the intended happens-before relationships between time ticks and external events (e.g., block/attestation processing, fork-choice updates).
+This principle explicitly distinguishes our approach from modifying protocol parameters (e.g., shrinking the slot duration), which changes the protocol itself rather than the execution substrate.
+
+\smallskip
+\noindent\textbf{P2: Controllability for systematic testing.}
+The framework should expose control knobs over logical-time progression and network scheduling, enabling systematic exploration of ``what-if'' scenarios.
+Examples include pausing and resuming logical time, stepping through critical boundaries (e.g., slot/epoch ticks), and coordinating with fault-injection tools (e.g., fuzzers) under a controlled schedule.
+Controllability is essential for debugging and targeted testing within specific time intervals.
+
+\smallskip
+\noindent\textbf{P3: Reproducibility by deterministic event scheduling.}
+Given a fixed configuration (client launching commandlines, genesis, network topology, delay models) and a fixed random seed, the event-driven testnet should produce a deterministic event schedule and thus a reproducible execution.
+Reproducibility enables precise regression debugging, which is notoriously challenging in real-time distributed testnets.
+Importantly, determinism also enables a \emph{lightweight replay} mechanism that re-executes the system under the same event schedule and a specified time window, avoiding heavyweight global snapshot/checkpoint mechanisms.
+
+\smallskip
+\noindent\textbf{P4: Implementation fidelity via real clients.}
+To surface implementation-specific bugs, the framework should run real, unmodified, up-to-date client binaries end-to-end (execution layer, consensus layer, and validator software when applicable).
+The event-driven substrate should therefore provide sufficiently faithful OS and network abstractions to support production clients, rather than relying on simplified protocol models.
+
+\smallskip
+These principles jointly define the target envelope for EDT: compress idle wall-clock time while preserving protocol causality and client-visible behavior, and enable deterministic, controllable experimentation for strongly time-controlled consensus protocols.
+  
+
+
+
+\subsection{Design and Implementation}
+\label{subsec:edt-impl}
+
+EDT follows the design principles (P1--P4) in Section~\ref{sec:design_principles} by turning \emph{protocol time} into a first-class, controllable input while preserving the causal semantics that real clients expect.
+Our system decomposes into three layers: (i) \emph{event-driven execution of real clients} using Shadow (meeting P1 and P4), (ii) \emph{a scalable network model} implemented by DVN with runahead-style parallelism, and (iii) \emph{a time-control framework} that exposes logical time as an explicit control surface (our contribution; meeting P2 and strengthening P3).
+Conceptually, EDT provides a single \emph{simulation clock} shared by the network model and all client-visible time interfaces; the simulator advances this clock by executing only causally-ready work, rather than waiting for wall-clock time to pass.
+
+\smallskip
+\noindent\textbf{Shadow as the substrate (P1/P4): decoupling time while running real binaries.}
+Shadow provides the key substrate that simultaneously (i) runs \emph{unmodified production binaries} and (ii) decouples their perceived time from wall-clock time.
+It virtualizes each node as a lightweight host that executes real processes while intercepting their OS interactions through a shim layer.
+Critically for EDT, Shadow implements \emph{time virtualization}: all client-visible time sources and time-blocking operations are redirected to the simulation clock, so the client ``sees'' logical time rather than wall-clock time.
+Likewise, blocking I/O and waiting are converted into \emph{discrete wakeup conditions} scheduled on the same event timeline.
+This design meets P1 by ensuring that time advances only through explicit simulator-controlled transitions on the unified timeline, and meets P4 by preserving full implementation fidelity of real clients.
+
+\smallskip
+\noindent\textbf{Network scheduling and parallelism: DVN with runahead windows.}
+EDT instantiates the network model using a Distributed Virtual Network (DVN) simulator, which provides configurable topology, latency distributions, loss/adversary models, and produces a deterministic schedule of message deliveries under a fixed seed.
+To scale to many hosts, DVN employs a \emph{runahead}-style parallel simulation strategy organized around a moving \emph{window} (a safe synchronization horizon).
+Within a window \([t, t+\Delta)\), each host (or partition) can advance locally and process events as long as DVN can conservatively guarantee that no cross-partition delivery can arrive earlier than the window end.
+When the window boundary is reached, partitions synchronize: they exchange queued cross-partition messages, advance the global frontier, and open the next window.
+This yields parallelism by exploiting causally-independent event sets, and it provides a natural notion of ``safe boundary'' that we later reuse for time control and debugging.
+The parallelism is complementary to Shadow's time virtualization: Shadow compresses idle time \emph{within} each host, while DVN accelerates the network core by running many hosts concurrently up to the runahead window horizon.
+
+\smallskip
+\noindent\textbf{A time-control framework (P2/P3).}
+Building on Shadow (P1/P4) and DVN runahead windows, EDT exposes a \emph{time-control surface} that lets the test runner drive protocol time explicitly.
+\emph{Even without any special control}, EDT already achieves significant speedups: strongly time-controlled clients spend much wall-clock time in sleeps, timer waits, and network blocking between sparse bursts of protocol logic.
+In EDT these idle intervals are represented as pending wakeup conditions on the event timeline, and the simulator advances the simulation clock directly to the next causally-ready event time.
+Hence, long periods of ``nothing happens'' become instantaneous time jumps, and computation is concentrated on the discrete moments when the consensus state machine actually performs work (e.g., slot/epoch transitions, message arrivals, timer expirations).
+
+\smallskip
+\noindent\emph{GDB-like control style.}
+We then make logical time \emph{explicitly controllable} by exposing a small set of commands whose usage mirrors interactive debuggers (e.g., \texttt{continue}, \texttt{next}, \texttt{step}, \texttt{restart}).
+For example, our implementation supports (i) pausing and resuming time progression, (ii) running until a target logical time \(t\), and (iii) stepping by one runahead \emph{window} at a time (``next-window'').
+The step granularity is chosen deliberately: DVN's runahead window is the minimal unit at which hosts are guaranteed not to causally affect each other via cross-host deliveries.
+Therefore, pausing at a window boundary yields a consistent global cut of the distributed execution, and stepping one window preserves determinism while keeping synchronization overhead low.
+
+\smallskip
+\noindent\emph{Distributed debugging and fuzzing potential.}
+Pausing at a window boundary also enables a practical ``distributed debugging'' workflow.
+At the boundary, the runtime can enumerate which hosts are scheduled to run in the next window and report the corresponding native process identifiers (PIDs) of the real clients.
+A tester can then attach a debugger (e.g., \texttt{gdb -p <pid>}) to one or more target processes, inspect per-node local state and execution, and resume the simulation deterministically.
+Because hosts are independent within a window under the runahead guarantee, a tester can single-step or instrument selected nodes without perturbing the causal schedule of other nodes in that window.
+Similarly, a fuzzer can treat time boundaries as explicit intervention points, inject faults or schedule perturbations at controlled windows, and replay the same failing window under additional instrumentation.

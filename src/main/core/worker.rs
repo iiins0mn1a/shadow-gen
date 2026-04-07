@@ -31,6 +31,11 @@ use crate::utility::status_bar;
 
 static USE_OBJECT_COUNTERS: AtomicBool = AtomicBool::new(false);
 
+/// When true, we are tearing down hosts during in-process restart. HostTreePointer::ptr()
+/// uses ptr_unchecked() so Drop impls that run on the main thread (when the scheduler
+/// is dropped) do not panic.
+pub(crate) static RESTART_TEARDOWN: AtomicBool = AtomicBool::new(false);
+
 // global counters to be used when there is no worker active
 static SIM_STATS: Lazy<SharedSimStats> = Lazy::new(SharedSimStats::new);
 
@@ -101,6 +106,7 @@ impl Worker {
             assert!(res.is_ok(), "Worker already initialized");
         });
     }
+
 
     /// Run `f` with a reference to the current Host, or return None if there is no current Host.
     #[must_use]

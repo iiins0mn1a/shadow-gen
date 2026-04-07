@@ -83,6 +83,13 @@ impl<T> HostTreePointer<T> {
     /// still active, in addition to the normal safety requirements for
     /// dereferencing a pointer.
     pub unsafe fn ptr(&self) -> *mut T {
+        // During in-process restart teardown, Hosts are dropped when the scheduler
+        // is dropped (on the main thread, no active_host). Those Drops still need
+        // the raw pointer to unref C state; use ptr_unchecked() when the global
+        // teardown flag is set.
+        if crate::core::worker::RESTART_TEARDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            return unsafe { self.ptr_unchecked() };
+        }
         // While a caller might conceivably get the pointer without the lock
         // held but only dereference after it actually is held, better to be
         // conservative here and try to catch mistakes.

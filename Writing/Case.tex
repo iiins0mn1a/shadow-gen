@@ -1,0 +1,93 @@
+\section{Distributed Debugging Under EDT}
+\label{sec:edt-debug-case}
+This section gives a concrete, minimal workflow showing how EDT enables
+\emph{distributed debugging} under a deterministic logical-time schedule. The key
+idea is to pause at a safe window boundary, inspect which nodes are scheduled
+next, and attach a native debugger to a specific client process (PID) while
+preserving reproducibility.
+
+\subsection{Start and pause at \(t=0\)}
+When running interactively, EDT prints a small command set and auto-pauses at
+\(t=0\) to provide a clean initial cut:
+
+\begin{verbatim}
+** Commands: c | cN (e.g. c10) | n | p | s | s:<pid> | info | r | rN
+** [auto-paused] t=0s
+\end{verbatim}
+
+\subsection{Inspect the next window and select a target process}
+\noindent\textbf{List next-window candidates.}
+At a pause point, the \texttt{s} command enumerates hosts scheduled in the next
+window, including each host's next-event time and the native PID(s) of its real
+client process(es). This provides an immediate mapping from \emph{logical time}
+to \emph{which real processes will execute next}.
+
+\begin{verbatim}
+s
+[next-window] t=...s window=[...--...]
+  host=geth-node          next_event=...   pid=3248123 (geth.1000)
+  host=prysm-beacon-1     next_event=...   pid=3248456 (beacon-chain.1000)
+  host=prysm-validator-1  next_event=...   pid=3248567 (validator.1000)
+\end{verbatim}
+
+\noindent\textbf{Optional: show more context.}
+The \texttt{info} command prints the boundary context (e.g., current time,
+window range, next global event), which is useful when aligning debugging with a
+suspected failing interval:
+
+\begin{verbatim}
+info
+[... paste your real terminal output here ...]
+\end{verbatim}
+
+\subsection{Attach a native debugger to one node}
+\noindent\textbf{Get an attach command.}
+Suppose we want to debug the geth node. We use \texttt{s:<pid>} to print a
+copy-pastable attach command:
+
+\begin{verbatim}
+s:3248123
+gdb -p 3248123
+\end{verbatim}
+
+\noindent\textbf{Why window boundaries enable ``distributed'' debugging.}
+EDT pauses at \emph{window boundaries} that correspond to the runahead-style safe
+horizon: within one window, hosts are guaranteed not to causally affect each
+other via cross-host deliveries. Therefore, the tester can focus on one target
+process (attach debugger, set breakpoints, single-step) while preserving a
+consistent global cut and a deterministic schedule for the rest of the system.
+
+\subsection{Step and continue deterministically}
+\noindent\textbf{Step one window.}
+The \texttt{n} command advances the system by exactly one window and pauses again
+at the next boundary. This is the natural ``next'' operation because the window
+is the minimal unit of safe parallel runahead:
+
+\begin{verbatim}
+n
+[... paste your real output here ...]
+\end{verbatim}
+
+\noindent\textbf{Continue until a target time.}
+To quickly reach a later region while keeping determinism, \texttt{cN} continues
+until logical time \(t=N\) seconds and then pauses:
+
+\begin{verbatim}
+c120
+[paused] t=120s
+\end{verbatim}
+
+\subsection{Lightweight replay via restart}
+When a failure is observed (or after enabling extra instrumentation), \texttt{rN}
+restarts from \(t=0\) and deterministically re-runs until \(t=N\) seconds,
+pausing at the same boundary:
+
+\begin{verbatim}
+r120
+** restarting simulation in-process
+[paused] t=120s
+\end{verbatim}
+
+In practice, this workflow lets a tester reproduce and localize distributed
+failures by iterating on a single logical-time window: pause, inspect, attach,
+step, and replay, without relying on heavyweight snapshot mechanisms.

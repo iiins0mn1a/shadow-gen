@@ -958,9 +958,11 @@ impl Process {
     ) -> Result<RootedRc<RootedRefCell<Process>>, Errno> {
         debug!("starting process '{plugin_name:?}'");
 
+        // 分配shadow内虚拟ID，用于管理
         let main_thread_id = host.get_new_thread_id();
         let process_id = ProcessId::from(main_thread_id);
 
+        // 建立进程的内核态抽象
         let desc_table = RootedRc::new(
             host.root(),
             RootedRefCell::new(host.root(), DescriptorTable::new()),

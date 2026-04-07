@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::io::{BufRead, IsTerminal};
 use std::os::unix::ffi::OsStrExt;
-#[cfg(feature = "enable_run_control")]
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Condvar;
@@ -143,9 +141,10 @@ impl<'a> Manager<'a> {
         // get the system's CPU frequency
         let raw_frequency = get_raw_cpu_frequency_hz().unwrap_or_else(|e| {
             let default_freq = 2_500_000_000; // 2.5 GHz
-            log::debug!("Failed to get raw CPU frequency, using {default_freq} Hz instead: {e}");
+            log::info!("Failed to get raw CPU frequency, using {default_freq} Hz instead: {e}");
             default_freq
         });
+        log::info!("Raw CPU frequency: {raw_frequency} Hz");
 
         let native_tsc_frequency = if let Some(f) = asm_util::tsc::Tsc::native_cycles_per_second() {
             f
@@ -527,200 +526,16 @@ impl<'a> Manager<'a> {
 
             // Initialize run-control and (if interactive) spawn stdin thread once per process.
             #[cfg(feature = "enable_run_control")]
-            let rc = RUN_CONTROL.get_or_init(|| RunControl {
-                pause_requested: Arc::new(AtomicBool::new(false)),
-                restart_requested: Arc::new(AtomicBool::new(false)),
-                restart_run_until_ns: Arc::new(AtomicU64::new(u64::MAX)),
-                info_requested: Arc::new(AtomicBool::new(false)),
-                skip_start_pause: Arc::new(AtomicBool::new(false)),
-                run_for_ns: Arc::new(AtomicU64::new(0)),
-                run_until_abs_ns: Arc::new(AtomicU64::new(u64::MAX)),
-                step_windows_remaining: Arc::new(AtomicU64::new(0)),
-                paused: Mutex::new(false),
-                cv: Condvar::new(),
-            });
+            let rc = init_and_reset_run_control();
+
             #[cfg(feature = "enable_run_control")]
-            {
-                // Clear any prior run-control state (important for in-process restarts).
-                rc.pause_requested.store(false, Ordering::Relaxed);
-                rc.restart_requested.store(false, Ordering::Relaxed);
-                rc.info_requested.store(false, Ordering::Relaxed);
-                rc.run_for_ns.store(0, Ordering::Relaxed);
-                rc.run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                rc.step_windows_remaining.store(0, Ordering::Relaxed);
-                rc.skip_start_pause.store(false, Ordering::Relaxed);
-                rc.restart_run_until_ns.store(u64::MAX, Ordering::Relaxed);
+            spawn_run_control_stdin_thread_once(rc);
 
-                let pending = RESTART_RUN_UNTIL_NS.swap(u64::MAX, Ordering::Relaxed);
-                if pending != u64::MAX {
-                    rc.run_until_abs_ns.store(pending, Ordering::Relaxed);
-                    rc.skip_start_pause.store(true, Ordering::Relaxed);
-                }
-            }
             #[cfg(feature = "enable_run_control")]
-            RUN_CONTROL_STDIN_THREAD_STARTED.get_or_init(|| {
-                if !std::io::stdin().is_terminal() {
-                    return;
-                }
-                let pause_requested = rc.pause_requested.clone();
-                let restart_requested = rc.restart_requested.clone();
-                let restart_run_until_ns = rc.restart_run_until_ns.clone();
-                let info_requested = rc.info_requested.clone();
-                let skip_start_pause = rc.skip_start_pause.clone();
-                let run_for_ns = rc.run_for_ns.clone();
-                let run_until_abs_ns = rc.run_until_abs_ns.clone();
-                let step_windows_remaining = rc.step_windows_remaining.clone();
-                // Use raw pointers? avoid; instead capture RUN_CONTROL via OnceLock at runtime.
-                std::thread::spawn(move || {
-                    // Print help once (times are in *simulated seconds*).
-                    eprintln!(
-                        "\
-** Shadow run-control (stdin; simulated time)\n\
-**   p<Enter>: pause at next window boundary\n\
-**   c<Enter>: continue\n\
-**   cN<Enter>: continue for N simulated seconds, then pause at next window boundary (e.g. c10)\n\
-**   n<Enter>: run exactly one window, then pause\n\
-**   s<Enter>: show next-window hosts/PIDs (when paused)\n\
-**   s:<pid><Enter>: print gdb attach command (e.g. s:12345)\n\
-**   info<Enter>: show next-window hosts/PIDs (when paused)\n\
-**   r<Enter>: restart from t=0s (in-process)\n\
-**   rN<Enter>: restart and run to N seconds (e.g. r10)\n"
-                    );
-                    let stdin = std::io::stdin();
-                    for line in stdin.lock().lines().flatten() {
-                        let cmd = line.trim();
-                        if cmd.is_empty() {
-                            continue;
-                        }
+            auto_pause_at_start_if_terminal(rc);
 
-                        if cmd == "p" {
-                            pause_requested.store(true, Ordering::Relaxed);
-                            eprintln!("** run-control: pause requested (will pause at next window boundary)");
-                            continue;
-                        }
-
-                        if cmd == "n" {
-                            // Run exactly one more window, then pause.
-                            step_windows_remaining.store(1, Ordering::Relaxed);
-                            run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                            if let Some(rc) = RUN_CONTROL.get() {
-                                *rc.paused.lock().unwrap() = false;
-                                rc.cv.notify_all();
-                            }
-                            eprintln!("** run-control: will run 1 window and then pause");
-                            continue;
-                        }
-
-                        if cmd == "r" {
-                            restart_run_until_ns.store(u64::MAX, Ordering::Relaxed);
-                            skip_start_pause.store(false, Ordering::Relaxed);
-                            restart_requested.store(true, Ordering::Relaxed);
-                            if let Some(rc) = RUN_CONTROL.get() {
-                                rc.cv.notify_all();
-                            }
-                            eprintln!("** run-control: restart requested (in-process)");
-                            continue;
-                        }
-
-                        if let Some(rest) = cmd.strip_prefix('r') {
-                            if !rest.is_empty() {
-                                if let Ok(secs) = rest.parse::<u64>() {
-                                    restart_run_until_ns.store(
-                                        secs.saturating_mul(1_000_000_000),
-                                        Ordering::Relaxed,
-                                    );
-                                    skip_start_pause.store(true, Ordering::Relaxed);
-                                    restart_requested.store(true, Ordering::Relaxed);
-                                    if let Some(rc) = RUN_CONTROL.get() {
-                                        rc.cv.notify_all();
-                                    }
-                                    eprintln!("** run-control: restart requested (run to t={secs}s)");
-                                    continue;
-                                }
-                            }
-                        }
-
-                        if cmd == "s" || cmd == "info" {
-                            info_requested.store(true, Ordering::Relaxed);
-                            if let Some(rc) = RUN_CONTROL.get() {
-                                rc.cv.notify_all();
-                            }
-                            eprintln!("** run-control: info requested (will print while paused)");
-                            continue;
-                        }
-
-                        if let Some(rest) = cmd.strip_prefix("s:") {
-                            // s:<pid> - attach gdb to the specified PID (manual, no GUI)
-                            if let Ok(pid) = rest.parse::<i32>() {
-                                eprintln!("** run-control: attach gdb manually with: gdb/dlv -p/attach {}", pid);
-                                continue;
-                            } else {
-                                eprintln!("** run-control: invalid PID: '{}'", rest);
-                                continue;
-                            }
-                        }
-                        if cmd == "c" {
-                            // Continue indefinitely.
-                            step_windows_remaining.store(0, Ordering::Relaxed);
-                            run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                            run_for_ns.store(0, Ordering::Relaxed);
-                            if let Some(rc) = RUN_CONTROL.get() {
-                                *rc.paused.lock().unwrap() = false;
-                                rc.cv.notify_all();
-                            }
-                            eprintln!("** run-control: continue");
-                            continue;
-                        }
-
-                        if let Some(rest) = cmd.strip_prefix('c') {
-                            // cN: run for N simulated seconds, then pause.
-                            if let Ok(secs) = rest.parse::<u64>() {
-                                step_windows_remaining.store(0, Ordering::Relaxed);
-                                run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                                run_for_ns.store(secs.saturating_mul(1_000_000_000), Ordering::Relaxed);
-                                if let Some(rc) = RUN_CONTROL.get() {
-                                    *rc.paused.lock().unwrap() = false;
-                                    rc.cv.notify_all();
-                                }
-                                eprintln!("** run-control: continue for {secs}s simulated time (will pause at a window boundary)");
-                                continue;
-                            }
-                        }
-
-                        eprintln!(
-                            "** Unknown command: '{cmd}'. Use: p | c | cN (e.g. c10) | n | s | s:<pid> | info | r | rN (e.g. r10)"
-                        );
-                    }
-                });
-            });
-
-            // Auto-pause at simulated time 0s (before running the first window),
-            // but only when running interactively (stdin is a TTY). This avoids
-            // hanging non-interactive runs.
             #[cfg(feature = "enable_run_control")]
-            if std::io::stdin().is_terminal() {
-                let mut paused = rc.paused.lock().unwrap();
-                let skip_start_pause = rc.skip_start_pause.load(Ordering::Relaxed);
-                rc.skip_start_pause.store(false, Ordering::Relaxed);
-                if !*paused && !skip_start_pause {
-                    *paused = true;
-                    eprintln!(
-                        "\
-** Shadow paused at start (t=0s)\n\
-** Commands: c | cN (e.g. c10) | n | info | s:<pid> | r | rN"
-                    );
-                }
-            }
-
-            // If we started in paused mode, block here before running the first window.
-            // (We only set paused-at-start when stdin is a TTY.)
-            #[cfg(feature = "enable_run_control")]
-            {
-                let mut paused = rc.paused.lock().unwrap();
-                while *paused {
-                    paused = rc.cv.wait(paused).unwrap();
-                }
-            }
+            wait_if_paused_at_start(rc);
 
             // the scheduling loop
             while let Some((window_start, window_end)) = window {
@@ -851,47 +666,11 @@ impl<'a> Manager<'a> {
                         }
                     };
 
-                    // Apply cN request: convert relative duration -> absolute pause target.
-                    let run_for = rc.run_for_ns.swap(0, Ordering::Relaxed);
-                    if run_for != 0 {
-                        let next_abs_ns =
-                            (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos() as u64;
-                        let target = next_abs_ns.saturating_add(run_for);
-                        rc.run_until_abs_ns.store(target, Ordering::Relaxed);
-                        eprintln!(
-                            "** run-control: will pause at ~t={} (after +{} simulated seconds; next window boundary >= target)",
-                            fmt_s(target),
-                            run_for / 1_000_000_000
-                        );
-                    }
-
-                    // Apply n request: count down windows.
-                    let steps_left = rc.step_windows_remaining.load(Ordering::Relaxed);
-                    if steps_left > 0 {
-                        // Decrement once per window boundary.
-                        let new = rc.step_windows_remaining.fetch_sub(1, Ordering::Relaxed) - 1;
-                        if new == 0 {
-                            rc.pause_requested.store(true, Ordering::Relaxed);
-                        }
-                    }
-
-                    // Auto-pause if we've reached run-until time.
-                    let run_until = rc.run_until_abs_ns.load(Ordering::Relaxed);
-                    if run_until != u64::MAX {
-                        let next_abs_ns =
-                            (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos() as u64;
-                        if next_abs_ns >= run_until {
-                            // Clear so we only pause once.
-                            rc.run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                            rc.pause_requested.store(true, Ordering::Relaxed);
-                        }
-                    }
-
-                    if rc.restart_requested.swap(false, Ordering::Relaxed) {
-                        let run_until = rc.restart_run_until_ns.load(Ordering::Relaxed);
-                        restart_request = Some(run_until);
-                        eprintln!("** run-control: restart requested (in-process)");
-                    }
+                    apply_run_control_requests_at_window_boundary(
+                        rc,
+                        min_next_event_time,
+                        &mut restart_request,
+                    );
 
                     let mut print_next_window_info = || {
                         let Some((next_window_start, next_window_end)) = next_window else {
@@ -969,43 +748,12 @@ impl<'a> Manager<'a> {
                         }
                     };
 
-                    if rc.pause_requested.swap(false, Ordering::Relaxed) {
-                        let mut paused = rc.paused.lock().unwrap();
-                        *paused = true;
-                        
-                        eprintln!(
-                            "\
-** Shadow paused at window boundary\n\
-**   next window start: t={}",
-                            fmt_s(
-                                (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos()
-                                    as u64
-                            ),
-                        );
-                        
-                        print_next_window_info();
-                        
-                        eprintln!("**");
-                        eprintln!("** To attach gdb: s:<pid> (e.g. s:12345)");
-                        eprintln!("** Commands: c | cN (e.g. c10) | n | p | s | s:<pid> | info | r | rN");
-                    }
-
-                    // If paused, block here (soft pause) until resumed.
-                    {
-                        let mut paused = rc.paused.lock().unwrap();
-                        while *paused {
-                            if rc.restart_requested.swap(false, Ordering::Relaxed) {
-                                let run_until = rc.restart_run_until_ns.load(Ordering::Relaxed);
-                                restart_request = Some(run_until);
-                                *paused = false;
-                                break;
-                            }
-                            if rc.info_requested.swap(false, Ordering::Relaxed) {
-                                print_next_window_info();
-                            }
-                            paused = rc.cv.wait(paused).unwrap();
-                        }
-                    }
+                    pause_and_soft_wait_until_resumed(
+                        rc,
+                        min_next_event_time,
+                        &mut restart_request,
+                        &mut print_next_window_info,
+                    );
                 }
                 #[cfg(feature = "enable_run_control")]
                 {
@@ -1021,6 +769,10 @@ impl<'a> Manager<'a> {
                 }
             }
 
+            #[cfg(feature = "enable_run_control")]
+            if restart_request.is_some() {
+                worker::RESTART_TEARDOWN.store(true, Ordering::Relaxed);
+            }
             scheduler.scope(|s| {
                 s.run_with_hosts(move |_, hosts| {
                     for_each_host(hosts, |host| {
@@ -1031,6 +783,10 @@ impl<'a> Manager<'a> {
                     });
                 });
             });
+            #[cfg(feature = "enable_run_control")]
+            if restart_request.is_some() {
+                worker::RESTART_TEARDOWN.store(false, Ordering::Relaxed);
+            }
 
             // add each thread's local sim statistics to the global sim statistics.
             scheduler.scope(|s| {
@@ -1357,11 +1113,366 @@ fn for_each_host(host_iter: &mut HostIter<Box<Host>>, mut f: impl FnMut(&Host)) 
     });
 }
 
+#[cfg(feature = "enable_run_control")]
+fn init_and_reset_run_control() -> &'static RunControl {
+    let rc = RUN_CONTROL.get_or_init(|| RunControl {
+        pause_requested: Arc::new(AtomicBool::new(false)),
+        restart_requested: Arc::new(AtomicBool::new(false)),
+        restart_run_until_ns: Arc::new(AtomicU64::new(u64::MAX)),
+        // Request to re-print next-window host/PID info while paused.
+        info_requested: Arc::new(AtomicBool::new(false)),
+        skip_start_pause: Arc::new(AtomicBool::new(false)),
+        // If non-zero, request to run for this many ns of simulated time (relative) before
+        // pausing.
+        run_for_ns: Arc::new(AtomicU64::new(0)),
+        // Absolute simulated time (ns since SIMULATION_START) at which to pause, or u64::MAX
+        // if unset.
+        run_until_abs_ns: Arc::new(AtomicU64::new(u64::MAX)),
+        // If >0, run this many windows and then pause.
+        step_windows_remaining: Arc::new(AtomicU64::new(0)),
+        paused: Mutex::new(false),
+        cv: Condvar::new(),
+    });
+
+    // Clear any prior run-control state (important for in-process restarts).
+    rc.pause_requested.store(false, Ordering::Relaxed);
+    rc.restart_requested.store(false, Ordering::Relaxed);
+    rc.info_requested.store(false, Ordering::Relaxed);
+    rc.run_for_ns.store(0, Ordering::Relaxed);
+    rc.run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
+    rc.step_windows_remaining.store(0, Ordering::Relaxed);
+    rc.skip_start_pause.store(false, Ordering::Relaxed);
+    rc.restart_run_until_ns.store(u64::MAX, Ordering::Relaxed);
+
+    let pending = RESTART_RUN_UNTIL_NS.swap(u64::MAX, Ordering::Relaxed);
+    if pending != u64::MAX {
+        rc.run_until_abs_ns.store(pending, Ordering::Relaxed);
+        rc.skip_start_pause.store(true, Ordering::Relaxed);
+    }
+
+    rc
+}
+
+#[cfg(feature = "enable_run_control")]
+fn spawn_run_control_stdin_thread_once(rc: &'static RunControl) {
+    RUN_CONTROL_STDIN_THREAD_STARTED.get_or_init(|| {
+        if !std::io::stdin().is_terminal() {
+            return;
+        }
+
+        let pause_requested = rc.pause_requested.clone();
+        let restart_requested = rc.restart_requested.clone();
+        let restart_run_until_ns = rc.restart_run_until_ns.clone();
+        let info_requested = rc.info_requested.clone();
+        let skip_start_pause = rc.skip_start_pause.clone();
+        let run_for_ns = rc.run_for_ns.clone();
+        let run_until_abs_ns = rc.run_until_abs_ns.clone();
+        let step_windows_remaining = rc.step_windows_remaining.clone();
+
+        // Use raw pointers? avoid; instead capture RUN_CONTROL via OnceLock at runtime.
+        std::thread::spawn(move || {
+            // Print help once (times are in *simulated seconds*).
+            eprintln!(
+                "\
+** Shadow run-control (stdin; simulated time)\n\
+**   p<Enter>: pause at next window boundary\n\
+**   c<Enter>: continue\n\
+**   cN<Enter>: continue for N simulated seconds, then pause at next window boundary (e.g. c10)\n\
+**   n<Enter>: run exactly one window, then pause\n\
+**   s<Enter>: show next-window hosts/PIDs (when paused)\n\
+**   s:<pid><Enter>: print gdb attach command (e.g. s:12345)\n\
+**   info<Enter>: show next-window hosts/PIDs (when paused)\n\
+**   r<Enter>: restart from t=0s (in-process)\n\
+**   rN<Enter>: restart and run to N seconds (e.g. r10)\n"
+            );
+
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines().flatten() {
+                let cmd = line.trim();
+                if cmd.is_empty() {
+                    continue;
+                }
+
+                if cmd == "p" {
+                    pause_requested.store(true, Ordering::Relaxed);
+                    eprintln!("** run-control: pause requested (will pause at next window boundary)");
+                    continue;
+                }
+
+                if cmd == "n" {
+                    // Run exactly one more window, then pause.
+                    step_windows_remaining.store(1, Ordering::Relaxed);
+                    run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
+                    if let Some(rc) = RUN_CONTROL.get() {
+                        *rc.paused.lock().unwrap() = false;
+                        rc.cv.notify_all();
+                    }
+                    eprintln!("** run-control: will run 1 window and then pause");
+                    continue;
+                }
+
+                if cmd == "r" {
+                    restart_run_until_ns.store(u64::MAX, Ordering::Relaxed);
+                    skip_start_pause.store(false, Ordering::Relaxed);
+                    restart_requested.store(true, Ordering::Relaxed);
+                    if let Some(rc) = RUN_CONTROL.get() {
+                        rc.cv.notify_all();
+                    }
+                    eprintln!("** run-control: restart requested (in-process)");
+                    continue;
+                }
+
+                if let Some(rest) = cmd.strip_prefix('r') {
+                    if !rest.is_empty() {
+                        if let Ok(secs) = rest.parse::<u64>() {
+                            restart_run_until_ns.store(
+                                secs.saturating_mul(1_000_000_000),
+                                Ordering::Relaxed,
+                            );
+                            skip_start_pause.store(true, Ordering::Relaxed);
+                            restart_requested.store(true, Ordering::Relaxed);
+                            if let Some(rc) = RUN_CONTROL.get() {
+                                rc.cv.notify_all();
+                            }
+                            eprintln!("** run-control: restart requested (run to t={secs}s)");
+                            continue;
+                        }
+                    }
+                }
+
+                if cmd == "s" || cmd == "info" {
+                    info_requested.store(true, Ordering::Relaxed);
+                    if let Some(rc) = RUN_CONTROL.get() {
+                        rc.cv.notify_all();
+                    }
+                    eprintln!("** run-control: info requested (will print while paused)");
+                    continue;
+                }
+
+                if let Some(rest) = cmd.strip_prefix("s:") {
+                    // s:<pid> - attach gdb to the specified PID (manual, no GUI)
+                    if let Ok(pid) = rest.parse::<i32>() {
+                        eprintln!("** run-control: attach gdb manually with: gdb/dlv -p/attach {}", pid);
+                        continue;
+                    } else {
+                        eprintln!("** run-control: invalid PID: '{}'", rest);
+                        continue;
+                    }
+                }
+
+                if cmd == "c" {
+                    // Continue indefinitely.
+                    step_windows_remaining.store(0, Ordering::Relaxed);
+                    run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
+                    run_for_ns.store(0, Ordering::Relaxed);
+                    if let Some(rc) = RUN_CONTROL.get() {
+                        *rc.paused.lock().unwrap() = false;
+                        rc.cv.notify_all();
+                    }
+                    eprintln!("** run-control: continue");
+                    continue;
+                }
+
+                if let Some(rest) = cmd.strip_prefix('c') {
+                    // cN: run for N simulated seconds, then pause.
+                    if let Ok(secs) = rest.parse::<u64>() {
+                        step_windows_remaining.store(0, Ordering::Relaxed);
+                        run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
+                        run_for_ns.store(secs.saturating_mul(1_000_000_000), Ordering::Relaxed);
+                        if let Some(rc) = RUN_CONTROL.get() {
+                            *rc.paused.lock().unwrap() = false;
+                            rc.cv.notify_all();
+                        }
+                        eprintln!(
+                            "** run-control: continue for {secs}s simulated time (will pause at a window boundary)"
+                        );
+                        continue;
+                    }
+                }
+
+                eprintln!(
+                    "** Unknown command: '{cmd}'. Use: p | c | cN (e.g. c10) | n | s | s:<pid> | info | r | rN (e.g. r10)"
+                );
+            }
+        });
+    });
+}
+
+#[cfg(feature = "enable_run_control")]
+fn auto_pause_at_start_if_terminal(rc: &'static RunControl) {
+    // Auto-pause at simulated time 0s (before running the first window),
+    // but only when running interactively (stdin is a TTY). This avoids
+    // hanging non-interactive runs.
+    if std::io::stdin().is_terminal() {
+        let mut paused = rc.paused.lock().unwrap();
+        let skip_start_pause = rc.skip_start_pause.load(Ordering::Relaxed);
+        rc.skip_start_pause.store(false, Ordering::Relaxed);
+        if !*paused && !skip_start_pause {
+            *paused = true;
+            eprintln!(
+                "\
+** Shadow paused at start (t=0s)\n\
+** Commands: c | cN (e.g. c10) | n | info | s:<pid> | r | rN"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "enable_run_control")]
+fn wait_if_paused_at_start(rc: &'static RunControl) {
+    // If we started in paused mode, block here before running the first window.
+    // (We only set paused-at-start when stdin is a TTY.)
+    let mut paused = rc.paused.lock().unwrap();
+    while *paused {
+        paused = rc.cv.wait(paused).unwrap();
+    }
+}
+
+#[cfg(feature = "enable_run_control")]
+fn apply_run_control_requests_at_window_boundary(
+    rc: &'static RunControl,
+    min_next_event_time: EmulatedTime,
+    restart_request: &mut Option<u64>,
+) {
+    let fmt_s = |ns: u64| -> String {
+        if ns % 1_000_000_000 == 0 {
+            format!("{}s", ns / 1_000_000_000)
+        } else {
+            format!("{:.6}s", (ns as f64) / 1_000_000_000.0)
+        }
+    };
+
+    // Apply cN request: convert relative duration -> absolute pause target.
+    let run_for = rc.run_for_ns.swap(0, Ordering::Relaxed);
+    if run_for != 0 {
+        let next_abs_ns = (min_next_event_time - EmulatedTime::SIMULATION_START)
+            .as_nanos() as u64;
+        let target = next_abs_ns.saturating_add(run_for);
+        rc.run_until_abs_ns.store(target, Ordering::Relaxed);
+        eprintln!(
+            "** run-control: will pause at ~t={} (after +{} simulated seconds; next window boundary >= target)",
+            fmt_s(target),
+            run_for / 1_000_000_000
+        );
+    }
+
+    // Apply n request: count down windows.
+    let steps_left = rc.step_windows_remaining.load(Ordering::Relaxed);
+    if steps_left > 0 {
+        // Decrement once per window boundary.
+        let new = rc
+            .step_windows_remaining
+            .fetch_sub(1, Ordering::Relaxed)
+            - 1;
+        if new == 0 {
+            rc.pause_requested.store(true, Ordering::Relaxed);
+        }
+    }
+
+    // Auto-pause if we've reached run-until time.
+    let run_until = rc.run_until_abs_ns.load(Ordering::Relaxed);
+    if run_until != u64::MAX {
+        let next_abs_ns = (min_next_event_time - EmulatedTime::SIMULATION_START)
+            .as_nanos() as u64;
+        if next_abs_ns >= run_until {
+            // Clear so we only pause once.
+            rc.run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
+            rc.pause_requested.store(true, Ordering::Relaxed);
+        }
+    }
+
+    if rc.restart_requested.swap(false, Ordering::Relaxed) {
+        let run_until = rc.restart_run_until_ns.load(Ordering::Relaxed);
+        *restart_request = Some(run_until);
+        eprintln!("** run-control: restart requested (in-process)");
+    }
+}
+
+#[cfg(feature = "enable_run_control")]
+fn pause_and_soft_wait_until_resumed<F: FnMut()>(
+    rc: &'static RunControl,
+    min_next_event_time: EmulatedTime,
+    restart_request: &mut Option<u64>,
+    print_next_window_info: &mut F,
+) {
+    let fmt_s = |ns: u64| -> String {
+        if ns % 1_000_000_000 == 0 {
+            format!("{}s", ns / 1_000_000_000)
+        } else {
+            format!("{:.6}s", (ns as f64) / 1_000_000_000.0)
+        }
+    };
+
+    if rc.pause_requested.swap(false, Ordering::Relaxed) {
+        let mut paused = rc.paused.lock().unwrap();
+        *paused = true;
+
+        eprintln!(
+            "\
+** Shadow paused at window boundary\n\
+**   next window start: t={}",
+            fmt_s(
+                (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos() as u64
+            ),
+        );
+
+        print_next_window_info();
+
+        eprintln!("**");
+        eprintln!("** To attach gdb: s:<pid> (e.g. s:12345)");
+        eprintln!("** Commands: c | cN (e.g. c10) | n | p | s | s:<pid> | info | r | rN");
+    }
+
+    // If paused, block here (soft pause) until resumed.
+    let mut paused = rc.paused.lock().unwrap();
+    while *paused {
+        if rc.restart_requested.swap(false, Ordering::Relaxed) {
+            let run_until = rc.restart_run_until_ns.load(Ordering::Relaxed);
+            *restart_request = Some(run_until);
+            *paused = false;
+            break;
+        }
+
+        if rc.info_requested.swap(false, Ordering::Relaxed) {
+            print_next_window_info();
+        }
+
+        paused = rc.cv.wait(paused).unwrap();
+    }
+}
+
 /// Get the raw speed of the experiment machine.
 fn get_raw_cpu_frequency_hz() -> anyhow::Result<u64> {
-    const CONFIG_CPU_MAX_FREQ_FILE: &str = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
-    let khz: u64 = std::fs::read_to_string(CONFIG_CPU_MAX_FREQ_FILE)?.parse()?;
-    Ok(khz * 1000)
+    // Original scheme: prefer cpufreq's cpuinfo_max_freq (kHz) when available.
+    const CONFIG_CPU_MAX_FREQ_FILE: &str =
+        "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
+    if let Ok(khz_s) = std::fs::read_to_string(CONFIG_CPU_MAX_FREQ_FILE) {
+        if let Ok(khz) = khz_s.trim().parse::<u64>() {
+            if khz > 0 {
+                return Ok(khz * 1000);
+            }
+        }
+    }
+
+    // Fallback: parse /proc/cpuinfo and use the maximum "cpu MHz".
+    // This is more likely to work in containers/VMs/WSL where cpufreq is missing.
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo")
+        .context("Could not read /proc/cpuinfo")?;
+
+    let mut max_mhz: Option<f64> = None;
+    for line in cpuinfo.lines() {
+        let (k, v) = line.split_once(':').unwrap_or(("", ""));
+        if k.trim() != "cpu MHz" {
+            continue;
+        }
+        let mhz = v.trim().parse::<f64>().context("Failed to parse cpu MHz")?;
+        if mhz.is_finite() && mhz > 0.0 {
+            max_mhz = Some(max_mhz.map_or(mhz, |cur| cur.max(mhz)));
+        }
+    }
+
+    let max_mhz = max_mhz.context("Could not find cpu MHz in /proc/cpuinfo")?;
+    Ok((max_mhz * 1_000_000.0) as u64)
 }
 
 fn get_required_preload_path(libname: &str) -> anyhow::Result<PathBuf> {
