@@ -91,6 +91,15 @@ impl Cpu {
             SimulationTime::ZERO
         }
     }
+
+    pub fn snapshot_times(&self) -> (EmulatedTime, EmulatedTime) {
+        (self.now, self.time_cpu_available)
+    }
+
+    pub fn restore_times(&mut self, now: EmulatedTime, time_cpu_available: EmulatedTime) {
+        self.now = now;
+        self.time_cpu_available = time_cpu_available;
+    }
 }
 
 #[cfg(test)]

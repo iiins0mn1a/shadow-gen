@@ -88,6 +88,20 @@ impl EventQueue {
     pub fn next_event_time(&self) -> Option<EmulatedTime> {
         self.queue.peek().map(|x| x.0.time())
     }
+
+    pub fn last_popped_event_time(&self) -> EmulatedTime {
+        self.last_popped_event_time
+    }
+
+    pub fn set_last_popped_event_time(&mut self, time: EmulatedTime) {
+        self.last_popped_event_time = time;
+    }
+
+    pub fn cloned_events(&self) -> Vec<Event> {
+        let mut events: Vec<_> = self.queue.iter().map(|x| x.0.clone().into_inner()).collect();
+        events.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        events
+    }
 }
 
 impl Default for EventQueue {

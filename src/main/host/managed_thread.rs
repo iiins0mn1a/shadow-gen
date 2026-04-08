@@ -5,9 +5,11 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString};
 use std::io::Write;
+use std::ops::Deref;
 use std::os::fd::AsRawFd;
 use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{Arc, atomic};
 
 use linux_api::errno::Errno;
@@ -24,7 +26,7 @@ use shadow_shim_helper_rs::shim_event::{
     ShimEventSyscallComplete, ShimEventToShadow, ShimEventToShim,
 };
 use shadow_shim_helper_rs::syscall_types::{ForeignPtr, SyscallArgs, SyscallReg};
-use shadow_shmem::allocator::ShMemBlock;
+use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias, ShMemBlockSerialized, shdeserialize};
 use vasi_sync::scchannel::SelfContainedChannelError;
 
 use super::context::ThreadContext;
@@ -49,7 +51,7 @@ pub enum ResumeResult {
 }
 
 pub struct ManagedThread {
-    ipc_shmem: Arc<ShMemBlock<'static, IPCData>>,
+    ipc_shmem: Arc<IpcShmem>,
     is_running: Cell<bool>,
     return_code: Cell<Option<i32>>,
 
@@ -66,6 +68,25 @@ pub struct ManagedThread {
     affinity: Cell<i32>,
 }
 
+enum IpcShmem {
+    Owned(Arc<ShMemBlock<'static, IPCData>>),
+    Restored {
+        block: ShMemBlockAlias<'static, IPCData>,
+        handle: String,
+    },
+}
+
+impl Deref for IpcShmem {
+    type Target = IPCData;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(block) => block,
+            Self::Restored { block, .. } => block,
+        }
+    }
+}
+
 impl ManagedThread {
     pub fn native_pid(&self) -> linux_api::posix_types::Pid {
         self.native_pid
@@ -73,6 +94,20 @@ impl ManagedThread {
 
     pub fn native_tid(&self) -> linux_api::posix_types::Pid {
         self.native_tid
+    }
+
+    pub fn ipc_shmem_handle(&self) -> String {
+        match self.ipc_shmem.as_ref() {
+            IpcShmem::Owned(block) => block.serialize().to_string(),
+            IpcShmem::Restored { handle, .. } => handle.clone(),
+        }
+    }
+
+    pub fn current_event_bytes(&self) -> Vec<u8> {
+        let event = *self.current_event.borrow();
+        let size = std::mem::size_of_val(&event);
+        let ptr = std::ptr::from_ref(&event).cast::<u8>();
+        unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec()
     }
 
     /// Make the specified syscall on the native thread.
@@ -110,10 +145,19 @@ impl ManagedThread {
 
         debug!("env after preload injection: {envv:?}");
 
-        let ipc_shmem = Arc::new(shadow_shmem::allocator::shmalloc(IPCData::new()));
+        let ipc_shmem_block = Arc::new(shadow_shmem::allocator::shmalloc(IPCData::new()));
+        let ipc_shmem_serialized = ipc_shmem_block.serialize();
+        let ipc_shmem = Arc::new(IpcShmem::Owned(ipc_shmem_block.clone()));
 
         let child_pid =
-            Self::spawn_native(plugin_path, argv, envv, strace_file, log_file, &ipc_shmem)?;
+            Self::spawn_native(
+                plugin_path,
+                argv,
+                envv,
+                strace_file,
+                log_file,
+                &ipc_shmem_serialized,
+            )?;
 
         // In Linux, the PID is equal to the TID of its first thread.
         let native_pid = child_pid;
@@ -419,7 +463,7 @@ impl ManagedThread {
         };
 
         Ok(Self {
-            ipc_shmem: child_ipc_shmem,
+            ipc_shmem: Arc::new(IpcShmem::Owned(child_ipc_shmem)),
             is_running: Cell::new(true),
             return_code: Cell::new(None),
             current_event: RefCell::new(start_req),
@@ -552,7 +596,7 @@ impl ManagedThread {
         envv: Vec<CString>,
         strace_file: Option<&std::fs::File>,
         shimlog_file: &std::fs::File,
-        shmem_block: &ShMemBlock<IPCData>,
+        shmem_block: &ShMemBlockSerialized,
     ) -> Result<Pid, Errno> {
         // Preemptively check for likely reasons that execve might fail.
         // In particular we want to ensure that we  don't launch a statically
@@ -712,8 +756,7 @@ impl ManagedThread {
             // we avoid using the rustix write wrapper here, since we can't guarantee
             // that all bytes of the serialized shmem block are initd, and hence
             // can't safely construct the &[u8] that it wants.
-            let serialized = shmem_block.serialize();
-            let serialized_bytes = shadow_pod::as_u8_slice(&serialized);
+            let serialized_bytes = shadow_pod::as_u8_slice(shmem_block);
             let written = Errno::result_from_libc_errno(-1, unsafe {
                 libc::write(
                     stdin_writer.as_raw_fd(),
@@ -773,6 +816,47 @@ impl ManagedThread {
         }
         self.handle_process_exit();
     }
+
+    /// Reconstruct a `ManagedThread` for a process that was CRIU-restored.
+    ///
+    /// After CRIU restore, the process is alive but the original `ManagedThread`
+    /// object was lost. This constructor rebuilds the Shadow-side state:
+    ///
+    /// - The IPC shared memory block is reattached from a serialized handle.
+    /// - The most recent shim event is restored byte-for-byte so that the
+    ///   Shadow/shim protocol resumes at the same point as checkpoint time.
+    pub fn from_checkpoint(
+        native_pid: Pid,
+        native_tid: Pid,
+        ipc_shmem_handle: &str,
+        current_event_bytes: &[u8],
+    ) -> Self {
+        let ipc_shmem_serialized = ShMemBlockSerialized::from_str(ipc_shmem_handle).unwrap();
+        let ipc_shmem = Arc::new(IpcShmem::Restored {
+            block: unsafe { shdeserialize::<IPCData>(&ipc_shmem_serialized) },
+            handle: ipc_shmem_handle.to_string(),
+        });
+        log::info!(
+            "Rebuilding ManagedThread from checkpoint: pid={:?} tid={:?}",
+            native_pid,
+            native_tid,
+        );
+
+        Self {
+            ipc_shmem,
+            is_running: Cell::new(true),
+            return_code: Cell::new(None),
+            current_event: RefCell::new(event_from_bytes(current_event_bytes)),
+            native_pid,
+            native_tid,
+            affinity: Cell::new(cshadow::AFFINITY_UNINIT),
+        }
+    }
+}
+
+fn event_from_bytes(bytes: &[u8]) -> ShimEventToShadow {
+    assert_eq!(bytes.len(), std::mem::size_of::<ShimEventToShadow>());
+    unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<ShimEventToShadow>()) }
 }
 
 impl Drop for ManagedThread {

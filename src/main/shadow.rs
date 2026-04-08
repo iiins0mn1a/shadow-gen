@@ -5,6 +5,7 @@
 use std::borrow::Borrow;
 use std::ffi::{CStr, OsStr};
 use std::fmt::Write;
+use std::str::FromStr;
 use std::os::unix::ffi::OsStrExt;
 use std::thread;
 
@@ -13,11 +14,18 @@ use clap::Parser;
 use nix::sys::{personality, resource, signal};
 use signal_hook::{consts, iterator::Signals};
 
+use crate::core::checkpoint::shmem_backup;
+use crate::core::checkpoint::store::{CheckpointStore, FilesystemStore};
 use crate::core::configuration::{CliOptions, ConfigFileOptions, ConfigOptions};
 use crate::core::controller::Controller;
-#[cfg(feature = "enable_run_control")]
-use crate::core::manager::{RestartRequest, set_restart_run_until};
 use crate::core::logger::shadow_logger;
+use crate::core::run_control::commands::SimulationRunResult;
+use crate::core::run_control::TimeController;
+#[cfg(feature = "enable_run_control")]
+use crate::core::run_control::InteractiveController;
+#[cfg(not(feature = "enable_run_control"))]
+use crate::core::run_control::NoopController;
+use crate::core::run_control::SocketController;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
 use crate::cshadow as c;
@@ -222,24 +230,80 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
 
     let debug_hosts = options.debug_hosts.clone().unwrap_or_default();
 
+    // Build the appropriate time controller.
+    // Priority: SHADOW_CONTROL_SOCKET env var > interactive (feature flag) > noop
+    let time_controller: Box<dyn TimeController> = if let Ok(socket_path) =
+        std::env::var("SHADOW_CONTROL_SOCKET")
+    {
+        log::info!(
+            "Using SocketController with path: {}",
+            socket_path
+        );
+        Box::new(SocketController::new(socket_path))
+    } else {
+        #[cfg(feature = "enable_run_control")]
+        {
+            Box::new(InteractiveController::new())
+        }
+        #[cfg(not(feature = "enable_run_control"))]
+        {
+            Box::new(NoopController)
+        }
+    };
+
+    let mut pending_restore: Option<crate::core::checkpoint::snapshot_types::SimulationCheckpoint> =
+        None;
+
     loop {
         let sim_config = SimConfig::new(&shadow_config, &debug_hosts)
             .context("Failed to initialize the simulation")?;
 
-        // allocate and initialize our main simulation driver
-        let controller = Controller::new(sim_config, &shadow_config);
+        let controller = Controller::new(sim_config, &shadow_config, pending_restore.take());
 
-        // run the simulation
-        match controller.run() {
-            Ok(()) => break,
-            Err(e) => {
-                #[cfg(feature = "enable_run_control")]
-                if let Some(req) = e.downcast_ref::<RestartRequest>() {
-                    set_restart_run_until(req.run_until_ns);
-                    log::info!("Restarting simulation in-process");
-                    continue;
+        match controller
+            .run(time_controller.as_ref())
+            .context("Failed to run the simulation")?
+        {
+            SimulationRunResult::Completed { .. } => break,
+            SimulationRunResult::RestartRequested { run_until_ns, source } => {
+                use crate::core::run_control::commands::RestartSource;
+                crate::core::run_control::stdin_driver::set_restart_run_until(run_until_ns);
+                match source {
+                    RestartSource::Internal => {
+                        log::warn!(
+                            "{}",
+                            crate::core::run_control::commands::INTERNAL_RESTART_WARNING,
+                        );
+                        log::info!("Restarting simulation in-process (internal state only)");
+                    }
+                    RestartSource::External => {
+                        log::info!(
+                            "Restarting simulation in-process (initiated by external controller)"
+                        );
+                    }
                 }
-                return Err(e).context("Failed to run the simulation");
+                continue;
+            }
+            SimulationRunResult::RestoreRequested { label } => {
+                log::info!("Restore from checkpoint '{}' requested", label);
+
+                let data_dir = shadow_config.general.data_directory.as_ref().unwrap();
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let data_path = cwd.join(data_dir);
+
+                match perform_restore(&data_path, &label) {
+                    Ok(checkpoint) => {
+                        pending_restore = Some(checkpoint);
+                        log::info!(
+                            "Checkpoint '{}' restored; restarting simulation loop",
+                            label
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("Restore from checkpoint '{}' failed: {:?}", label, e);
+                    }
+                }
+                continue;
             }
         }
     }
@@ -252,6 +316,143 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Perform the restore side of checkpoint/restore.
+///
+/// This function:
+/// 1. Loads the checkpoint metadata
+/// 2. Restores `/dev/shm` files from the backup directory
+/// 3. CRIU-restores managed processes (when CRIU images are available)
+///
+/// After this returns successfully, the main loop re-creates the simulation
+/// from scratch. The restored shmem files are available for the new Shadow
+/// instance to map.
+fn perform_restore(
+    data_path: &std::path::Path,
+    label: &str,
+) -> anyhow::Result<crate::core::checkpoint::snapshot_types::SimulationCheckpoint> {
+    let store = FilesystemStore::new(data_path.join("checkpoints"))?;
+    let mut checkpoint = store.load(label)?;
+
+    log::info!(
+        "Loaded checkpoint '{}': sim_time_ns={}, shmem_backup={}",
+        label,
+        checkpoint.sim_time_ns,
+        checkpoint.shmem_backup_dir.display(),
+    );
+
+    // Restore shared memory files
+    if checkpoint.shmem_backup_dir.exists() {
+        let restored = shmem_backup::restore_shmem_files(&checkpoint.shmem_backup_dir)?;
+        log::info!("Restored {} shmem files", restored.len());
+    } else {
+        log::warn!(
+            "Shmem backup directory {} does not exist; skipping shmem restore",
+            checkpoint.shmem_backup_dir.display()
+        );
+    }
+
+    for host_cp in &checkpoint.hosts {
+        if host_cp.host_shmem_handle.is_empty() {
+            continue;
+        }
+        let serialized =
+            shadow_shmem::allocator::ShMemBlockSerialized::from_str(&host_cp.host_shmem_handle)?;
+        let host_shmem = unsafe {
+            shadow_shmem::allocator::shdeserialize::<shadow_shim_helper_rs::shim_shmem::HostShmem>(
+                &serialized,
+            )
+        };
+        unsafe {
+            crate::core::checkpoint::ipc_rebuild::update_shadow_pid_in_host_shmem(
+                std::ptr::from_ref(&*host_shmem).cast_mut(),
+            );
+        }
+    }
+
+    // CRIU restore processes (if images exist)
+    for proc_cp in checkpoint
+        .hosts
+        .iter_mut()
+        .flat_map(|h| h.processes.iter_mut())
+        .collect::<Vec<_>>()
+    {
+        if let Some(ref criu_dir) = proc_cp.criu_image_dir {
+            if criu_dir.exists() {
+                // Ensure the target native processes aren't running before
+                // CRIU restore. If the original process tree is still alive,
+                // CRIU may fail with pid/fork conflicts.
+                let native_pid = proc_cp.native_pid;
+                if native_pid > 1 {
+                    unsafe {
+                        let _ = libc::kill(native_pid, libc::SIGKILL);
+                    }
+                    // Wait briefly for the process to disappear and be reaped.
+                    // A zombie process can still hold its PID and make CRIU
+                    // restore fail with EEXIST ("Can't fork ... File exists").
+                    for _ in 0..50 {
+                        let mut status: libc::c_int = 0;
+                        let waited = unsafe { libc::waitpid(native_pid, &mut status, libc::WNOHANG) };
+                        if waited == native_pid {
+                            break;
+                        }
+                        if waited == -1 {
+                            // Not a child or already reaped; fall back to probe.
+                            let rc = unsafe { libc::kill(native_pid, 0) };
+                            if rc == -1 {
+                                break;
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                }
+
+                match crate::core::checkpoint::criu::restore_process(criu_dir, None) {
+                    Ok(new_pid) => {
+                        let checkpoint_tids: Vec<i32> =
+                            proc_cp.threads.iter().map(|t| t.native_tid).collect();
+                        log::info!(
+                            "CRIU restored process {} -> new pid {} (checkpoint tids={:?})",
+                            proc_cp.native_pid,
+                            new_pid,
+                            checkpoint_tids
+                        );
+                        log_restored_process_tree(new_pid);
+                        proc_cp.native_pid = new_pid;
+                    }
+                    Err(e) => {
+                        // Restore must be all-or-nothing: continuing after
+                        // CRIU failure tends to leave the simulation
+                        // inconsistent and can trigger follow-up panics.
+                        return Err(e).context(format!(
+                            "CRIU restore failed for process native_pid={}",
+                            proc_cp.native_pid
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(checkpoint)
+}
+
+fn log_restored_process_tree(pid: i32) {
+    let task_dir = format!("/proc/{pid}/task");
+    let tids = std::fs::read_dir(&task_dir)
+        .ok()
+        .map(|iter| {
+            let mut tids: Vec<i32> = iter
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter_map(|s| s.parse::<i32>().ok())
+                .collect();
+            tids.sort_unstable();
+            tids
+        })
+        .unwrap_or_default();
+    log::info!("Restored process tree pid={} task_tids={:?}", pid, tids);
 }
 
 pub fn version() -> String {

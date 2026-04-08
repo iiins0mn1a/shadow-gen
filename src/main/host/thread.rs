@@ -23,6 +23,7 @@ use super::host::Host;
 use super::managed_thread::{self, ManagedThread};
 use super::process::{Process, ProcessId};
 use crate::cshadow as c;
+use crate::core::checkpoint::snapshot_types::ThreadCheckpoint;
 use crate::host::syscall::condition::{SyscallConditionRef, SyscallConditionRefMut};
 use crate::host::syscall::handler::SyscallHandler;
 use crate::utility::callback_queue::CallbackQueue;
@@ -461,6 +462,24 @@ impl Thread {
             _counter: ObjectCounter::new("Thread"),
         };
         Ok(child)
+    }
+
+    pub fn from_checkpoint(
+        host: &Host,
+        checkpoint: &ThreadCheckpoint,
+        desc_table: RootedRc<RootedRefCell<DescriptorTable>>,
+        pid: ProcessId,
+        native_pid: Pid,
+    ) -> Result<Thread, Errno> {
+        let tid = ThreadId::try_from(libc::pid_t::try_from(checkpoint.thread_id).unwrap()).unwrap();
+        let native_tid = Pid::from_raw(checkpoint.native_tid).unwrap();
+        let mthread = ManagedThread::from_checkpoint(
+            native_pid,
+            native_tid,
+            &checkpoint.ipc_shmem_handle,
+            &checkpoint.current_event_bytes,
+        );
+        Self::wrap_mthread(host, mthread, desc_table, pid, tid)
     }
 
     /// Shared memory for this thread.

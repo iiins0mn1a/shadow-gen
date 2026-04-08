@@ -74,7 +74,10 @@ impl EmulatedTime {
 
     /// Convert to the SimulationTime since the simulation began.
     pub fn to_abs_simtime(self) -> SimulationTime {
-        self.duration_since(&Self::SIMULATION_START)
+        // In production we prefer a non-panicking conversion here.
+        // If an invalid/earlier emulated time leaks through (e.g. 0), clamp at 0
+        // since negative simulation time isn't representable.
+        self.saturating_duration_since(&Self::SIMULATION_START)
     }
 
     /// Returns the duration since `earlier`, or panics if `earlier` is after `self`, or

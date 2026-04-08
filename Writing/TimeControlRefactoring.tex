@@ -1,0 +1,579 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!10},
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{green!50!black},
+  stringstyle=\color{red!60!black},
+  showstringspaces=false,
+  tabsize=2
+}
+
+\title{Time as a First-Class Control Surface in Shadow:\\Methodology, Capabilities, and Implementation Challenges}
+\author{Shadow Enhancement Project}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Traditional uses of Shadow treat simulated time primarily as an internal
+scheduler variable. Our refactoring elevates time to a \emph{first-class
+control surface}: external tools and interactive users can now pause the
+system at globally consistent boundaries, step the execution in a controlled
+fashion, drive the simulator to a target logical time, and trigger
+checkpoint/restore transitions. The resulting interface is motivated not by
+operator convenience alone, but by higher-level systems goals such as
+time-travel debugging, snapshot-based fuzzing, deterministic replay, and
+stateful experiment orchestration.
+
+The key methodological choice is to align every control action with
+Shadow's runahead window boundaries. This yields a well-defined global cut
+over a parallel discrete-event execution and avoids unsafe interventions in
+the middle of host execution, shim IPC, or packet transfer. Building such a
+time-control substrate is non-trivial because Shadow combines
+(i) parallel event-driven scheduling,
+(ii) real OS processes executing unmodified binaries,
+(iii) Rust-side simulator state that is rich but not uniformly serializable,
+and (iv) external stateful dependencies such as databases or ledgers that
+live outside Shadow's address space.
+
+This document summarizes the core methodology, the capabilities now exposed
+by the implementation, the decomposition of the design into control-plane and
+state-plane components, and the principal challenges encountered during
+implementation, together with the mechanisms used to overcome them.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+The central thesis of this work is that \emph{time control} should be a
+native systems abstraction in Shadow, rather than an ad hoc debugging aid.
+For many workloads executed in Shadow---especially consensus clients,
+distributed databases, network services, and event-driven state machines---the
+most interesting failures are localized not merely by host identity or packet
+ordering, but by \emph{logical time}. Reaching, freezing, replaying, and
+restoring a particular temporal region is therefore a first-class requirement
+for modern systems experimentation.
+
+This observation motivates a shift from the legacy view of Shadow's control
+logic as a local convenience embedded inside \texttt{manager.rs} toward a
+more principled design in which simulated time is exposed as an explicit and
+programmable interface. Concretely, the current implementation provides a
+time-control substrate with four primary classes of capability:
+
+\begin{enumerate}[leftmargin=1.7em]
+  \item \textbf{Boundary-aligned pause/resume}: freeze execution at a
+  globally consistent logical-time boundary and resume without perturbing the
+  scheduler.
+  \item \textbf{Temporal stepping and run-until}: advance one runahead window
+  at a time, or execute until a specified simulated-time target.
+  \item \textbf{Checkpoint}: materialize a restorable temporal cut, including
+  simulator metadata, event representations, shared-memory artifacts, and
+  process-level checkpoint hooks.
+  \item \textbf{Restore}: re-enter the simulation from a prior temporal cut,
+  enabling replay-style experimentation and the basis for time-travel
+  debugging.
+\end{enumerate}
+
+These capabilities are not ends in themselves. They are intended to support
+systematic analyses that are otherwise expensive or fragile in real-time
+testbeds, including (i) deterministic reproduction of narrow fault windows,
+(ii) debugger attachment to the precise processes scheduled in the next
+logical-time slice, (iii) branch-and-replay exploration for fuzzing and fault
+injection, and (iv) coordinated control over Shadow and external persistent
+state.
+
+\section{Methodological Core}
+
+\subsection{Time Control as a Boundary-Synchronous Abstraction}
+
+Our methodology is based on a simple but fundamental principle:
+\emph{time-control decisions should only take effect at a globally safe
+simulation boundary}. In Shadow, the natural boundary is the runahead window
+boundary already induced by the parallel scheduler. At such a boundary,
+the simulator has completed all causally ready work within the current
+window and is about to determine the next execution frontier. This point is
+therefore uniquely suitable for intervention.
+
+This choice has three methodological consequences.
+
+\paragraph{Consistency.}
+Pausing at a window boundary yields a consistent global cut. It avoids stopping
+in the middle of a host's internal execution, a partially serviced syscall,
+or an in-flight Shadow--shim exchange.
+
+\paragraph{Determinism preservation.}
+Stepping and run-until semantics are expressed in terms of window transitions
+rather than wall-clock preemption. This preserves the existing event ordering
+discipline of the simulator and avoids introducing extra nondeterministic
+interleavings.
+
+\paragraph{Composability.}
+Checkpoint and restore become naturally aligned with the same boundary notion:
+the checkpoint is taken at a safe cut, and restore is defined as restarting
+the simulation from a previously recorded cut and re-establishing the state
+required to continue from that point.
+
+\subsection{Why This Matters}
+
+The boundary-synchronous model is particularly important when the goal is not
+merely to ``pause the simulator'', but to \emph{treat time as an experimental
+dimension}. This is the enabling condition for several higher-level workflows:
+
+\begin{itemize}[leftmargin=1.7em]
+  \item \textbf{Time-travel debugging.} A developer can advance to a target
+  interval, checkpoint it, inspect the processes that will execute next, and
+  replay or restore the same region under different debugging conditions.
+  \item \textbf{Snapshot-based fuzzing.} A fuzzer can checkpoint a promising
+  precondition, fork exploration from that cut, and repeatedly restore to the
+  same logical-time state while varying inputs or perturbations.
+  \item \textbf{Reproducible fault localization.} Failures observed at a given
+  logical time can be revisited using deterministic run-until or restore,
+  instead of re-running the full experiment from scratch without guarantees of
+  precise temporal alignment.
+  \item \textbf{Stateful orchestration.} External controllers can coordinate
+  Shadow with databases, ledgers, or file-backed state that cannot be safely
+  reset by the simulator alone.
+\end{itemize}
+
+\section{System Design}
+
+\subsection{Control Plane}
+
+The control plane is factored around a trait-based abstraction:
+
+\begin{lstlisting}[language=Rust]
+pub trait TimeController: Send + Sync {
+    fn on_simulation_start(&self);
+    fn on_window_boundary(
+        &self,
+        ctx: &WindowBoundaryContext,
+        print_info: PrintNextWindowInfoFn<'_>,
+    ) -> ControlDecision;
+    fn on_simulation_end(&self);
+}
+\end{lstlisting}
+
+This interface separates \emph{control policy} from the simulation kernel.
+The manager no longer embeds a monolithic run-control mechanism. Instead, it
+invokes a controller at three lifecycle hooks: simulation start, every window
+boundary, and simulation end. The important consequence is architectural:
+time control is now a pluggable subsystem rather than a special-case block of
+logic entangled with the scheduler.
+
+\subsection{Decision Semantics}
+
+The controller returns a \texttt{ControlDecision} interpreted by the manager.
+The current design supports the following decision space:
+
+\begin{itemize}[leftmargin=1.7em]
+  \item \texttt{Continue}: keep executing the next window.
+  \item \texttt{PauseAtBoundary}: remain paused until the front-end explicitly
+  resumes.
+  \item \texttt{Restart}: restart from logical time \(t=0\), optionally with a
+  target run-until time.
+  \item \texttt{CheckpointNow}: materialize a checkpoint at the current cut.
+  \item \texttt{RestoreCheckpoint}: leave the current run and re-enter from a
+  named checkpoint.
+\end{itemize}
+
+Equally important is the result returned by \texttt{Manager::run()}:
+
+\begin{lstlisting}[language=Rust]
+pub enum SimulationRunResult {
+    Completed { num_plugin_errors: u32 },
+    RestartRequested {
+        run_until_ns: Option<u64>,
+        source: RestartSource,
+    },
+    RestoreRequested { label: String },
+}
+\end{lstlisting}
+
+This replaces the earlier error-based restart path and makes temporal control
+an explicit part of the simulator's normal control flow. The outer loop in
+\texttt{shadow.rs} now interprets restart and restore requests as ordinary
+state transitions rather than exceptional failures.
+
+\subsection{Front-End Controllers}
+
+The current system includes three concrete controllers.
+
+\paragraph{\texttt{NoopController}.}
+This controller always returns \texttt{Continue}. It preserves the legacy
+behavior when time control is disabled.
+
+\paragraph{\texttt{InteractiveController}.}
+This controller exposes a debugger-like stdin interface. It supports pausing
+at the next boundary, continuing indefinitely, continuing for \(N\) simulated
+seconds, stepping exactly one runahead window, requesting restart, printing
+next-window diagnostics, and emitting attach information for native PIDs.
+The semantics are intentionally \emph{soft}: when paused, the simulator blocks
+on a condition variable at a boundary rather than attempting in-window
+preemption.
+
+\paragraph{\texttt{SocketController}.}
+This controller exposes time control to external orchestrators over a Unix
+domain socket using newline-delimited JSON. It is designed for workflows in
+which Shadow alone is not the whole system under experiment. The socket
+front-end supports external pause/continue, bounded execution via
+\texttt{continue\_for}, restart/replay, checkpoint, restore, and lightweight
+status queries. Critically, the socket controller uses a condition-variable
+handshake to ensure that commands are only consumed when the simulator is
+parked at a boundary.
+
+\section{Operational Capabilities}
+
+Table~\ref{tab:capabilities} summarizes the practical temporal capabilities
+now exposed by the implementation.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{3.1cm}p{3.2cm}p{7.1cm}@{}}
+\toprule
+\textbf{Capability} & \textbf{Front-end} & \textbf{Purpose and meaning} \\
+\midrule
+Pause at next boundary & stdin, socket & Freeze the execution at a globally safe logical-time cut for inspection, intervention, or orchestration. \\
+Resume / continue & stdin, socket & Continue normal execution without changing the causal schedule. \\
+Run until target time & stdin (\texttt{cN}), socket (\texttt{continue\_for}) & Reach a target logical-time region quickly while preserving deterministic window-boundary semantics. \\
+Single-window step & stdin (\texttt{n}) & Advance exactly one runahead window, which is the minimal scheduler-aligned stepping unit. \\
+Restart / replay & stdin, socket & Re-run from \(t=0\); external mode is intended for coordinated reset of persistent state outside Shadow. \\
+Checkpoint & socket / control plane & Materialize a boundary-aligned temporal cut that can later be restored or used as a branch point for exploration. \\
+Restore & socket / control plane & Re-enter the experiment from a previously saved cut, enabling temporal rewinding and branching. \\
+Next-window inspection & stdin & Reveal which hosts and native processes are scheduled next, providing a bridge from logical time to concrete OS processes. \\
+\bottomrule
+\end{tabular}
+\caption{Time-control capabilities exposed by the current design.}
+\label{tab:capabilities}
+\end{table}
+
+The most important point is not the command vocabulary itself, but the
+semantic contract behind it: every operation is aligned with a scheduler-safe
+boundary. This makes the interface suitable for rigorous experimentation
+instead of merely ad hoc pausing.
+
+\section{Stateful Time Control: Checkpoint and Restore}
+
+\subsection{Design Rationale}
+
+Pause and step are useful, but they are not sufficient for temporal
+branching. Time-travel debugging and snapshot-based fuzzing require the system
+to revisit a prior execution state without replaying the entire prefix from
+scratch. In Shadow, however, such a capability is substantially harder than
+in a pure simulator because the complete execution state is split across
+multiple layers:
+
+\begin{enumerate}[leftmargin=1.7em]
+  \item \textbf{Rust-side simulator state}: event queues, runahead metadata,
+  host-local counters, random state, and process/thread metadata.
+  \item \textbf{Managed native processes}: unmodified binaries launched by
+  Shadow and executing as real OS processes.
+  \item \textbf{Shadow--shim IPC state}: shared-memory regions that mediate
+  communication between Shadow and the managed processes.
+  \item \textbf{External persistent state}: databases, ledgers, and files that
+  are not owned by Shadow.
+\end{enumerate}
+
+Accordingly, our checkpoint/restore design is decomposed into cooperating
+mechanisms rather than a single monolithic snapshot.
+
+\subsection{Snapshot Decomposition}
+
+The checkpoint module introduces serializable snapshot types that mirror the
+live structures while remaining \texttt{serde}-compatible. The top-level
+\texttt{SimulationCheckpoint} stores the simulated timestamp, runahead
+metadata, host-level checkpoint records, shared-memory backup directories, and
+CRIU-related paths. Host-level snapshots record event-queue contents, local
+counters, PRNG state, and process metadata. Event-level snapshots distinguish
+between packet events and local task events.
+
+This decomposition is methodologically important: the restore path does not
+attempt to serialize opaque Rust objects directly. Instead, it defines an
+explicit state representation whose purpose is to be persisted, validated, and
+reconstructed.
+
+\subsection{Task Reification}
+
+One of the hardest parts of simulator-state checkpointing is that many local
+events in Shadow are represented by \texttt{TaskRef}, whose payload is an
+\texttt{Arc<dyn Fn(\&Host)>}. Such closures are fundamentally not serializable.
+The implementation therefore introduces \texttt{TaskDescriptor}, a parallel
+representation that records the \emph{semantic identity} of reconstructable
+tasks, such as process resume, shutdown, timer expiration, relay forwarding,
+or exec continuation. During event-queue serialization, local tasks are
+converted into descriptors; during restore, reconstructable descriptors are
+mapped back into live \texttt{TaskRef} closures.
+
+This mechanism turns task serialization from an impossible generic problem
+into a controlled, explicitly enumerated one. It also makes limitations
+observable: tasks that are opaque or semantically incomplete are marked as
+such instead of being silently mishandled.
+
+\subsection{Packet Reification}
+
+Packet state is similarly reified into serializable snapshots containing
+protocol headers, payload bytes, and priority metadata. The current
+implementation supports TCP and UDP packet reconstruction through public packet
+constructors. Some internal TCP representation details, such as structures not
+publicly reconstructable from library interfaces, are handled conservatively.
+This is a recurring theme in the design: where Shadow's live state depends on
+non-public or non-serializable internal forms, the implementation introduces
+explicit snapshot structures and rebuild logic instead of relying on raw
+memory serialization.
+
+\subsection{Shared Memory and CRIU}
+
+Managed processes and the simulator communicate through shared-memory-backed
+IPC channels. A restorable cut therefore requires more than event-queue
+metadata: it must preserve the shared-memory artifacts that both sides expect.
+The implementation addresses this by backing up the relevant \texttt{/dev/shm}
+files into the checkpoint directory and restoring them before the simulator
+re-enters the run loop. In parallel, CRIU integration is used to checkpoint
+and restore managed OS processes when process images are available.
+
+The key systems insight here is that ``restore'' is not a single action. It is
+an orchestrated sequence:
+
+\begin{enumerate}[leftmargin=1.7em]
+  \item load checkpoint metadata;
+  \item restore shared-memory artifacts;
+  \item restore managed processes through CRIU where applicable;
+  \item re-enter Shadow's top-level control loop;
+  \item re-create simulator structures for continued execution.
+\end{enumerate}
+
+\subsection{External Orchestration}
+
+Checkpoint/restore in Shadow cannot be understood correctly without external
+state. A simulation may interact with persistent databases or file-backed
+application state that lies entirely outside the simulator's ownership.
+Accordingly, the current design distinguishes \emph{internal restart} from
+\emph{external restart/replay}. The socket-based control path is the preferred
+mechanism for stateful workloads because it lets an external orchestrator reset
+the database or restore the external filesystem before asking Shadow to
+restart or restore.
+
+This division of responsibility is essential for correctness. A simulator can
+only guarantee restoration of the state it controls. External orchestration is
+therefore not an implementation convenience, but part of the semantic
+contract of stateful time control.
+
+\section{Implementation Summary}
+
+\subsection{Integration into the Main Loop}
+
+The refactoring removes the previous monolithic run-control code from
+\texttt{manager.rs} and replaces it with a single controller callback at each
+window boundary. The manager constructs a \texttt{WindowBoundaryContext}
+containing the current simulated time, next-event information, and the window
+range. The controller consumes this context and returns a
+\texttt{ControlDecision}. The manager then either proceeds, pauses, performs a
+checkpoint, or exits the current run with a structured restart/restore
+request.
+
+At the outermost layer, \texttt{shadow.rs} hosts a loop over simulation runs.
+This loop is now responsible for interpreting \texttt{SimulationRunResult},
+invoking restore orchestration when required, and re-entering the simulation
+cleanly. This design is significantly clearer than the older error-based
+mechanism and better matches the fact that restart and restore are
+first-class control transitions.
+
+\subsection{Socket-Level Synchronization}
+
+The socket controller implements a subtle but important synchronization
+protocol. Commands received from a client are not applied immediately. Instead,
+the controller waits until the simulation thread has parked at a window
+boundary, marks the pending control decision, and only then allows the
+simulation to consume it. Bounded execution (\texttt{continue\_for}) is
+implemented by converting a relative simulated-time duration into an absolute
+deadline tracked by the controller. The response to the client is delayed until
+the simulator has again reached a boundary after satisfying the request.
+
+This design solves a classic control-plane race: without such a handshake, an
+external tool could issue a command while the simulator is between boundaries,
+leading either to imprecise response timing or to unsafe assumptions about the
+state at which the command took effect.
+
+\subsection{POC Workflow}
+
+The current codebase includes a proof-of-concept orchestrator and a simple
+file-backed counter application. The workflow is representative:
+
+\begin{enumerate}[leftmargin=1.7em]
+  \item launch Shadow with \texttt{SHADOW\_CONTROL\_SOCKET};
+  \item execute until a target logical time;
+  \item issue a checkpoint request and back up the external database file;
+  \item continue execution to a later time;
+  \item restore the external database and issue a restore request;
+  \item continue from the restored cut and verify that the application-visible
+  state has been rewound.
+\end{enumerate}
+
+Conceptually, this POC demonstrates the intended composition of temporal
+control over both Shadow-managed state and external persistent state.
+
+\section{Why the Implementation is Non-Trivial}
+
+The implementation required solving several non-trivial systems problems. We
+highlight the most important ones here.
+
+\subsection{Challenge 1: Defining a Safe Temporal Intervention Point}
+
+\textbf{Problem.}
+In a parallel discrete-event simulator, naively pausing ``right now'' is not a
+well-defined operation. Hosts may be in the middle of processing local work,
+syscall emulation may be in progress, and cross-host effects may not yet be
+globally visible.
+
+\textbf{Resolution.}
+We align all control actions with runahead window boundaries. This yields a
+global cut that is both scheduler-safe and semantically meaningful. The same
+choice also gives stepping a natural unit: one window.
+
+\subsection{Challenge 2: Serializing Local Events that are Implemented as Closures}
+
+\textbf{Problem.}
+Shadow's local event system relies on task closures, which cannot be
+serialized directly. This blocks straightforward checkpointing of event queues.
+
+\textbf{Resolution.}
+We introduced \texttt{TaskDescriptor} as a semantic replacement for closures.
+Checkpointing records descriptors instead of trying to serialize executable
+code. Restore reconstructs live tasks only for descriptors with an explicit
+rebuild path, while conservatively skipping opaque tasks with warnings.
+
+\subsection{Challenge 3: Reconciling Simulator State with Real Process State}
+
+\textbf{Problem.}
+Shadow is not a pure simulator; it runs real OS processes. Checkpointing only
+the Rust-side scheduler state is insufficient because the application state
+also resides in native processes.
+
+\textbf{Resolution.}
+We decomposed checkpoint/restore into simulator metadata snapshots plus CRIU
+integration for managed processes. This separation respects the fact that
+process state and simulator state live in different abstraction layers and
+must be restored through different mechanisms.
+
+\subsection{Challenge 4: Preserving Shadow--Shim IPC Across Restore}
+
+\textbf{Problem.}
+Even if process state is restorable, the communication channels between Shadow
+and the shim depend on shared-memory objects and process identity. A restart of
+Shadow without rebuilding this substrate would leave the restored processes
+disconnected from the new simulator instance.
+
+\textbf{Resolution.}
+The implementation explicitly backs up shared-memory artifacts, restores them
+before re-entry, and threads the restore path through top-level orchestration
+so that the simulator can rebuild the environment expected by managed
+processes. This is also why restore is handled outside the core scheduler loop
+rather than as a local in-loop mutation.
+
+\subsection{Challenge 5: External Stateful Dependencies}
+
+\textbf{Problem.}
+Realistic workloads often depend on state that Shadow does not own: databases,
+blockchain data directories, or other persistent services. Restarting or
+restoring only the simulator would not produce a semantically valid replay.
+
+\textbf{Resolution.}
+We made the distinction between \emph{internal} and \emph{external} restart
+explicit in the API through \texttt{RestartSource}. Internal restart emits a
+warning that only Shadow's internal state is reset. External restart and
+restore are exposed through the socket controller so that an orchestrator can
+reset or restore persistent state in lockstep with Shadow.
+
+\subsection{Challenge 6: Giving Precise Semantics to ``run for \(N\) seconds''}
+
+\textbf{Problem.}
+In a windowed simulator, ``run for \(N\) simulated seconds'' cannot mean
+arbitrary preemption at exactly that timestamp without violating scheduler
+invariants.
+
+\textbf{Resolution.}
+Both interactive and socket controllers interpret bounded execution as
+``continue until the first window boundary whose logical time is at least the
+target''. This gives a precise, deterministic, and implementation-compatible
+semantics to run-until control.
+
+\section{Capabilities and Significance}
+
+From a systems perspective, the contribution of this refactoring is not merely
+that Shadow now accepts more commands. The deeper contribution is that Shadow
+gains a structured \emph{temporal control plane} with clear semantics and
+multiple front-ends, and that this control plane is connected to a
+\emph{stateful restore path}. Together, these properties support workflows
+that are central to modern systems debugging and testing:
+
+\begin{itemize}[leftmargin=1.7em]
+  \item \textbf{Time-travel debugging}: checkpoint before a fault, attach to
+  the relevant native processes, and repeatedly restore for inspection.
+  \item \textbf{Snapshot-based fuzzing}: branch from a promising temporal cut
+  instead of replaying a long prefix for every trial.
+  \item \textbf{Deterministic replay around fault windows}: reproduce
+  distributed behavior around specific logical-time intervals with precise
+  temporal control.
+  \item \textbf{Cross-layer orchestration}: coordinate the simulator with
+  external persistent services using a unified control protocol.
+\end{itemize}
+
+In short, the current implementation turns Shadow from a simulator that
+\emph{internally keeps track of time} into a system that \emph{externally
+exposes time as a controllable resource}.
+
+\section{Discussion}
+
+The present implementation should be understood as a principled, boundary-aware
+time-control substrate rather than merely a convenience wrapper. Its central
+methodological decisions---scheduler-aligned intervention, explicit control
+results, reified checkpoint state, and orchestration-aware restore---provide
+the right abstraction boundary for future work on stronger replay, richer
+branching, and higher-level tooling.
+
+At the same time, the design is intentionally conservative where full
+reconstruction is not yet guaranteed. Some transient task categories remain
+hard to reconstruct generically, and restore semantics for complex mixed
+internal/external states still depend on orchestration discipline. These are
+not accidental limitations; they follow directly from the fact that Shadow is
+a hybrid system combining simulator state, native process state, IPC state,
+and external persistent state. The contribution of the current design is that
+these boundaries are now explicit and therefore manageable.
+
+\section{Conclusion}
+
+This refactoring establishes time control as a core systems abstraction in
+Shadow. The resulting methodology is centered on one idea: every temporal
+operation---pause, step, run-until, checkpoint, and restore---must be defined
+with respect to a boundary-aligned, globally consistent cut of the parallel
+event-driven execution. Building such a mechanism is inherently non-trivial in
+Shadow because time is distributed across scheduler state, host-local events,
+native managed processes, shared-memory IPC, and external persistent state.
+
+By decomposing the problem into a pluggable control plane, explicit
+decision/result types, serializable checkpoint representations, CRIU-assisted
+process handling, and orchestrator-aware restore semantics, the current system
+provides a practical foundation for advanced temporal workflows. This is the
+key outcome of the work: Shadow now offers not just faster simulated time, but
+a programmable temporal substrate for debugging, replay, and systematic
+exploration.
+
+\end{document}

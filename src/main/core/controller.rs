@@ -10,7 +10,10 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::util::time::TimeParts;
 
 use crate::core::configuration::ConfigOptions;
+use crate::core::checkpoint::snapshot_types::SimulationCheckpoint;
 use crate::core::manager::{Manager, ManagerConfig};
+use crate::core::run_control::commands::SimulationRunResult;
+use crate::core::run_control::TimeController;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
 use crate::utility::status_bar::{self, StatusBar, StatusPrinter};
@@ -22,10 +25,15 @@ pub struct Controller<'a> {
 
     // the simulator should attempt to end immediately after this time
     end_time: EmulatedTime,
+    restore_checkpoint: Option<SimulationCheckpoint>,
 }
 
 impl<'a> Controller<'a> {
-    pub fn new(sim_config: SimConfig, config: &'a ConfigOptions) -> Self {
+    pub fn new(
+        sim_config: SimConfig,
+        config: &'a ConfigOptions,
+        restore_checkpoint: Option<SimulationCheckpoint>,
+    ) -> Self {
         let end_time: Duration = config.general.stop_time.unwrap().into();
         let end_time: SimulationTime = end_time.try_into().unwrap();
         let end_time = EmulatedTime::SIMULATION_START + end_time;
@@ -34,10 +42,11 @@ impl<'a> Controller<'a> {
             config,
             sim_config: Some(sim_config),
             end_time,
+            restore_checkpoint,
         }
     }
 
-    pub fn run(mut self) -> anyhow::Result<()> {
+    pub fn run(mut self, time_controller: &dyn TimeController) -> anyhow::Result<SimulationRunResult> {
         let mut sim_config = self.sim_config.take().unwrap();
 
         let status_logger = self.config.general.progress.unwrap().then(|| {
@@ -59,20 +68,29 @@ impl<'a> Controller<'a> {
             hosts: sim_config.hosts,
         };
 
-        let manager = Manager::new(manager_config, &self, self.config, self.end_time)
-            .context("Failed to initialize the manager")?;
+        let manager = Manager::new(
+            manager_config,
+            &self,
+            self.config,
+            self.end_time,
+            time_controller,
+            self.restore_checkpoint.clone(),
+        )
+        .context("Failed to initialize the manager")?;
 
         log::info!("Running simulation");
-        let num_plugin_errors = manager.run(status_logger.as_ref().map(|x| x.status()))?;
+        let result = manager.run(status_logger.as_ref().map(|x| x.status()))?;
         log::info!("Finished simulation");
 
-        if num_plugin_errors > 0 {
-            return Err(anyhow::anyhow!(
-                "{num_plugin_errors} managed processes in unexpected final state"
-            ));
+        if let SimulationRunResult::Completed { num_plugin_errors } = &result {
+            if *num_plugin_errors > 0 {
+                return Err(anyhow::anyhow!(
+                    "{num_plugin_errors} managed processes in unexpected final state"
+                ));
+            }
         }
 
-        Ok(())
+        Ok(result)
     }
 }
 

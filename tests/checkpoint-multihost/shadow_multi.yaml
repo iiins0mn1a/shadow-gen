@@ -1,0 +1,34 @@
+# Multi-host checkpoint/restore sample config.
+# `__COUNTER_APP_MULTI_PATH__` is replaced by orchestrator_repl.py automatically.
+
+general:
+  stop_time: 120s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: 1_gbit_switch
+
+hosts:
+  host-a:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __COUNTER_APP_MULTI_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          COUNTER_DB: counterA.db
+          HOST_TAG: host-a
+
+  host-b:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __COUNTER_APP_MULTI_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          COUNTER_DB: counterB.db
+          HOST_TAG: host-b

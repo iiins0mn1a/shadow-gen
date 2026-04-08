@@ -12,6 +12,7 @@ use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
+use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow as c;
@@ -799,7 +800,7 @@ impl SyscallHandler {
             // TODO: Split TaskRef into another type that only requires `FnOnce` and `Send`.
             let mthread = RootedRefCell::new(ctx.objs.host.root(), Some(mthread));
             ctx.objs.host.schedule_task_with_delay(
-                TaskRef::new(move |host| {
+                TaskRef::new_with_descriptor(move |host| {
                     // Take the `mthread` out of the captured wrapper.
                     // This task shouldn't run multiple times, so this should be
                     // infallible.
@@ -822,6 +823,8 @@ impl SyscallHandler {
                         process.thread_group_leader_id()
                     };
                     host.resume(pid, new_tglid);
+                }, TaskDescriptor::ExecContinuation {
+                    process_id: u32::from(pid),
                 }),
                 SimulationTime::ZERO,
             );

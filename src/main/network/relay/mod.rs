@@ -5,6 +5,7 @@ use std::sync::Weak;
 use atomic_refcell::AtomicRefCell;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 
+use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow as c;
@@ -135,6 +136,14 @@ impl Relay {
         }
     }
 
+    pub fn descriptor_id(&self) -> u64 {
+        u32::from(self.internal.borrow().src_dev_address) as u64
+    }
+
+    pub fn run_scheduled_forward(self: &Arc<Self>, host: &Host) {
+        Self::run_forward_task(&Arc::downgrade(self), host);
+    }
+
     /// Schedule an event to trigger us to run the forwarding loop later, and
     /// changes our state to `RelayState::Pending`. This allows us to run the
     /// forwarding loop after unwinding the current stack, and allows socket
@@ -153,7 +162,13 @@ impl Relay {
         // Schedule a forwarding task using a weak reference to allow the relay
         // to be dropped before the forwarding task is executed.
         let weak_self = Arc::downgrade(self);
-        let task = TaskRef::new(move |host| Self::run_forward_task(&weak_self, host));
+        let src_addr = self.internal.borrow().src_dev_address;
+        let task = TaskRef::new_with_descriptor(
+            move |host| Self::run_forward_task(&weak_self, host),
+            TaskDescriptor::RelayForward {
+                relay_id: u32::from(src_addr) as u64,
+            },
+        );
         host.schedule_task_with_delay(task, delay);
         log::trace!(
             "Relay src={} scheduled event to start forwarding packets after {:?}",

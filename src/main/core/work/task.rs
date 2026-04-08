@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
+    core::checkpoint::snapshot_types::TaskDescriptor,
     host::host::Host,
     utility::{IsSend, IsSync, Magic, ObjectCounter},
 };
@@ -13,6 +14,7 @@ pub struct TaskRef {
     magic: Magic<Self>,
     _counter: ObjectCounter,
     inner: Arc<dyn Fn(&Host) + Send + Sync>,
+    descriptor: Option<TaskDescriptor>,
 }
 
 impl TaskRef {
@@ -21,7 +23,24 @@ impl TaskRef {
             inner: Arc::new(f),
             magic: Magic::new(),
             _counter: ObjectCounter::new("TaskRef"),
+            descriptor: None,
         }
+    }
+
+    pub fn new_with_descriptor<T: 'static + Fn(&Host) + Send + Sync>(
+        f: T,
+        descriptor: TaskDescriptor,
+    ) -> Self {
+        Self {
+            inner: Arc::new(f),
+            magic: Magic::new(),
+            _counter: ObjectCounter::new("TaskRef"),
+            descriptor: Some(descriptor),
+        }
+    }
+
+    pub fn descriptor(&self) -> Option<&TaskDescriptor> {
+        self.descriptor.as_ref()
     }
 
     /// Executes the task.

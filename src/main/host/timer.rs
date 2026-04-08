@@ -6,6 +6,7 @@ use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 
 use super::host::Host;
+use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::utility::{Magic, ObjectCounter};
@@ -175,7 +176,13 @@ impl Timer {
         );
         let expire_id = internal_ref.next_expire_id;
         internal_ref.next_expire_id += 1;
-        let task = TaskRef::new(move |host| Self::timer_expire(&internal_ptr, host, expire_id));
+        let task = TaskRef::new_with_descriptor(
+            move |host| Self::timer_expire(&internal_ptr, host, expire_id),
+            TaskDescriptor::TimerExpire {
+                timer_id: 0,
+                expire_id,
+            },
+        );
         host.schedule_task_at_emulated_time(task, time);
     }
 

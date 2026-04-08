@@ -1,0 +1,19 @@
+general:
+  stop_time: 60s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: 1_gbit_switch
+
+hosts:
+  counter-host:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: /home/ins0/Repos/Event-Driven-Testnet/repos/shadow-gen/tests/checkpoint-poc/counter_app.py
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          COUNTER_DB: counter.db

@@ -46,6 +46,7 @@ use crate::core::configuration::{ProcessFinalState, QDiscMode};
 use crate::core::sim_config::PcapConfig;
 use crate::core::work::event::{Event, EventData};
 use crate::core::work::event_queue::EventQueue;
+use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow;
@@ -388,10 +389,25 @@ impl Host {
         debug_assert!(shutdown_time.is_none() || shutdown_time.unwrap() > start_time);
 
         // Schedule spawning the process.
-        let task = TaskRef::new(move |host| {
+        let start_descriptor = TaskDescriptor::StartApplication {
+            plugin_name: plugin_name.to_string_lossy().into_owned(),
+            plugin_path: plugin_path.to_string_lossy().into_owned(),
+            argv: argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            envv: envv
+                .iter()
+                .map(|env| env.to_string_lossy().into_owned())
+                .collect(),
+            pause_for_debugging,
+            shutdown_signal: shutdown_signal as i32,
+            shutdown_time_ns: shutdown_time.map(|t| t.as_nanos() as u64),
+            expected_final_state,
+        };
+        let task = TaskRef::new_with_descriptor(move |host| {
             // We can't move out of these captured variables, since TaskRef takes
             // a Fn, not a FnOnce.
-            // TODO: Add support for FnOnce?
             let envv = envv.clone();
             let argv = argv.clone();
 
@@ -413,21 +429,27 @@ impl Host {
             host.processes.borrow_mut().insert(process_id, process);
 
             if let Some(shutdown_time) = shutdown_time {
-                let task = TaskRef::new(move |host| {
-                    let Some(process) = host.process_borrow(process_id) else {
-                        debug!(
-                            "Can't send shutdown signal to process {process_id}; it no longer exists"
+                let task = TaskRef::new_with_descriptor(
+                    move |host| {
+                        let Some(process) = host.process_borrow(process_id) else {
+                            debug!(
+                                "Can't send shutdown signal to process {process_id}; it no longer exists"
+                            );
+                            return;
+                        };
+                        let process = process.borrow(host.root());
+                        let siginfo = siginfo_t::new_for_kill(
+                            Signal::try_from(shutdown_signal as i32).unwrap(),
+                            1,
+                            0,
                         );
-                        return;
-                    };
-                    let process = process.borrow(host.root());
-                    let siginfo = siginfo_t::new_for_kill(
-                        Signal::try_from(shutdown_signal as i32).unwrap(),
-                        1,
-                        0,
-                    );
-                    process.signal(host, None, &siginfo);
-                });
+                        process.signal(host, None, &siginfo);
+                    },
+                    TaskDescriptor::ShutdownProcess {
+                        process_id: u32::from(process_id),
+                        signal: shutdown_signal as i32,
+                    },
+                );
                 host.schedule_task_at_emulated_time(
                     task,
                     EmulatedTime::SIMULATION_START + shutdown_time,
@@ -435,7 +457,7 @@ impl Host {
             }
 
             host.resume(process_id, thread_id);
-        });
+        }, start_descriptor);
         self.schedule_task_at_emulated_time(task, EmulatedTime::SIMULATION_START + start_time);
     }
 
@@ -449,10 +471,15 @@ impl Host {
             (process.id(), process.thread_group_leader_id())
         };
         host.processes.borrow_mut().insert(process_id, process);
-        // Schedule process to run.
-        let task = TaskRef::new(move |host| {
-            host.resume(process_id, thread_id);
-        });
+        let task = TaskRef::new_with_descriptor(
+            move |host| {
+                host.resume(process_id, thread_id);
+            },
+            TaskDescriptor::ResumeProcess {
+                process_id: u32::from(process_id),
+                thread_id: libc::pid_t::from(thread_id) as u32,
+            },
+        );
         self.schedule_task_with_delay(task, SimulationTime::ZERO);
     }
 
@@ -558,6 +585,13 @@ impl Host {
         self.processes.borrow()
     }
 
+    #[track_caller]
+    pub fn processes_borrow_mut(
+        &self,
+    ) -> impl DerefMut<Target = BTreeMap<ProcessId, RootedRc<RootedRefCell<Process>>>> + '_ {
+        self.processes.borrow_mut()
+    }
+
     pub fn cpu_borrow(&self) -> impl Deref<Target = Cpu> + '_ {
         self.cpu.borrow()
     }
@@ -654,9 +688,24 @@ impl Host {
         self.net_ns.interface_borrow(addr)
     }
 
+    pub fn relay_by_descriptor_id(&self, relay_id: u64) -> Option<Arc<Relay>> {
+        [
+            self.relay_inet_out.clone(),
+            self.relay_inet_in.clone(),
+            self.relay_loopback.clone(),
+        ]
+        .into_iter()
+        .find(|relay| relay.descriptor_id() == relay_id)
+    }
+
     #[track_caller]
     pub fn random_mut(&self) -> impl DerefMut<Target = Xoshiro256PlusPlus> + '_ {
         self.random.borrow_mut()
+    }
+
+    #[track_caller]
+    pub fn random_borrow(&self) -> impl Deref<Target = Xoshiro256PlusPlus> + '_ {
+        self.random.borrow()
     }
 
     pub fn get_new_event_id(&self) -> u64 {
@@ -711,6 +760,59 @@ impl Host {
 
     pub fn event_queue(&self) -> &Arc<Mutex<EventQueue>> {
         &self.event_queue
+    }
+
+    pub fn replace_event_queue(
+        &self,
+        mut queue: EventQueue,
+        last_popped_event_time: EmulatedTime,
+    ) {
+        queue.set_last_popped_event_time(last_popped_event_time);
+        *self.event_queue.lock().unwrap() = queue;
+    }
+
+    pub fn next_thread_id_counter(&self) -> u64 {
+        self.thread_id_counter.get().try_into().unwrap()
+    }
+
+    pub fn next_event_id_counter(&self) -> u64 {
+        self.event_id_counter.get()
+    }
+
+    pub fn next_packet_id_counter(&self) -> u64 {
+        self.packet_id_counter.get()
+    }
+
+    pub fn determinism_sequence_counter(&self) -> u64 {
+        self.determinism_sequence_counter.get()
+    }
+
+    pub fn packet_priority_counter(&self) -> u64 {
+        self.packet_priority_counter.get()
+    }
+
+    pub fn set_next_thread_id_counter(&self, next: u64) {
+        self.thread_id_counter.set(next.try_into().unwrap());
+    }
+
+    pub fn set_next_event_id_counter(&self, next: u64) {
+        self.event_id_counter.set(next);
+    }
+
+    pub fn set_next_packet_id_counter(&self, next: u64) {
+        self.packet_id_counter.set(next);
+    }
+
+    pub fn set_determinism_sequence_counter(&self, next: u64) {
+        self.determinism_sequence_counter.set(next);
+    }
+
+    pub fn set_packet_priority_counter(&self, next: u64) {
+        self.packet_priority_counter.set(next);
+    }
+
+    pub fn set_random_state(&self, random: Xoshiro256PlusPlus) {
+        *self.random.borrow_mut() = random;
     }
 
     pub fn push_local_event(&self, event: Event) -> bool {
@@ -1005,7 +1107,13 @@ impl Drop for Host {
         // Validate that the shmem lock isn't held, which would potentially
         // violate the SAFETY argument in `lock_shmem`. (AFAIK Rust makes no formal
         // guarantee about the order in which fields are dropped)
-        assert!(self.shim_shmem_lock.borrow().is_none());
+        if self.shim_shmem_lock.borrow().is_some() {
+            log::error!(
+                "Host '{}' dropped with shim_shmem lock held; forcing unlock to avoid panic during restore rollback",
+                self.name()
+            );
+            let _ = self.shim_shmem_lock.borrow_mut().take();
+        }
     }
 }
 

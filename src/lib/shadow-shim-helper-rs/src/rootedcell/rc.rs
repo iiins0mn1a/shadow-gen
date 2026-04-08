@@ -142,7 +142,10 @@ impl<T> Drop for RootedRcCommon<T> {
     fn drop(&mut self) {
         if self.internal.is_some() {
             // `explicit_drop` is the public interface for the internal `safely_drop`
+            #[cfg(debug_assertions)]
             log::error!("Dropped without calling `explicit_drop`");
+            #[cfg(not(debug_assertions))]
+            log::debug!("Dropped without calling `explicit_drop`");
 
             // We *can* continue without violating Rust safety properties; the
             // underlying object will just be leaked, since the ref count will

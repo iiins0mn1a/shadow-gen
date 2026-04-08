@@ -190,6 +190,15 @@ impl Worker {
         debug_assert!(old.is_none());
     }
 
+    /// Replace the currently-active host and return the previous one, if any.
+    ///
+    /// Unlike `set_active_host`, this doesn't assert that no previous host was set.
+    /// Useful for transactional restore paths that need to save/restore context
+    /// without implicitly dropping an old host mid-flight.
+    pub fn swap_active_host(host: Box<Host>) -> Option<Box<Host>> {
+        Worker::with(|w| w.active_host.borrow_mut().replace(host)).unwrap()
+    }
+
     /// Clear the currently-active Host.
     pub fn take_active_host() -> Box<Host> {
         Worker::with(|w| w.active_host.borrow_mut().take())

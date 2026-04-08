@@ -8,6 +8,7 @@ use std::num::TryFromIntError;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 #[cfg(feature = "perf_timers")]
@@ -43,6 +44,9 @@ use super::syscall::types::ForeignArrayPtr;
 use super::thread::{Thread, ThreadId};
 use super::timer::Timer;
 use crate::core::configuration::{ProcessFinalState, RunningVal};
+use crate::core::checkpoint::ipc_rebuild;
+use crate::core::checkpoint::snapshot_types::{ProcessCheckpoint, TaskDescriptor};
+use crate::core::worker::WORKER_SHARED;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow;
@@ -393,6 +397,13 @@ impl RunnableProcess {
         self.strace_logging.as_ref().map(|x| x.options)
     }
 
+    #[track_caller]
+    pub fn threads_borrow(
+        &self,
+    ) -> impl Deref<Target = BTreeMap<ThreadId, RootedRc<RootedRefCell<Thread>>>> + '_ {
+        self.threads.borrow()
+    }
+
     /// If strace logging is disabled, this function will do nothing and return `None`.
     pub fn with_strace_file<T>(&self, f: impl FnOnce(&mut std::fs::File) -> T) -> Option<T> {
         // TODO: get Host from caller. Would need t update syscall-logger.
@@ -575,9 +586,15 @@ impl RunnableProcess {
         // Schedule thread to start. We're giving the caller's reference to thread
         // to the TaskRef here, which is why we don't increment its ref count to
         // create the TaskRef, but do decrement it on cleanup.
-        let task = TaskRef::new(move |host| {
-            host.resume(pid, tid);
-        });
+        let task = TaskRef::new_with_descriptor(
+            move |host| {
+                host.resume(pid, tid);
+            },
+            TaskDescriptor::ResumeProcess {
+                process_id: u32::from(pid),
+                thread_id: libc::pid_t::from(tid) as u32,
+            },
+        );
         host.schedule_task_with_delay(task, SimulationTime::ZERO);
     }
 
@@ -1135,6 +1152,158 @@ impl Process {
                         itimer_real,
                         strace_logging,
                         dumpable: Cell::new(SuidDump::SUID_DUMP_USER),
+                        native_pid,
+                        unsafe_borrow_mut: RefCell::new(None),
+                        unsafe_borrows: RefCell::new(Vec::new()),
+                        threads,
+                        #[cfg(feature = "perf_timers")]
+                        cpu_delay_timer: RefCell::new(PerfTimer::new_stopped()),
+                        #[cfg(feature = "perf_timers")]
+                        total_run_time: Cell::new(Duration::ZERO),
+                        child_process_event_listeners: Default::default(),
+                        shimlog_file,
+                    }))),
+                },
+            ),
+        ))
+    }
+
+    pub fn from_checkpoint(
+        host: &Host,
+        checkpoint: &ProcessCheckpoint,
+    ) -> Result<RootedRc<RootedRefCell<Process>>, Errno> {
+        let process_id = ProcessId::try_from(checkpoint.process_id).unwrap();
+        let native_pid = Pid::from_raw(checkpoint.native_pid).unwrap();
+        let desc_table = RootedRc::new(
+            host.root(),
+            RootedRefCell::new(host.root(), DescriptorTable::new()),
+        );
+        let itimer_real = RefCell::new(Timer::new(move |host| {
+            itimer_real_expiration(host, process_id)
+        }));
+
+        let plugin_name = CString::new(format!("restored-{}", checkpoint.process_id)).unwrap();
+        let name = make_name(host, plugin_name.to_str().unwrap(), process_id);
+
+        let mut file_basename = PathBuf::new();
+        file_basename.push(host.data_dir_path());
+        file_basename.push(format!("restored.{}", checkpoint.process_id));
+
+        {
+            let mut descriptor_table = desc_table.borrow_mut(host.root());
+            Self::open_stdio_file_helper(
+                &mut descriptor_table,
+                libc::STDIN_FILENO.try_into().unwrap(),
+                "/dev/null".into(),
+                OFlag::O_RDONLY,
+            );
+            Self::open_stdio_file_helper(
+                &mut descriptor_table,
+                libc::STDOUT_FILENO.try_into().unwrap(),
+                Self::static_output_file_name(&file_basename, "stdout"),
+                OFlag::O_WRONLY,
+            );
+            Self::open_stdio_file_helper(
+                &mut descriptor_table,
+                libc::STDERR_FILENO.try_into().unwrap(),
+                Self::static_output_file_name(&file_basename, "stderr"),
+                OFlag::O_WRONLY,
+            );
+        }
+
+        let shimlog_file = Arc::new(
+            std::fs::File::create(Self::static_output_file_name(&file_basename, "shimlog"))
+                .unwrap(),
+        );
+        debug_assert_cloexec(&shimlog_file);
+
+        let shim_shared_mem = ProcessShmem::new(
+            &host.shim_shmem_lock_borrow().unwrap().root,
+            host.shim_shmem().serialize(),
+            host.id(),
+            None,
+        );
+        let shim_shared_mem_block = shadow_shmem::allocator::shmalloc(shim_shared_mem);
+
+        let working_dir = utility::pathbuf_to_nul_term_cstring(
+            std::fs::canonicalize(host.data_dir_path()).unwrap(),
+        );
+
+        let threads = RefCell::new(
+            checkpoint
+                .threads
+                .iter()
+                .map(|thread_cp| {
+                    let thread = Thread::from_checkpoint(
+                        host,
+                        thread_cp,
+                        RootedRc::clone(&desc_table, host.root()),
+                        process_id,
+                        native_pid,
+                    )
+                    .unwrap();
+                    let tid = thread.id();
+                    (
+                        tid,
+                        RootedRc::new(host.root(), RootedRefCell::new(host.root(), thread)),
+                    )
+                })
+                .collect(),
+        );
+
+        {
+            let native_pid_for_watcher = native_pid;
+            let ipc_handles: Vec<String> = checkpoint
+                .threads
+                .iter()
+                .map(|thread| thread.ipc_shmem_handle.clone())
+                .collect();
+            let watcher = WORKER_SHARED.borrow();
+            let watcher = watcher.as_ref().unwrap().child_pid_watcher();
+            ipc_rebuild::reregister_child_watcher(watcher, native_pid_for_watcher, move |_pid| {
+                for handle in &ipc_handles {
+                    let Ok(serialized) = shadow_shmem::allocator::ShMemBlockSerialized::from_str(handle)
+                    else {
+                        continue;
+                    };
+                    let ipc = unsafe {
+                        shadow_shmem::allocator::shdeserialize::<shadow_shim_helper_rs::ipc::IPCData>(
+                            &serialized,
+                        )
+                    };
+                    ipc.from_plugin().close_writer();
+                }
+            });
+        }
+
+        let common = Common {
+            id: process_id,
+            host_id: host.id(),
+            working_dir,
+            name,
+            plugin_name,
+            parent_pid: Cell::new(ProcessId::try_from(checkpoint.parent_pid).unwrap()),
+            group_id: Cell::new(ProcessId::try_from(checkpoint.group_id).unwrap()),
+            session_id: Cell::new(ProcessId::try_from(checkpoint.session_id).unwrap()),
+            exit_signal: None,
+            rlimits: [shadow_pod::zeroed(); linux_api::resource::RLIM_NLIMITS as usize],
+        };
+
+        Ok(RootedRc::new(
+            host.root(),
+            RootedRefCell::new(
+                host.root(),
+                Self {
+                    state: RefCell::new(Some(ProcessState::Runnable(RunnableProcess {
+                        common,
+                        expected_final_state: None,
+                        shim_shared_mem_block,
+                        memory_manager: Box::new(RefCell::new(unsafe {
+                            MemoryManager::new(native_pid)
+                        })),
+                        itimer_real,
+                        strace_logging: None,
+                        dumpable: Cell::new(SuidDump::new(checkpoint.dumpable)),
                         native_pid,
                         unsafe_borrow_mut: RefCell::new(None),
                         unsafe_borrows: RefCell::new(Vec::new()),

@@ -1,0 +1,22 @@
+[counter_app_multi:host-b] start counter=0, db=counterB.db, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=1, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=2, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=3, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=4, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=5, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=6, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=7, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=8, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=9, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=10, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=11, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=12, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=13, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=14, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=15, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=16, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=17, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=18, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=19, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=20, token=6f490b46407a4d8cb40becff7d4dec9a
+[counter_app_multi:host-b] counter=21, token=6f490b46407a4d8cb40becff7d4dec9a

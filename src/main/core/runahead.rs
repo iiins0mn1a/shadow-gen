@@ -115,4 +115,20 @@ impl Runahead {
             min_runahead_config.map(|x| x.as_nanos())
         );
     }
+
+    pub fn min_used_latency(&self) -> Option<SimulationTime> {
+        *self.min_used_latency.read().unwrap()
+    }
+
+    pub fn min_possible_latency(&self) -> SimulationTime {
+        self.min_possible_latency
+    }
+
+    pub fn min_runahead_config(&self) -> Option<SimulationTime> {
+        self.min_runahead_config
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.is_runahead_dynamic
+    }
 }

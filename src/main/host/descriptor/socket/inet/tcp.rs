@@ -10,6 +10,7 @@ use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
+use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow as c;
@@ -1108,7 +1109,7 @@ impl tcp::Dependencies for TcpDeps {
 
         // schedule a task with the host
         Worker::with_active_host(|host| {
-            let task = TaskRef::new(move |_host| {
+            let task = TaskRef::new_with_descriptor(move |_host| {
                 // take ownership of the task; will panic if the task is run more than once
                 let f = f.borrow_mut().take().unwrap();
 
@@ -1118,6 +1119,8 @@ impl tcp::Dependencies for TcpDeps {
                         f(state, registered_by);
                     })
                 });
+            }, TaskDescriptor::Opaque {
+                description: "tcp_timer_callback".to_string(),
             });
 
             host.schedule_task_at_emulated_time(task, time);

@@ -1,0 +1,46 @@
+{
+  "objects": {
+    "alloc_counts": {
+      "TaskRef": 1106,
+      "Event": 448,
+      "LegacyDescriptor": 226,
+      "Descriptor": 224,
+      "RegularFile": 224,
+      "Timer": 222,
+      "StatusListener": 220,
+      "SysCallCondition": 220,
+      "Relay": 12,
+      "NetworkInterface": 8,
+      "FutexTable": 4,
+      "Router": 4,
+      "DescriptorTable": 2,
+      "Epoll": 2,
+      "Thread": 2
+    },
+    "dealloc_counts": {
+      "TaskRef": 1106,
+      "Event": 448,
+      "Timer": 222,
+      "LegacyDescriptor": 220,
+      "StatusListener": 220,
+      "SysCallCondition": 220,
+      "Descriptor": 218,
+      "RegularFile": 218,
+      "Relay": 12,
+      "NetworkInterface": 8,
+      "FutexTable": 4,
+      "Router": 4,
+      "Epoll": 2,
+      "Thread": 2
+    }
+  },
+  "syscalls": {
+    "lseek": 436,
+    "write": 436,
+    "pselect6": 220,
+    "close": 218,
+    "fstat": 218,
+    "ioctl": 218,
+    "open": 218
+  }
+}

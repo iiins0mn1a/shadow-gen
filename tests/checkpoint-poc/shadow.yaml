@@ -1,0 +1,24 @@
+# Shadow configuration for checkpoint/restore POC.
+#
+# Runs a single host with one process (counter_app.py) for 60 simulated seconds.
+# Use SHADOW_CONTROL_SOCKET to drive checkpoint/restore from the orchestrator.
+
+general:
+  stop_time: 60s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: 1_gbit_switch
+
+hosts:
+  counter-host:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __COUNTER_APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          COUNTER_DB: counter.db

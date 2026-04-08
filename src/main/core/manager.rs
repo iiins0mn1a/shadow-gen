@@ -1,15 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::io::{BufRead, IsTerminal};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Condvar;
 use std::sync::Mutex;
-use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -30,90 +26,38 @@ use shadow_shim_helper_rs::shim_shmem::{ManagerShmem, NativePreemptionConfig};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shmem::allocator::ShMemBlock;
 
+use crate::core::checkpoint::criu;
+use crate::core::checkpoint::event_conversion::event_to_snapshot;
+use crate::core::checkpoint::event_conversion::rebuild_event_queue;
+use crate::core::checkpoint::shmem_backup;
+use crate::core::checkpoint::snapshot_types::*;
+use crate::core::checkpoint::store::{CheckpointStore, FilesystemStore};
 use crate::core::configuration::{self, ConfigOptions, Flatten};
 use crate::core::controller::{Controller, ShadowStatusBarState, SimController};
 use crate::core::cpu;
 use crate::core::resource_usage;
+use crate::core::run_control::commands::{ControlDecision, SimulationRunResult};
+use crate::core::run_control::controller::WindowBoundaryContext;
+use crate::core::run_control::TimeController;
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::{Bandwidth, HostInfo};
 use crate::core::sim_stats;
+use crate::core::work::task::TaskRef;
 use crate::core::worker;
 use crate::cshadow as c;
 use crate::host::host::{Host, HostParameters};
+use crate::host::process::Process;
 use crate::network::dns::DnsBuilder;
 use crate::network::graph::{IpAssignment, RoutingInfo};
 use crate::utility;
 use crate::utility::childpid_watcher::ChildPidWatcher;
 use crate::utility::status_bar::Status;
 
-#[cfg(feature = "enable_run_control")]
-static RESTART_RUN_UNTIL_NS: AtomicU64 = AtomicU64::new(u64::MAX);
-
-// Run-control (feature-gated by `enable_run_control`):
-// We implement a *soft pause*: at a window boundary we block on a Condvar until resumed.
-// This avoids stopping the whole process in the middle of host execution or shim IPC.
-//
-// Control is via stdin (interactive terminal):
-// - p<Enter>: pause at next window boundary
-// - c<Enter>: continue (resume)
-// - cN<Enter>: continue for N seconds of *simulated time*, then pause at the next window boundary
-// - n<Enter>: run exactly one more window, then pause (gdb-like next)
-// - s<Enter>: show next-window hosts/PIDs (when paused)
-// - s:<pid><Enter>: print gdb attach command
-// - r<Enter>: restart from t=0s (in-process)
-// - rN<Enter>: restart and run to N seconds
-#[cfg(feature = "enable_run_control")]
-struct RunControl {
-    pause_requested: Arc<AtomicBool>,
-    restart_requested: Arc<AtomicBool>,
-    restart_run_until_ns: Arc<AtomicU64>,
-    // Request to re-print next-window host/PID info while paused.
-    info_requested: Arc<AtomicBool>,
-    skip_start_pause: Arc<AtomicBool>,
-    // If non-zero, request to run for this many ns of simulated time (relative) before pausing.
-    run_for_ns: Arc<AtomicU64>,
-    // Absolute simulated time (ns since SIMULATION_START) at which to pause, or u64::MAX if unset.
-    run_until_abs_ns: Arc<AtomicU64>,
-    // If >0, run this many windows and then pause.
-    step_windows_remaining: Arc<AtomicU64>,
-    paused: Mutex<bool>,
-    cv: Condvar,
-}
-
-#[cfg(feature = "enable_run_control")]
-static RUN_CONTROL: OnceLock<RunControl> = OnceLock::new();
-#[cfg(feature = "enable_run_control")]
-static RUN_CONTROL_STDIN_THREAD_STARTED: OnceLock<()> = OnceLock::new();
-
-#[cfg(feature = "enable_run_control")]
-#[derive(Debug)]
-pub struct RestartRequest {
-    pub run_until_ns: Option<u64>,
-}
-
-#[cfg(feature = "enable_run_control")]
-impl std::fmt::Display for RestartRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(ns) = self.run_until_ns {
-            write!(f, "Restart requested: run until {ns} ns")
-        } else {
-            write!(f, "Restart requested")
-        }
-    }
-}
-
-#[cfg(feature = "enable_run_control")]
-impl std::error::Error for RestartRequest {}
-
-#[cfg(feature = "enable_run_control")]
-pub fn set_restart_run_until(run_until_ns: Option<u64>) {
-    RESTART_RUN_UNTIL_NS.store(run_until_ns.unwrap_or(u64::MAX), Ordering::Relaxed);
-}
-
 pub struct Manager<'a> {
     manager_config: Option<ManagerConfig>,
     controller: &'a Controller<'a>,
     config: &'a ConfigOptions,
+    time_controller: &'a dyn TimeController,
 
     raw_frequency: u64,
     native_tsc_frequency: u64,
@@ -129,6 +73,7 @@ pub struct Manager<'a> {
 
     meminfo_file: std::fs::File,
     shmem: ShMemBlock<'static, ManagerShmem>,
+    restore_checkpoint: Option<SimulationCheckpoint>,
 }
 
 impl<'a> Manager<'a> {
@@ -137,6 +82,8 @@ impl<'a> Manager<'a> {
         controller: &'a Controller<'a>,
         config: &'a ConfigOptions,
         end_time: EmulatedTime,
+        time_controller: &'a dyn TimeController,
+        restore_checkpoint: Option<SimulationCheckpoint>,
     ) -> anyhow::Result<Self> {
         // get the system's CPU frequency
         let raw_frequency = get_raw_cpu_frequency_hz().unwrap_or_else(|e| {
@@ -237,11 +184,12 @@ impl<'a> Manager<'a> {
                 ));
             }
         } else {
-            // create the data and hosts directories
-            std::fs::create_dir(&data_path).with_context(|| {
+            // create the data and hosts directories (tolerate already-existing
+            // for restart / restore cycles)
+            std::fs::create_dir_all(&data_path).with_context(|| {
                 format!("Failed to create data directory '{}'", data_path.display())
             })?;
-            std::fs::create_dir(&hosts_path).with_context(|| {
+            std::fs::create_dir_all(&hosts_path).with_context(|| {
                 format!(
                     "Failed to create hosts directory '{}'",
                     hosts_path.display(),
@@ -322,6 +270,7 @@ impl<'a> Manager<'a> {
             manager_config: Some(manager_config),
             controller,
             config,
+            time_controller,
             raw_frequency,
             native_tsc_frequency,
             end_time,
@@ -332,13 +281,14 @@ impl<'a> Manager<'a> {
             check_mem_usage: true,
             meminfo_file,
             shmem,
+            restore_checkpoint,
         })
     }
 
     pub fn run(
         mut self,
         status_logger_state: Option<&Arc<Status<ShadowStatusBarState>>>,
-    ) -> anyhow::Result<u32> {
+    ) -> anyhow::Result<SimulationRunResult> {
         let mut manager_config = self.manager_config.take().unwrap();
 
         let min_runahead_config: Option<Duration> = self
@@ -402,10 +352,6 @@ impl<'a> Manager<'a> {
         let dns = dns_builder.into_dns()?;
 
         // Now build the hosts using the assigned host ids.
-        // note: there are several return points before we add these hosts to the scheduler and we
-        // would leak memory if we return before then, but not worrying about that since the issues
-        // will go away when we move the hosts to rust, and if we don't add them to the scheduler
-        // then it means there was an error and we're going to exit anyways
         let mut hosts: Vec<_> = host_init
             .iter()
             .map(|(info, id)| {
@@ -419,20 +365,16 @@ impl<'a> Manager<'a> {
 
         let use_cpu_pinning = self.config.experimental.use_cpu_pinning.unwrap();
 
-        // an infinite iterator that always returns `<Option<Option<u32>>>::Some`
         let cpu_iter =
             std::iter::from_fn(|| {
-                // if cpu pinning is enabled, return Some(Some(cpu_id)), otherwise return Some(None)
                 Some(use_cpu_pinning.then(|| {
                     u32::try_from(unsafe { c::affinity_getGoodWorkerAffinity() }).unwrap()
                 }))
             });
 
-        // shadow is parallelized at the host level, so we don't need more parallelism than the
-        // number of hosts
+        // shadow is parallelized at the host level
         let parallelism = std::cmp::min(parallelism, hosts.len());
 
-        // should have either all `Some` values, or all `None` values
         let cpus: Vec<Option<u32>> = cpu_iter.take(parallelism).collect();
         if cpus[0].is_some() {
             log::debug!("Pinning to cpus: {cpus:?}");
@@ -450,10 +392,8 @@ impl<'a> Manager<'a> {
                 ip_assignment: manager_config.ip_assignment,
                 routing_info: manager_config.routing_info,
                 host_bandwidths: manager_config.host_bandwidths,
-                // safe since the DNS type has an internal mutex
                 dns,
                 num_plugin_errors: AtomicU32::new(0),
-                // allow the status logger's state to be updated from anywhere
                 status_logger_state: status_logger_state.map(Arc::clone),
                 runahead: Runahead::new(
                     self.config.experimental.use_dynamic_runahead.unwrap(),
@@ -469,15 +409,13 @@ impl<'a> Manager<'a> {
                 sim_end_time: self.end_time,
             });
 
-        // Used to carry an in-process restart request out of the scheduler scope.
-        let mut restart_request: Option<u64> = None;
+        let mut restart_request: Option<(Option<u64>, crate::core::run_control::commands::RestartSource)> = None;
 
         // scope used so that the scheduler is dropped before we log the global counters below
         {
             let mut scheduler = match self.config.experimental.scheduler.unwrap() {
                 configuration::Scheduler::ThreadPerHost => {
                     std::thread_local! {
-                        /// A thread-local required by the thread-per-host scheduler.
                         static SCHED_HOST_STORAGE: RefCell<Option<Box<Host>>> = const { RefCell::new(None) };
                     }
                     Scheduler::ThreadPerHost(ThreadPerHostSched::new(
@@ -502,18 +440,73 @@ impl<'a> Manager<'a> {
                 });
             });
 
-            // the current simulation interval
-            let mut window = Some((
-                EmulatedTime::SIMULATION_START,
-                EmulatedTime::SIMULATION_START + SimulationTime::NANOSECOND,
-            ));
+            // Phase 2 restore: replay host checkpoints only after Worker TLS is ready.
+            if let Some(sim_checkpoint) = self.restore_checkpoint.as_ref() {
+                let checkpoints: Arc<HashMap<String, HostCheckpoint>> = Arc::new(
+                    sim_checkpoint
+                        .hosts
+                        .iter()
+                        .map(|h| (h.hostname.clone(), h.clone()))
+                        .collect(),
+                );
+                let replay_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-            // the next event times for each thread; allocated here to avoid re-allocating each
-            // scheduling loop
+                scheduler.scope(|s| {
+                    let checkpoints = Arc::clone(&checkpoints);
+                    let replay_err = Arc::clone(&replay_err);
+                    s.run_with_hosts(move |_, hosts| {
+                        for_each_host(hosts, |host| {
+                            if replay_err.lock().unwrap().is_some() {
+                                return;
+                            }
+                            let Some(checkpoint) = checkpoints.get(host.name()) else {
+                                *replay_err.lock().unwrap() = Some(format!(
+                                    "missing restore checkpoint for host '{}'",
+                                    host.name()
+                                ));
+                                return;
+                            };
+
+                            host.lock_shmem();
+                            let apply_res = apply_host_checkpoint(host, checkpoint);
+                            host.unlock_shmem();
+
+                            if let Err(e) = apply_res {
+                                *replay_err.lock().unwrap() = Some(format!(
+                                    "failed to replay host checkpoint for '{}': {e:#}",
+                                    host.name()
+                                ));
+                            }
+                        });
+                    });
+                });
+
+                if let Some(err) = replay_err.lock().unwrap().take() {
+                    anyhow::bail!("{err}");
+                }
+            }
+
+            // the current simulation interval
+            let mut window = self.restore_checkpoint.as_ref().map_or_else(
+                || {
+                    Some((
+                        EmulatedTime::SIMULATION_START,
+                        EmulatedTime::SIMULATION_START + SimulationTime::NANOSECOND,
+                    ))
+                },
+                |checkpoint| {
+                    Some((
+                        EmulatedTime::SIMULATION_START
+                            + SimulationTime::from_nanos(checkpoint.window_start_ns),
+                        EmulatedTime::SIMULATION_START
+                            + SimulationTime::from_nanos(checkpoint.window_end_ns),
+                    ))
+                },
+            );
+
             let thread_next_event_times: Vec<AtomicRefCell<Option<EmulatedTime>>> =
                 vec![AtomicRefCell::new(None); scheduler.parallelism()];
 
-            // how often to log heartbeat messages
             let heartbeat_interval = self
                 .config
                 .general
@@ -524,23 +517,11 @@ impl<'a> Manager<'a> {
             let mut last_heartbeat = EmulatedTime::SIMULATION_START;
             let mut time_of_last_usage_check = std::time::Instant::now();
 
-            // Initialize run-control and (if interactive) spawn stdin thread once per process.
-            #[cfg(feature = "enable_run_control")]
-            let rc = init_and_reset_run_control();
-
-            #[cfg(feature = "enable_run_control")]
-            spawn_run_control_stdin_thread_once(rc);
-
-            #[cfg(feature = "enable_run_control")]
-            auto_pause_at_start_if_terminal(rc);
-
-            #[cfg(feature = "enable_run_control")]
-            wait_if_paused_at_start(rc);
+            // Notify the time controller that the simulation is starting.
+            self.time_controller.on_simulation_start();
 
             // the scheduling loop
             while let Some((window_start, window_end)) = window {
-                // 统计本轮时间窗口内"有事件可执行的 host" 数量，作为理论并发度参考。
-                // 这里通过全局的 event_queues 查看每个 host 的下一个事件时间是否在窗口内。
                 #[cfg(feature = "enable_perf_logging")]
                 let active_hosts_in_window = {
                     let shared = worker::WORKER_SHARED.borrow();
@@ -566,11 +547,8 @@ impl<'a> Manager<'a> {
 
                 // run the events
                 scheduler.scope(|s| {
-                    // run the closure on each of the scheduler's threads
                     s.run_with_data(
                         &thread_next_event_times,
-                        // each call of the closure is given an abstract thread-specific host
-                        // iterator, and an element of 'thread_next_event_times'
                         move |_, hosts, next_event_time| {
                             let mut next_event_time = next_event_time.borrow_mut();
 
@@ -587,7 +565,7 @@ impl<'a> Manager<'a> {
                                 };
                                 *next_event_time = [*next_event_time, host_next_event_time]
                                     .into_iter()
-                                    .flatten() // filter out None
+                                    .flatten()
                                     .reduce(std::cmp::min);
                             });
 
@@ -595,12 +573,11 @@ impl<'a> Manager<'a> {
 
                             *next_event_time = [*next_event_time, packet_next_event_time]
                                 .into_iter()
-                                .flatten() // filter out None
+                                .flatten()
                                 .reduce(std::cmp::min);
                         },
                     );
 
-                    // log a heartbeat message every 'heartbeat_interval' amount of simulated time
                     if let Some(heartbeat_interval) = heartbeat_interval
                         && window_start > last_heartbeat + heartbeat_interval
                     {
@@ -608,7 +585,6 @@ impl<'a> Manager<'a> {
                         self.log_heartbeat(window_start);
                     }
 
-                    // check resource usage every 30 real seconds
                     let current_time = std::time::Instant::now();
                     if current_time.duration_since(time_of_last_usage_check)
                         > Duration::from_secs(30)
@@ -618,11 +594,8 @@ impl<'a> Manager<'a> {
                     }
                 });
 
-                // get the minimum next event time for all threads (also resets the next event times
-                // to None while we have them borrowed)
                 let min_next_event_time = thread_next_event_times
                     .iter()
-                    // the take() resets it to None for the next scheduling loop
                     .filter_map(|x| x.borrow_mut().take())
                     .reduce(std::cmp::min)
                     .unwrap_or(EmulatedTime::MAX);
@@ -637,7 +610,6 @@ impl<'a> Manager<'a> {
                         active_hosts_in_window,
                     );
 
-                    // 直接打印本轮可并行的 host 数，便于和 host-exec 日志一起做对比。
                     eprintln!(
                         "[window-agg] active_hosts_in_window={} window_start_ns={} window_end_ns={} next_event_ns={}",
                         active_hosts_in_window,
@@ -647,129 +619,144 @@ impl<'a> Manager<'a> {
                     );
                 }
 
-                // notify controller that we finished this round, and the time of our next event in
-                // order to fast-forward our execute window if possible
-                //
-
                 let next_window =
                     self.controller
                         .manager_finished_current_round(min_next_event_time);
 
-                // Run-control handling (only when `enable_run_control` is enabled).
-                #[cfg(feature = "enable_run_control")]
-                {
-                    let fmt_s = |ns: u64| -> String {
-                        if ns % 1_000_000_000 == 0 {
-                            format!("{}s", ns / 1_000_000_000)
-                        } else {
-                            format!("{:.6}s", (ns as f64) / 1_000_000_000.0)
-                        }
+                // Consult the time controller at the window boundary.
+                let current_sim_time_ns =
+                    (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos() as u64;
+
+                let fmt_s = |ns: u64| -> String {
+                    if ns % 1_000_000_000 == 0 {
+                        format!("{}s", ns / 1_000_000_000)
+                    } else {
+                        format!("{:.6}s", (ns as f64) / 1_000_000_000.0)
+                    }
+                };
+
+                let mut print_next_window_info = || {
+                    let Some((next_window_start, next_window_end)) = next_window else {
+                        eprintln!("** No next window (simulation ending)");
+                        return;
                     };
 
-                    apply_run_control_requests_at_window_boundary(
-                        rc,
-                        min_next_event_time,
-                        &mut restart_request,
-                    );
-
-                    let mut print_next_window_info = || {
-                        let Some((next_window_start, next_window_end)) = next_window else {
-                            eprintln!("** No next window (simulation ending)");
-                            return;
-                        };
-
-                        let info = Arc::new(Mutex::new(Vec::new()));
-                        scheduler.scope(|s| {
-                            let info = Arc::clone(&info);
-                            s.run_with_hosts(move |_, hosts| {
-                                for_each_host(hosts, |host| {
-                                    let next_time = host.next_event_time();
-                                    if let Some(t) = next_time
-                                        && t < next_window_end
-                                    {
-                                        let mut pids = Vec::new();
-                                        for (_proc_id, proc_rc) in host.processes_borrow().iter() {
-                                            let proc = proc_rc.borrow(host.root());
-                                            if proc.is_running() {
-                                                pids.push(proc.native_pid());
-                                            }
+                    let info = Arc::new(Mutex::new(Vec::new()));
+                    scheduler.scope(|s| {
+                        let info = Arc::clone(&info);
+                        s.run_with_hosts(move |_, hosts| {
+                            for_each_host(hosts, |host| {
+                                let next_time = host.next_event_time();
+                                if let Some(t) = next_time
+                                    && t < next_window_end
+                                {
+                                    let mut pids = Vec::new();
+                                    for (_proc_id, proc_rc) in host.processes_borrow().iter() {
+                                        let proc = proc_rc.borrow(host.root());
+                                        if proc.is_running() {
+                                            pids.push(proc.native_pid());
                                         }
-                                        info.lock().unwrap().push((
-                                            host.id(),
-                                            host.name().to_string(),
-                                            t,
-                                            pids,
-                                        ));
                                     }
-                                });
+                                    info.lock().unwrap().push((
+                                        host.id(),
+                                        host.name().to_string(),
+                                        t,
+                                        pids,
+                                    ));
+                                }
                             });
                         });
+                    });
 
-                        let mut info = info.lock().unwrap();
-                        if info.is_empty() {
-                            eprintln!("** No hosts scheduled in next window");
-                            return;
-                        }
-                        info.sort_by_key(|(id, _, _, _)| *id);
+                    let mut info = info.lock().unwrap();
+                    if info.is_empty() {
+                        eprintln!("** No hosts scheduled in next window");
+                        return;
+                    }
+                    info.sort_by_key(|(id, _, _, _)| *id);
 
-                        eprintln!("**");
+                    eprintln!("**");
+                    eprintln!(
+                        "** Next window: t=[{}, {}]",
+                        fmt_s(
+                            (next_window_start - EmulatedTime::SIMULATION_START).as_nanos()
+                                as u64
+                        ),
+                        fmt_s(
+                            (next_window_end - EmulatedTime::SIMULATION_START).as_nanos()
+                                as u64
+                        )
+                    );
+                    eprintln!("** Hosts scheduled for next window:");
+                    for (host_id, hostname, next_time, pids) in info.iter() {
                         eprintln!(
-                            "** Next window: t=[{}, {}]",
+                            "**   Host {:?} ({}) - next event at t={}",
+                            host_id,
+                            hostname,
                             fmt_s(
-                                (next_window_start - EmulatedTime::SIMULATION_START).as_nanos()
-                                    as u64
-                            ),
-                            fmt_s(
-                                (next_window_end - EmulatedTime::SIMULATION_START).as_nanos()
-                                    as u64
+                                (*next_time - EmulatedTime::SIMULATION_START).as_nanos() as u64
                             )
                         );
-                        eprintln!("** Hosts scheduled for next window:");
-                        for (host_id, hostname, next_time, pids) in info.iter() {
-                            eprintln!(
-                                "**   Host {:?} ({}) - next event at t={}",
-                                host_id,
-                                hostname,
-                                fmt_s(
-                                    (*next_time - EmulatedTime::SIMULATION_START).as_nanos() as u64
-                                )
-                            );
-                            if pids.is_empty() {
-                                eprintln!("**     <no running processes>");
-                            } else {
-                                for pid in pids {
-                                    eprintln!(
-                                        "**     pid={} (attach: s:{})",
-                                        pid.as_raw_nonzero().get(),
-                                        pid.as_raw_nonzero().get()
-                                    );
-                                }
+                        if pids.is_empty() {
+                            eprintln!("**     <no running processes>");
+                        } else {
+                            for pid in pids {
+                                eprintln!(
+                                    "**     pid={} (attach: s:{})",
+                                    pid.as_raw_nonzero().get(),
+                                    pid.as_raw_nonzero().get()
+                                );
                             }
                         }
-                    };
+                    }
+                };
 
-                    pause_and_soft_wait_until_resumed(
-                        rc,
-                        min_next_event_time,
-                        &mut restart_request,
-                        &mut print_next_window_info,
-                    );
-                }
-                #[cfg(feature = "enable_run_control")]
-                {
-                    if restart_request.is_some() {
-                        window = None;
-                    } else {
+                let boundary_ctx = WindowBoundaryContext {
+                    current_sim_time_ns,
+                    min_next_event_time,
+                    window_start,
+                    window_end,
+                };
+
+                let decision = self.time_controller.on_window_boundary(
+                    &boundary_ctx,
+                    &mut print_next_window_info,
+                );
+
+                match decision {
+                    ControlDecision::Continue => {
                         window = next_window;
                     }
-                }
-                #[cfg(not(feature = "enable_run_control"))]
-                {
-                    window = next_window;
+                    ControlDecision::PauseAtBoundary => {
+                        // The controller already blocked; proceed to next window.
+                        window = next_window;
+                    }
+                    ControlDecision::Restart { run_until_ns, source } => {
+                        restart_request = Some((run_until_ns, source));
+                        window = None;
+                    }
+                    ControlDecision::CheckpointNow { label } => {
+                        log::info!("Checkpoint requested: label={}", label);
+                        if let Err(e) = self.perform_checkpoint(
+                            &label,
+                            &mut scheduler,
+                            current_sim_time_ns,
+                            window_start,
+                            window_end,
+                        ) {
+                            log::error!("Checkpoint failed: {:?}", e);
+                        } else {
+                            log::info!("Checkpoint '{}' completed successfully", label);
+                        }
+                        window = next_window;
+                    }
+                    ControlDecision::RestoreCheckpoint { label } => {
+                        log::info!("Restore requested: label={}", label);
+                        return Ok(SimulationRunResult::RestoreRequested { label });
+                    }
                 }
             }
 
-            #[cfg(feature = "enable_run_control")]
             if restart_request.is_some() {
                 worker::RESTART_TEARDOWN.store(true, Ordering::Relaxed);
             }
@@ -783,7 +770,6 @@ impl<'a> Manager<'a> {
                     });
                 });
             });
-            #[cfg(feature = "enable_run_control")]
             if restart_request.is_some() {
                 worker::RESTART_TEARDOWN.store(false, Ordering::Relaxed);
             }
@@ -797,6 +783,8 @@ impl<'a> Manager<'a> {
 
             scheduler.join();
         }
+
+        self.time_controller.on_simulation_end();
 
         // simulation is finished, so update the status logger
         worker::WORKER_SHARED
@@ -814,11 +802,7 @@ impl<'a> Manager<'a> {
             .plugin_error_count();
 
         // drop the simulation's global state
-        // must drop before the allocation counters have been checked
         worker::WORKER_SHARED.borrow_mut().take();
-
-        // since the scheduler was dropped, all workers should have completed and the global object
-        // and syscall counters should have been updated
 
         worker::with_global_sim_stats(|stats| {
             if self.config.experimental.use_syscall_counters.unwrap() {
@@ -836,7 +820,6 @@ impl<'a> Manager<'a> {
                 if *alloc_counts == *dealloc_counts {
                     log::info!("We allocated and deallocated the same number of objects :)");
                 } else {
-                    // don't change the formatting of this line as we search for it in test cases
                     log::warn!("Memory leak detected");
                 }
             }
@@ -845,17 +828,11 @@ impl<'a> Manager<'a> {
             sim_stats::write_stats_to_file(&stats_filename, stats)
         })?;
 
-        #[cfg(feature = "enable_run_control")]
-        if let Some(run_until_ns) = restart_request {
-            let run_until_ns = if run_until_ns == u64::MAX {
-                None
-            } else {
-                Some(run_until_ns)
-            };
-            return Err(anyhow::Error::new(RestartRequest { run_until_ns }));
+        if let Some((run_until_ns, source)) = restart_request {
+            return Ok(SimulationRunResult::RestartRequested { run_until_ns, source });
         }
 
-        Ok(num_plugin_errors)
+        Ok(SimulationRunResult::Completed { num_plugin_errors })
     }
 
     fn build_host(&self, host_id: HostId, host_info: &HostInfo) -> anyhow::Result<Box<Host>> {
@@ -917,50 +894,68 @@ impl<'a> Manager<'a> {
 
         host.lock_shmem();
 
-        for proc in &host_info.processes {
-            let plugin_path =
-                CString::new(proc.plugin.clone().into_os_string().as_bytes()).unwrap();
-            let plugin_name = CString::new(proc.plugin.file_name().unwrap().as_bytes()).unwrap();
-            let pause_for_debugging = host_info.pause_for_debugging;
+        let build_res: anyhow::Result<()> = if let Some(checkpoint) = self.host_checkpoint(host_info.name.as_str()) {
+            validate_host_checkpoint_native_state(checkpoint)
+                .with_context(|| format!("Host '{}' native restore pre-check failed", host_info.name))?;
+            // Replay in a separate phase after worker TLS is initialized.
+            Ok(())
+        } else {
+            for proc in &host_info.processes {
+                let plugin_path =
+                    CString::new(proc.plugin.clone().into_os_string().as_bytes()).unwrap();
+                let plugin_name = CString::new(proc.plugin.file_name().unwrap().as_bytes()).unwrap();
+                let pause_for_debugging = host_info.pause_for_debugging;
 
-            let argv: Vec<CString> = proc
-                .args
-                .iter()
-                .map(|x| CString::new(x.as_bytes()).unwrap())
-                .collect();
+                let argv: Vec<CString> = proc
+                    .args
+                    .iter()
+                    .map(|x| CString::new(x.as_bytes()).unwrap())
+                    .collect();
 
-            let envv: Vec<CString> = proc
-                .env
-                .clone()
-                .into_iter()
-                .map(|(x, y)| {
-                    let mut x: OsString = String::from(x).into();
-                    x.push("=");
-                    x.push(y);
-                    CString::new(x.as_bytes()).unwrap()
-                })
-                .collect();
+                let envv: Vec<CString> = proc
+                    .env
+                    .clone()
+                    .into_iter()
+                    .map(|(x, y)| {
+                        let mut x: OsString = String::from(x).into();
+                        x.push("=");
+                        x.push(y);
+                        CString::new(x.as_bytes()).unwrap()
+                    })
+                    .collect();
 
-            host.continue_execution_timer();
+                host.continue_execution_timer();
 
-            host.add_application(
-                proc.start_time,
-                proc.shutdown_time,
-                proc.shutdown_signal,
-                plugin_name,
-                plugin_path,
-                argv,
-                envv,
-                pause_for_debugging,
-                proc.expected_final_state,
-            );
+                host.add_application(
+                    proc.start_time,
+                    proc.shutdown_time,
+                    proc.shutdown_signal,
+                    plugin_name,
+                    plugin_path,
+                    argv,
+                    envv,
+                    pause_for_debugging,
+                    proc.expected_final_state,
+                );
 
-            host.stop_execution_timer();
-        }
+                host.stop_execution_timer();
+            }
+            Ok(())
+        };
 
+        // Always release shmem lock before returning, even on restore failure.
         host.unlock_shmem();
+        build_res?;
 
         Ok(host)
+    }
+
+    fn host_checkpoint(&self, hostname: &str) -> Option<&HostCheckpoint> {
+        self.restore_checkpoint
+            .as_ref()?
+            .hosts
+            .iter()
+            .find(|host| host.hostname == hostname)
     }
 
     fn log_heartbeat(&mut self, now: EmulatedTime) {
@@ -1082,6 +1077,108 @@ impl<'a> Manager<'a> {
     pub fn shmem(&self) -> &ShMemBlock<'_, ManagerShmem> {
         &self.shmem
     }
+
+    /// Perform a full checkpoint at the current window boundary.
+    ///
+    /// This method:
+    /// 1. Collects all `/dev/shm` files used by Shadow
+    /// 2. Backs them up to a checkpoint directory
+    /// 3. CRIU-dumps all running managed processes (with `--leave-running`)
+    /// 4. Serializes simulation metadata to JSON
+    fn perform_checkpoint(
+        &self,
+        label: &str,
+        scheduler: &mut Scheduler<Box<Host>>,
+        current_sim_time_ns: u64,
+        window_start: EmulatedTime,
+        window_end: EmulatedTime,
+    ) -> anyhow::Result<()> {
+        let checkpoint_base = self.data_path.join("checkpoints").join(label);
+        let shmem_backup_dir = checkpoint_base.join("shmem");
+        let criu_base_dir = checkpoint_base.join("criu");
+
+        std::fs::create_dir_all(&checkpoint_base)
+            .context("Failed to create checkpoint directory")?;
+
+        // 1. Collect and backup shmem files
+        let shmem_paths = criu::collect_shadow_shmem_paths()
+            .unwrap_or_else(|e| {
+                log::warn!("Failed to collect shmem from /proc/self/maps: {e}; falling back");
+                shmem_backup::collect_all_shadow_shmem_files().unwrap_or_default()
+            });
+        shmem_backup::backup_shmem_files(&shmem_paths, &shmem_backup_dir)?;
+
+        let host_snapshots = Arc::new(Mutex::new(Vec::<HostCheckpoint>::new()));
+        scheduler.scope(|s| {
+            let host_snapshots = Arc::clone(&host_snapshots);
+            s.run_with_hosts(move |_, hosts| {
+                for_each_host(hosts, |host| {
+                    host.lock_shmem();
+                    let snapshot = snapshot_host(host);
+                    host.unlock_shmem();
+                    host_snapshots.lock().unwrap().push(snapshot);
+                });
+            });
+        });
+        let mut host_snapshots = host_snapshots.lock().unwrap().clone();
+
+        for host_cp in &mut host_snapshots {
+            for proc_cp in &mut host_cp.processes {
+                if !proc_cp.is_running {
+                    continue;
+                }
+                let images_dir = criu_base_dir.join(format!(
+                    "host_{}_proc_{}",
+                    host_cp.host_id, proc_cp.process_id
+                ));
+                // Leave managed processes running after dump so the simulation can
+                // continue until the explicit restore request.
+                criu::checkpoint_process(proc_cp.native_pid, &images_dir, true)?;
+                proc_cp.criu_image_dir = Some(images_dir);
+            }
+        }
+
+        let worker_shared = worker::WORKER_SHARED.borrow();
+        let worker_shared = worker_shared.as_ref().unwrap();
+        let checkpoint = SimulationCheckpoint {
+            version: SimulationCheckpoint::CURRENT_VERSION,
+            sim_time_ns: current_sim_time_ns,
+            window_start_ns: window_start.duration_since(&EmulatedTime::SIMULATION_START).as_nanos()
+                as u64,
+            window_end_ns: window_end.duration_since(&EmulatedTime::SIMULATION_START).as_nanos()
+                as u64,
+            prng_state: PrngSnapshot { s: [0; 4] },
+            runahead: RunaheadSnapshot {
+                is_dynamic: worker_shared.runahead.is_dynamic(),
+                min_possible_latency_ns: worker_shared.runahead.min_possible_latency().as_nanos()
+                    as u64,
+                min_used_latency_ns: worker_shared
+                    .runahead
+                    .min_used_latency()
+                    .map(|x| x.as_nanos() as u64),
+                min_runahead_config_ns: worker_shared
+                    .runahead
+                    .min_runahead_config()
+                    .map(|x| x.as_nanos() as u64),
+            },
+            hosts: host_snapshots,
+            manager_shmem_handle: self.shmem().serialize().to_string(),
+            shmem_backup_dir: shmem_backup_dir.clone(),
+            criu_base_dir: criu_base_dir.clone(),
+        };
+
+        // 4. Save checkpoint to filesystem
+        let store = FilesystemStore::new(self.data_path.join("checkpoints"))?;
+        store.save(label, &checkpoint)?;
+
+        log::info!(
+            "Checkpoint '{}' saved to {}",
+            label,
+            checkpoint_base.display()
+        );
+
+        Ok(())
+    }
 }
 
 pub struct ManagerConfig {
@@ -1113,332 +1210,293 @@ fn for_each_host(host_iter: &mut HostIter<Box<Host>>, mut f: impl FnMut(&Host)) 
     });
 }
 
-#[cfg(feature = "enable_run_control")]
-fn init_and_reset_run_control() -> &'static RunControl {
-    let rc = RUN_CONTROL.get_or_init(|| RunControl {
-        pause_requested: Arc::new(AtomicBool::new(false)),
-        restart_requested: Arc::new(AtomicBool::new(false)),
-        restart_run_until_ns: Arc::new(AtomicU64::new(u64::MAX)),
-        // Request to re-print next-window host/PID info while paused.
-        info_requested: Arc::new(AtomicBool::new(false)),
-        skip_start_pause: Arc::new(AtomicBool::new(false)),
-        // If non-zero, request to run for this many ns of simulated time (relative) before
-        // pausing.
-        run_for_ns: Arc::new(AtomicU64::new(0)),
-        // Absolute simulated time (ns since SIMULATION_START) at which to pause, or u64::MAX
-        // if unset.
-        run_until_abs_ns: Arc::new(AtomicU64::new(u64::MAX)),
-        // If >0, run this many windows and then pause.
-        step_windows_remaining: Arc::new(AtomicU64::new(0)),
-        paused: Mutex::new(false),
-        cv: Condvar::new(),
-    });
+fn snapshot_host(host: &Host) -> HostCheckpoint {
+    let queue = host.event_queue().lock().unwrap();
+    let event_queue = queue
+        .cloned_events()
+        .iter()
+        .map(event_to_snapshot)
+        .collect();
+    let last_popped_event_time_ns = queue
+        .last_popped_event_time()
+        .saturating_duration_since(&EmulatedTime::SIMULATION_START)
+        .as_nanos() as u64;
+    drop(queue);
 
-    // Clear any prior run-control state (important for in-process restarts).
-    rc.pause_requested.store(false, Ordering::Relaxed);
-    rc.restart_requested.store(false, Ordering::Relaxed);
-    rc.info_requested.store(false, Ordering::Relaxed);
-    rc.run_for_ns.store(0, Ordering::Relaxed);
-    rc.run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-    rc.step_windows_remaining.store(0, Ordering::Relaxed);
-    rc.skip_start_pause.store(false, Ordering::Relaxed);
-    rc.restart_run_until_ns.store(u64::MAX, Ordering::Relaxed);
-
-    let pending = RESTART_RUN_UNTIL_NS.swap(u64::MAX, Ordering::Relaxed);
-    if pending != u64::MAX {
-        rc.run_until_abs_ns.store(pending, Ordering::Relaxed);
-        rc.skip_start_pause.store(true, Ordering::Relaxed);
+    HostCheckpoint {
+        host_id: u32::from(host.id()),
+        hostname: host.name().to_string(),
+        event_queue,
+        last_popped_event_time_ns,
+        next_event_id: host.next_event_id_counter(),
+        next_thread_id: host.next_thread_id_counter(),
+        next_packet_id: host.next_packet_id_counter(),
+        determinism_sequence_counter: host.determinism_sequence_counter(),
+        packet_priority_counter: host.packet_priority_counter(),
+        cpu_now_ns: host
+            .cpu_borrow()
+            .snapshot_times()
+            .0
+            .saturating_duration_since(&EmulatedTime::SIMULATION_START)
+            .as_nanos() as u64,
+        cpu_available_ns: host
+            .cpu_borrow()
+            .snapshot_times()
+            .1
+            .saturating_duration_since(&EmulatedTime::SIMULATION_START)
+            .as_nanos() as u64,
+        random_state: snapshot_rng(&host.random_borrow()),
+        processes: host
+            .processes_borrow()
+            .values()
+            .map(|proc_rc| {
+                let proc = proc_rc.borrow(host.root());
+                snapshot_process(host, &proc)
+            })
+            .collect(),
+        host_shmem_handle: host.shim_shmem().serialize().to_string(),
     }
-
-    rc
 }
 
-#[cfg(feature = "enable_run_control")]
-fn spawn_run_control_stdin_thread_once(rc: &'static RunControl) {
-    RUN_CONTROL_STDIN_THREAD_STARTED.get_or_init(|| {
-        if !std::io::stdin().is_terminal() {
-            return;
+fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> ProcessCheckpoint {
+    let runnable = process.borrow_as_runnable();
+    let native_pid = runnable
+        .as_ref()
+        .map(|r| r.native_pid().as_raw_nonzero().get())
+        .unwrap_or(0);
+    let threads = runnable
+        .as_ref()
+        .map(|runnable| {
+            runnable
+                .threads_borrow()
+                .values()
+                .map(|thread_rc| {
+                    let thread = thread_rc.borrow(host.root());
+                    ThreadCheckpoint {
+                        thread_id: u32::try_from(libc::pid_t::from(thread.id())).unwrap(),
+                        native_tid: thread.native_tid().as_raw_nonzero().get(),
+                        ipc_shmem_handle: thread.mthread().ipc_shmem_handle(),
+                        thread_shmem_handle: thread.shmem().serialize().to_string(),
+                        current_event_bytes: thread.mthread().current_event_bytes(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let dumpable = runnable
+        .as_ref()
+        .map(|_| process.dumpable().val())
+        .unwrap_or(linux_api::sched::SuidDump::SUID_DUMP_USER.val());
+
+    ProcessCheckpoint {
+        process_id: u32::from(process.id()),
+        criu_image_dir: None,
+        native_pid,
+        is_running: process.is_running(),
+        parent_pid: u32::from(process.parent_id()),
+        group_id: u32::from(process.group_id()),
+        session_id: u32::from(process.session_id()),
+        dumpable,
+        threads,
+        process_shmem_handle: runnable
+            .as_ref()
+            .map(|_| process.shmem().serialize().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn snapshot_rng(rng: &Xoshiro256PlusPlus) -> PrngSnapshot {
+    PrngSnapshot {
+        // `rand_xoshiro` stores Xoshiro256++ as 4 x u64; use a checked
+        // transmute so checkpoints capture the live PRNG state instead of only
+        // the initial seed.
+        s: unsafe { std::mem::transmute_copy(rng) },
+    }
+}
+
+fn restore_rng(snapshot: &PrngSnapshot) -> Xoshiro256PlusPlus {
+    unsafe { std::mem::transmute_copy(&snapshot.s) }
+}
+
+fn apply_host_checkpoint(host: &Host, checkpoint: &HostCheckpoint) -> anyhow::Result<()> {
+    {
+        let mut processes = host.processes_borrow_mut();
+        for process_cp in &checkpoint.processes {
+            if !process_cp.is_running {
+                continue;
+            }
+            let process = Process::from_checkpoint(host, process_cp)
+                .map_err(|e| anyhow::anyhow!("Process::from_checkpoint failed for pid {}: {:?}", process_cp.process_id, e))?;
+            let process_id = process.borrow(host.root()).id();
+            processes.insert(process_id, process);
+        }
+    }
+    let queue = rebuild_event_queue(&checkpoint.event_queue, host);
+    let last_popped =
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.last_popped_event_time_ns);
+    host.replace_event_queue(queue, last_popped);
+    host.set_next_event_id_counter(checkpoint.next_event_id);
+    host.set_next_thread_id_counter(checkpoint.next_thread_id);
+    host.set_next_packet_id_counter(checkpoint.next_packet_id);
+    host.set_determinism_sequence_counter(checkpoint.determinism_sequence_counter);
+    host.set_packet_priority_counter(checkpoint.packet_priority_counter);
+    host.set_random_state(restore_rng(&checkpoint.random_state));
+    host.cpu_borrow_mut().restore_times(
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns),
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_available_ns),
+    );
+    // Kick restored runnable processes once after replay. The serialized event
+    // queue may not include resume tasks for already-running workloads.
+    let replay_time = EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
+    {
+        let processes = host.processes_borrow();
+        for (process_id, process_rc) in processes.iter() {
+            let process = process_rc.borrow(host.root());
+            if !process.is_running() {
+                continue;
+            }
+            let thread_id = process.thread_group_leader_id();
+            let pid_u32 = u32::from(*process_id);
+            let tid_u32 = libc::pid_t::from(thread_id) as u32;
+            let task = TaskRef::new_with_descriptor(
+                {
+                    let process_id = *process_id;
+                    move |host| {
+                        host.resume(process_id, thread_id);
+                    }
+                },
+                TaskDescriptor::ResumeProcess {
+                    process_id: pid_u32,
+                    thread_id: tid_u32,
+                },
+            );
+            host.schedule_task_at_emulated_time(task, replay_time);
+        }
+    }
+    let running_processes = host
+        .processes_borrow()
+        .values()
+        .filter(|p| p.borrow(host.root()).is_running())
+        .count();
+    let queue_len = host.event_queue().lock().unwrap().cloned_events().len();
+    log::info!(
+        "Replayed host checkpoint for '{}': running_processes={}, queue_len={}, next_event={:?}",
+        host.name(),
+        running_processes,
+        queue_len,
+        host.next_event_time()
+    );
+    Ok(())
+}
+
+fn validate_host_checkpoint_native_state(checkpoint: &HostCheckpoint) -> anyhow::Result<()> {
+    for process_cp in &checkpoint.processes {
+        if !process_cp.is_running {
+            continue;
         }
 
-        let pause_requested = rc.pause_requested.clone();
-        let restart_requested = rc.restart_requested.clone();
-        let restart_run_until_ns = rc.restart_run_until_ns.clone();
-        let info_requested = rc.info_requested.clone();
-        let skip_start_pause = rc.skip_start_pause.clone();
-        let run_for_ns = rc.run_for_ns.clone();
-        let run_until_abs_ns = rc.run_until_abs_ns.clone();
-        let step_windows_remaining = rc.step_windows_remaining.clone();
-
-        // Use raw pointers? avoid; instead capture RUN_CONTROL via OnceLock at runtime.
-        std::thread::spawn(move || {
-            // Print help once (times are in *simulated seconds*).
-            eprintln!(
-                "\
-** Shadow run-control (stdin; simulated time)\n\
-**   p<Enter>: pause at next window boundary\n\
-**   c<Enter>: continue\n\
-**   cN<Enter>: continue for N simulated seconds, then pause at next window boundary (e.g. c10)\n\
-**   n<Enter>: run exactly one window, then pause\n\
-**   s<Enter>: show next-window hosts/PIDs (when paused)\n\
-**   s:<pid><Enter>: print gdb attach command (e.g. s:12345)\n\
-**   info<Enter>: show next-window hosts/PIDs (when paused)\n\
-**   r<Enter>: restart from t=0s (in-process)\n\
-**   rN<Enter>: restart and run to N seconds (e.g. r10)\n"
+        let native_pid = process_cp.native_pid;
+        if native_pid <= 1 {
+            anyhow::bail!(
+                "invalid native pid {} for process {}",
+                native_pid,
+                process_cp.process_id
             );
+        }
 
-            let stdin = std::io::stdin();
-            for line in stdin.lock().lines().flatten() {
-                let cmd = line.trim();
-                if cmd.is_empty() {
-                    continue;
-                }
+        // PID isn't a stable identity across CRIU restore. At this point this
+        // should already be the post-restore pid; require it to be enumerable.
+        let observed_tids = observed_thread_tids(native_pid);
+        if observed_tids.is_empty() {
+            anyhow::bail!(
+                "native pid {} not accessible/enumerable before object restore (process {}); checkpoint_tids={:?}",
+                native_pid,
+                process_cp.process_id,
+                process_cp
+                    .threads
+                    .iter()
+                    .map(|t| t.native_tid)
+                    .collect::<Vec<_>>()
+            );
+        }
+        log::info!(
+            "Phase1 native validation: process {} pid {} checkpoint_tids={:?} observed_tids={:?}",
+            process_cp.process_id,
+            native_pid,
+            process_cp
+                .threads
+                .iter()
+                .map(|t| t.native_tid)
+                .collect::<Vec<_>>(),
+            observed_tids
+        );
 
-                if cmd == "p" {
-                    pause_requested.store(true, Ordering::Relaxed);
-                    eprintln!("** run-control: pause requested (will pause at next window boundary)");
-                    continue;
-                }
+        // Validate process-level shmem handle is parseable.
+        let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(&process_cp.process_shmem_handle)
+            .with_context(|| {
+                format!(
+                    "invalid process shmem handle for process {}",
+                    process_cp.process_id
+                )
+            })?;
 
-                if cmd == "n" {
-                    // Run exactly one more window, then pause.
-                    step_windows_remaining.store(1, Ordering::Relaxed);
-                    run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                    if let Some(rc) = RUN_CONTROL.get() {
-                        *rc.paused.lock().unwrap() = false;
-                        rc.cv.notify_all();
-                    }
-                    eprintln!("** run-control: will run 1 window and then pause");
-                    continue;
-                }
-
-                if cmd == "r" {
-                    restart_run_until_ns.store(u64::MAX, Ordering::Relaxed);
-                    skip_start_pause.store(false, Ordering::Relaxed);
-                    restart_requested.store(true, Ordering::Relaxed);
-                    if let Some(rc) = RUN_CONTROL.get() {
-                        rc.cv.notify_all();
-                    }
-                    eprintln!("** run-control: restart requested (in-process)");
-                    continue;
-                }
-
-                if let Some(rest) = cmd.strip_prefix('r') {
-                    if !rest.is_empty() {
-                        if let Ok(secs) = rest.parse::<u64>() {
-                            restart_run_until_ns.store(
-                                secs.saturating_mul(1_000_000_000),
-                                Ordering::Relaxed,
-                            );
-                            skip_start_pause.store(true, Ordering::Relaxed);
-                            restart_requested.store(true, Ordering::Relaxed);
-                            if let Some(rc) = RUN_CONTROL.get() {
-                                rc.cv.notify_all();
-                            }
-                            eprintln!("** run-control: restart requested (run to t={secs}s)");
-                            continue;
-                        }
-                    }
-                }
-
-                if cmd == "s" || cmd == "info" {
-                    info_requested.store(true, Ordering::Relaxed);
-                    if let Some(rc) = RUN_CONTROL.get() {
-                        rc.cv.notify_all();
-                    }
-                    eprintln!("** run-control: info requested (will print while paused)");
-                    continue;
-                }
-
-                if let Some(rest) = cmd.strip_prefix("s:") {
-                    // s:<pid> - attach gdb to the specified PID (manual, no GUI)
-                    if let Ok(pid) = rest.parse::<i32>() {
-                        eprintln!("** run-control: attach gdb manually with: gdb/dlv -p/attach {}", pid);
-                        continue;
-                    } else {
-                        eprintln!("** run-control: invalid PID: '{}'", rest);
-                        continue;
-                    }
-                }
-
-                if cmd == "c" {
-                    // Continue indefinitely.
-                    step_windows_remaining.store(0, Ordering::Relaxed);
-                    run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                    run_for_ns.store(0, Ordering::Relaxed);
-                    if let Some(rc) = RUN_CONTROL.get() {
-                        *rc.paused.lock().unwrap() = false;
-                        rc.cv.notify_all();
-                    }
-                    eprintln!("** run-control: continue");
-                    continue;
-                }
-
-                if let Some(rest) = cmd.strip_prefix('c') {
-                    // cN: run for N simulated seconds, then pause.
-                    if let Ok(secs) = rest.parse::<u64>() {
-                        step_windows_remaining.store(0, Ordering::Relaxed);
-                        run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-                        run_for_ns.store(secs.saturating_mul(1_000_000_000), Ordering::Relaxed);
-                        if let Some(rc) = RUN_CONTROL.get() {
-                            *rc.paused.lock().unwrap() = false;
-                            rc.cv.notify_all();
-                        }
-                        eprintln!(
-                            "** run-control: continue for {secs}s simulated time (will pause at a window boundary)"
-                        );
-                        continue;
-                    }
-                }
-
-                eprintln!(
-                    "** Unknown command: '{cmd}'. Use: p | c | cN (e.g. c10) | n | s | s:<pid> | info | r | rN (e.g. r10)"
+        // Conservative thread checks: each thread has parseable handles and
+        // a correctly sized serialized current event buffer.
+        for thread_cp in &process_cp.threads {
+            if thread_cp.native_tid <= 0 {
+                anyhow::bail!(
+                    "invalid native tid {} for process {} thread {}",
+                    thread_cp.native_tid,
+                    process_cp.process_id,
+                    thread_cp.thread_id
                 );
             }
-        });
-    });
-}
 
-#[cfg(feature = "enable_run_control")]
-fn auto_pause_at_start_if_terminal(rc: &'static RunControl) {
-    // Auto-pause at simulated time 0s (before running the first window),
-    // but only when running interactively (stdin is a TTY). This avoids
-    // hanging non-interactive runs.
-    if std::io::stdin().is_terminal() {
-        let mut paused = rc.paused.lock().unwrap();
-        let skip_start_pause = rc.skip_start_pause.load(Ordering::Relaxed);
-        rc.skip_start_pause.store(false, Ordering::Relaxed);
-        if !*paused && !skip_start_pause {
-            *paused = true;
-            eprintln!(
-                "\
-** Shadow paused at start (t=0s)\n\
-** Commands: c | cN (e.g. c10) | n | info | s:<pid> | r | rN"
-            );
+            let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(&thread_cp.ipc_shmem_handle)
+                .with_context(|| {
+                    format!(
+                        "invalid ipc shmem handle for process {} thread {}",
+                        process_cp.process_id,
+                        thread_cp.thread_id
+                    )
+                })?;
+            let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(&thread_cp.thread_shmem_handle)
+                .with_context(|| {
+                    format!(
+                        "invalid thread shmem handle for process {} thread {}",
+                        process_cp.process_id,
+                        thread_cp.thread_id
+                    )
+                })?;
+
+            if thread_cp.current_event_bytes.len()
+                != std::mem::size_of::<shadow_shim_helper_rs::shim_event::ShimEventToShadow>()
+            {
+                anyhow::bail!(
+                    "unexpected current_event_bytes length {} for process {} thread {}",
+                    thread_cp.current_event_bytes.len(),
+                    process_cp.process_id,
+                    thread_cp.thread_id
+                );
+            }
         }
     }
+    Ok(())
 }
 
-#[cfg(feature = "enable_run_control")]
-fn wait_if_paused_at_start(rc: &'static RunControl) {
-    // If we started in paused mode, block here before running the first window.
-    // (We only set paused-at-start when stdin is a TTY.)
-    let mut paused = rc.paused.lock().unwrap();
-    while *paused {
-        paused = rc.cv.wait(paused).unwrap();
-    }
-}
-
-#[cfg(feature = "enable_run_control")]
-fn apply_run_control_requests_at_window_boundary(
-    rc: &'static RunControl,
-    min_next_event_time: EmulatedTime,
-    restart_request: &mut Option<u64>,
-) {
-    let fmt_s = |ns: u64| -> String {
-        if ns % 1_000_000_000 == 0 {
-            format!("{}s", ns / 1_000_000_000)
-        } else {
-            format!("{:.6}s", (ns as f64) / 1_000_000_000.0)
-        }
+fn observed_thread_tids(native_pid: i32) -> Vec<i32> {
+    let task_dir = format!("/proc/{native_pid}/task");
+    let Ok(entries) = std::fs::read_dir(task_dir) else {
+        return Vec::new();
     };
-
-    // Apply cN request: convert relative duration -> absolute pause target.
-    let run_for = rc.run_for_ns.swap(0, Ordering::Relaxed);
-    if run_for != 0 {
-        let next_abs_ns = (min_next_event_time - EmulatedTime::SIMULATION_START)
-            .as_nanos() as u64;
-        let target = next_abs_ns.saturating_add(run_for);
-        rc.run_until_abs_ns.store(target, Ordering::Relaxed);
-        eprintln!(
-            "** run-control: will pause at ~t={} (after +{} simulated seconds; next window boundary >= target)",
-            fmt_s(target),
-            run_for / 1_000_000_000
-        );
-    }
-
-    // Apply n request: count down windows.
-    let steps_left = rc.step_windows_remaining.load(Ordering::Relaxed);
-    if steps_left > 0 {
-        // Decrement once per window boundary.
-        let new = rc
-            .step_windows_remaining
-            .fetch_sub(1, Ordering::Relaxed)
-            - 1;
-        if new == 0 {
-            rc.pause_requested.store(true, Ordering::Relaxed);
-        }
-    }
-
-    // Auto-pause if we've reached run-until time.
-    let run_until = rc.run_until_abs_ns.load(Ordering::Relaxed);
-    if run_until != u64::MAX {
-        let next_abs_ns = (min_next_event_time - EmulatedTime::SIMULATION_START)
-            .as_nanos() as u64;
-        if next_abs_ns >= run_until {
-            // Clear so we only pause once.
-            rc.run_until_abs_ns.store(u64::MAX, Ordering::Relaxed);
-            rc.pause_requested.store(true, Ordering::Relaxed);
-        }
-    }
-
-    if rc.restart_requested.swap(false, Ordering::Relaxed) {
-        let run_until = rc.restart_run_until_ns.load(Ordering::Relaxed);
-        *restart_request = Some(run_until);
-        eprintln!("** run-control: restart requested (in-process)");
-    }
-}
-
-#[cfg(feature = "enable_run_control")]
-fn pause_and_soft_wait_until_resumed<F: FnMut()>(
-    rc: &'static RunControl,
-    min_next_event_time: EmulatedTime,
-    restart_request: &mut Option<u64>,
-    print_next_window_info: &mut F,
-) {
-    let fmt_s = |ns: u64| -> String {
-        if ns % 1_000_000_000 == 0 {
-            format!("{}s", ns / 1_000_000_000)
-        } else {
-            format!("{:.6}s", (ns as f64) / 1_000_000_000.0)
-        }
-    };
-
-    if rc.pause_requested.swap(false, Ordering::Relaxed) {
-        let mut paused = rc.paused.lock().unwrap();
-        *paused = true;
-
-        eprintln!(
-            "\
-** Shadow paused at window boundary\n\
-**   next window start: t={}",
-            fmt_s(
-                (min_next_event_time - EmulatedTime::SIMULATION_START).as_nanos() as u64
-            ),
-        );
-
-        print_next_window_info();
-
-        eprintln!("**");
-        eprintln!("** To attach gdb: s:<pid> (e.g. s:12345)");
-        eprintln!("** Commands: c | cN (e.g. c10) | n | p | s | s:<pid> | info | r | rN");
-    }
-
-    // If paused, block here (soft pause) until resumed.
-    let mut paused = rc.paused.lock().unwrap();
-    while *paused {
-        if rc.restart_requested.swap(false, Ordering::Relaxed) {
-            let run_until = rc.restart_run_until_ns.load(Ordering::Relaxed);
-            *restart_request = Some(run_until);
-            *paused = false;
-            break;
-        }
-
-        if rc.info_requested.swap(false, Ordering::Relaxed) {
-            print_next_window_info();
-        }
-
-        paused = rc.cv.wait(paused).unwrap();
-    }
+    let mut tids: Vec<i32> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|name| name.parse::<i32>().ok())
+        .collect();
+    tids.sort_unstable();
+    tids
 }
 
 /// Get the raw speed of the experiment machine.
@@ -1505,4 +1563,156 @@ fn get_required_preload_path(libname: &str) -> anyhow::Result<PathBuf> {
     );
 
     Ok(libpath)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use shadow_shim_helper_rs::shim_shmem::ManagerShmem;
+    use shadow_shim_helper_rs::simulation_time::SimulationTime;
+    use shadow_shmem::allocator::shmalloc;
+
+    use super::*;
+    use crate::core::work::task::TaskRef;
+
+    fn test_host(name: &str) -> Host {
+        let temp_root = std::env::temp_dir().join(format!(
+            "shadow-checkpoint-test-{}-{}",
+            std::process::id(),
+            name
+        ));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let manager_shmem = shmalloc(ManagerShmem {
+            log_start_time_micros: 0,
+            native_preemption_config: None.into(),
+            emulate_cpuid: false,
+        });
+
+        Host::new(
+            HostParameters {
+                id: HostId::from(0),
+                node_seed: 0x1234_5678,
+                hostname: CString::new(name).unwrap(),
+                node_id: 0,
+                ip_addr: u32::to_be(std::net::Ipv4Addr::new(11, 0, 0, 1).into()),
+                sim_end_time: EmulatedTime::SIMULATION_START + SimulationTime::from_secs(60),
+                requested_bw_down_bits: 1_000_000_000,
+                requested_bw_up_bits: 1_000_000_000,
+                cpu_frequency: 2_500_000_000,
+                cpu_threshold: Some(SimulationTime::NANOSECOND),
+                cpu_precision: Some(SimulationTime::NANOSECOND),
+                log_level: logger::_LogLevel_LOGLEVEL_UNSET,
+                pcap_config: None,
+                qdisc: configuration::QDiscMode::Fifo,
+                init_sock_recv_buf_size: 0,
+                autotune_recv_buf: false,
+                init_sock_send_buf_size: 0,
+                autotune_send_buf: false,
+                native_tsc_frequency: 2_500_000_000,
+                model_unblocked_syscall_latency: false,
+                max_unapplied_cpu_latency: SimulationTime::ZERO,
+                unblocked_syscall_latency: SimulationTime::ZERO,
+                unblocked_vdso_latency: SimulationTime::ZERO,
+                strace_logging_options: None,
+                shim_log_level: logger::_LogLevel_LOGLEVEL_UNSET,
+                use_new_tcp: true,
+                use_mem_mapper: true,
+                use_syscall_counters: false,
+            },
+            &temp_root,
+            2_500_000_000,
+            &manager_shmem,
+            Arc::new(Vec::new()),
+        )
+    }
+
+    fn seed_host_state(host: &Host) {
+        host.set_next_event_id_counter(17);
+        host.set_next_thread_id_counter(1017);
+        host.set_next_packet_id_counter(23);
+        host.set_determinism_sequence_counter(29);
+        host.set_packet_priority_counter(31);
+        host.cpu_borrow_mut().restore_times(
+            EmulatedTime::SIMULATION_START + SimulationTime::from_secs(4),
+            EmulatedTime::SIMULATION_START + SimulationTime::from_secs(9),
+        );
+
+        host.schedule_task_at_emulated_time(
+            TaskRef::new_with_descriptor(
+                |_host| {},
+                TaskDescriptor::TimerExpire {
+                    timer_id: 1,
+                    expire_id: 7,
+                },
+            ),
+            EmulatedTime::SIMULATION_START + SimulationTime::from_secs(5),
+        );
+        host.schedule_task_at_emulated_time(
+            TaskRef::new_with_descriptor(
+                |_host| {},
+                TaskDescriptor::RelayForward { relay_id: 0 },
+            ),
+            EmulatedTime::SIMULATION_START + SimulationTime::from_secs(8),
+        );
+    }
+
+    #[test]
+    fn host_checkpoint_round_trips_queue_and_counters() {
+        let source = test_host("src");
+        seed_host_state(&source);
+        let snapshot = snapshot_host(&source);
+
+        let restored = test_host("dst");
+        apply_host_checkpoint(&restored, &snapshot).unwrap();
+        let restored_snapshot = snapshot_host(&restored);
+
+        assert_eq!(snapshot.event_queue, restored_snapshot.event_queue);
+        assert_eq!(snapshot.last_popped_event_time_ns, restored_snapshot.last_popped_event_time_ns);
+        assert_eq!(snapshot.next_event_id, restored_snapshot.next_event_id);
+        assert_eq!(snapshot.next_thread_id, restored_snapshot.next_thread_id);
+        assert_eq!(snapshot.next_packet_id, restored_snapshot.next_packet_id);
+        assert_eq!(
+            snapshot.determinism_sequence_counter,
+            restored_snapshot.determinism_sequence_counter
+        );
+        assert_eq!(
+            snapshot.packet_priority_counter,
+            restored_snapshot.packet_priority_counter
+        );
+        assert_eq!(snapshot.cpu_now_ns, restored_snapshot.cpu_now_ns);
+        assert_eq!(snapshot.cpu_available_ns, restored_snapshot.cpu_available_ns);
+
+        source.shutdown();
+        restored.shutdown();
+    }
+
+    #[test]
+    fn restored_host_replays_new_scheduling_like_original() {
+        let source = test_host("src-replay");
+        seed_host_state(&source);
+        let snapshot = snapshot_host(&source);
+
+        let restored = test_host("dst-replay");
+        apply_host_checkpoint(&restored, &snapshot).unwrap();
+
+        let extra_time = EmulatedTime::SIMULATION_START + SimulationTime::from_secs(11);
+        let extra_task = || {
+            TaskRef::new_with_descriptor(
+                |_host| {},
+                TaskDescriptor::TimerExpire {
+                    timer_id: 9,
+                    expire_id: 99,
+                },
+            )
+        };
+        source.schedule_task_at_emulated_time(extra_task(), extra_time);
+        restored.schedule_task_at_emulated_time(extra_task(), extra_time);
+
+        assert_eq!(snapshot_host(&source).event_queue, snapshot_host(&restored).event_queue);
+        assert_eq!(snapshot_host(&source).next_event_id, snapshot_host(&restored).next_event_id);
+
+        source.shutdown();
+        restored.shutdown();
+    }
 }

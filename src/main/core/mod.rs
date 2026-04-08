@@ -1,11 +1,13 @@
 //! The core infrastructure needed to configure and run the simulator.
 
+pub mod checkpoint;
 pub mod configuration;
 pub mod controller;
 pub mod cpu;
 pub mod logger;
 pub mod manager;
 pub mod resource_usage;
+pub mod run_control;
 pub mod runahead;
 pub mod sim_config;
 pub mod sim_stats;

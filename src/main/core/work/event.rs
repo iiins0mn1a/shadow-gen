@@ -18,13 +18,22 @@ impl Event {
     /// A new packet event, which is an event for packets arriving from the Internet. Packet events
     /// do not include packets on localhost.
     pub fn new_packet(packet: PacketRc, time: EmulatedTime, src_host: &Host) -> Self {
+        Self::new_packet_with_ids(packet, time, src_host.id(), src_host.get_new_event_id())
+    }
+
+    pub fn new_packet_with_ids(
+        packet: PacketRc,
+        time: EmulatedTime,
+        src_host_id: HostId,
+        src_host_event_id: u64,
+    ) -> Self {
         Self {
             magic: Magic::new(),
             time,
             data: EventData::Packet(PacketEventData {
                 packet,
-                src_host_id: src_host.id(),
-                src_host_event_id: src_host.get_new_event_id(),
+                src_host_id,
+                src_host_event_id,
             }),
             _counter: ObjectCounter::new("Event"),
         }
@@ -33,13 +42,14 @@ impl Event {
     /// A new local event, which is an event that was generated locally by the host itself (timers,
     /// localhost packets, etc).
     pub fn new_local(task: TaskRef, time: EmulatedTime, host: &Host) -> Self {
+        Self::new_local_with_id(task, time, host.get_new_event_id())
+    }
+
+    pub fn new_local_with_id(task: TaskRef, time: EmulatedTime, event_id: u64) -> Self {
         Self {
             magic: Magic::new(),
             time,
-            data: EventData::Local(LocalEventData {
-                task,
-                event_id: host.get_new_event_id(),
-            }),
+            data: EventData::Local(LocalEventData { task, event_id }),
             _counter: ObjectCounter::new("Event"),
         }
     }
@@ -58,6 +68,23 @@ impl Event {
     pub fn data(self) -> EventData {
         self.magic.debug_check();
         self.data
+    }
+
+    pub fn data_ref(&self) -> &EventData {
+        self.magic.debug_check();
+        &self.data
+    }
+}
+
+impl Clone for Event {
+    fn clone(&self) -> Self {
+        self.magic.debug_check();
+        Self {
+            magic: Magic::new(),
+            time: self.time,
+            data: self.data.clone(),
+            _counter: ObjectCounter::new("Event"),
+        }
     }
 }
 
@@ -99,7 +126,7 @@ impl PartialOrd for Event {
 }
 
 /// Data for an event. Different event types will contain different data.
-#[derive(Debug, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd)]
 pub enum EventData {
     // IMPORTANT: The order of these enum variants is important and deliberate. The `PartialOrd`
     // derive affects the order of events in the event queue, and therefore which events are
@@ -109,17 +136,35 @@ pub enum EventData {
     Local(LocalEventData),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PacketEventData {
     packet: PacketRc,
     src_host_id: HostId,
     src_host_event_id: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalEventData {
     task: TaskRef,
     event_id: u64,
+}
+
+impl PacketEventData {
+    pub fn packet(&self) -> &PacketRc {
+        &self.packet
+    }
+
+    pub fn src_host_id(&self) -> HostId {
+        self.src_host_id
+    }
+
+    pub fn src_host_event_id(&self) -> u64 {
+        self.src_host_event_id
+    }
+
+    pub fn into_parts(self) -> (PacketRc, HostId, u64) {
+        (self.packet, self.src_host_id, self.src_host_event_id)
+    }
 }
 
 impl From<PacketEventData> for PacketRc {
@@ -151,6 +196,20 @@ impl PartialOrd for PacketEventData {
         }
 
         Some(cmp)
+    }
+}
+
+impl LocalEventData {
+    pub fn task(&self) -> &TaskRef {
+        &self.task
+    }
+
+    pub fn event_id(&self) -> u64 {
+        self.event_id
+    }
+
+    pub fn into_parts(self) -> (TaskRef, u64) {
+        (self.task, self.event_id)
     }
 }
 
