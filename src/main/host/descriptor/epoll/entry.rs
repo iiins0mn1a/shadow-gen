@@ -64,6 +64,14 @@ impl Entry {
         self.priority
     }
 
+    pub fn interest(&self) -> EpollEvents {
+        self.interest
+    }
+
+    pub fn data(&self) -> u64 {
+        self.data
+    }
+
     pub fn notify(&mut self, new_state: FileState, changed: FileState, signals: FileSignals) {
         log::trace!(
             "Notify old state {:?}, new state {:?}, changed {:?}, signals {:?}",

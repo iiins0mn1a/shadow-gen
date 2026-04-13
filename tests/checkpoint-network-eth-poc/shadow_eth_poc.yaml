@@ -1,0 +1,70 @@
+# Ethereum-like network checkpoint/restore PoC.
+# __MESH_APP_PATH__ is rendered by orchestrator_verify.py.
+
+general:
+  stop_time: 240s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: 1_gbit_switch
+
+hosts:
+  bootnode:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __MESH_APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          ROLE: bootnode
+          TCP_PORT: "7100"
+          UDP_PORT: "7200"
+          INTERVAL_SEC: "1"
+
+  host-a:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __MESH_APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: peer-a
+          TCP_PORT: "7101"
+          UDP_PORT: "7201"
+          INTERVAL_SEC: "1"
+          TCP_PEERS: "bootnode@bootnode:7100,peer-b@host-b:7102"
+          UDP_PEERS: "bootnode@bootnode:7200,peer-b@host-b:7202"
+
+  host-b:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __MESH_APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: peer-b
+          TCP_PORT: "7102"
+          UDP_PORT: "7202"
+          INTERVAL_SEC: "1"
+          TCP_PEERS: "bootnode@bootnode:7100,peer-c@host-c:7103"
+          UDP_PEERS: "bootnode@bootnode:7200,peer-c@host-c:7203"
+
+  host-c:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __MESH_APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: peer-c
+          TCP_PORT: "7103"
+          UDP_PORT: "7203"
+          INTERVAL_SEC: "1"
+          TCP_PEERS: "bootnode@bootnode:7100,peer-a@host-a:7101"
+          UDP_PEERS: "bootnode@bootnode:7200,peer-a@host-a:7201"

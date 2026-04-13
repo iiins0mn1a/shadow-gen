@@ -275,9 +275,10 @@ impl UnixSocket {
         match (level, optname) {
             (libc::SOL_SOCKET, libc::SO_SNDBUF) => {
                 // expose current send_limit as sndbuf (similar行为)
-                let sndbuf: libc::c_int = self.common
-                    .send_limit
-                    .min(i64::from(libc::c_int::MAX) as u64) as libc::c_int;
+                let sndbuf: libc::c_int =
+                    self.common
+                        .send_limit
+                        .min(i64::from(libc::c_int::MAX) as u64) as libc::c_int;
 
                 let optval_ptr = optval_ptr.cast::<libc::c_int>();
                 let written = write_partial(memory_manager, &sndbuf, optval_ptr, optlen as usize)?;
@@ -286,7 +287,8 @@ impl UnixSocket {
             (libc::SOL_SOCKET, libc::SO_RCVBUF) => {
                 // 没有显式 recv 限制；返回一个合理默认值
                 let rcvbuf: libc::c_int = UNIX_SOCKET_DEFAULT_BUFFER_SIZE
-                    .min(i64::from(libc::c_int::MAX) as u64) as libc::c_int;
+                    .min(i64::from(libc::c_int::MAX) as u64)
+                    as libc::c_int;
                 let optval_ptr = optval_ptr.cast::<libc::c_int>();
                 let written = write_partial(memory_manager, &rcvbuf, optval_ptr, optlen as usize)?;
                 Ok(written as libc::socklen_t)
@@ -321,12 +323,12 @@ impl UnixSocket {
                 Ok(written as libc::socklen_t)
             }
             (libc::SOL_SOCKET, libc::SO_ACCEPTCONN) => {
-                let is_listening: libc::c_int = matches!(
-                    self.protocol_state,
-                    ProtocolState::ConnOrientedListening(_)
-                ) as libc::c_int;
+                let is_listening: libc::c_int =
+                    matches!(self.protocol_state, ProtocolState::ConnOrientedListening(_))
+                        as libc::c_int;
                 let optval_ptr = optval_ptr.cast::<libc::c_int>();
-                let written = write_partial(memory_manager, &is_listening, optval_ptr, optlen as usize)?;
+                let written =
+                    write_partial(memory_manager, &is_listening, optval_ptr, optlen as usize)?;
                 Ok(written as libc::socklen_t)
             }
             // 默认：不支持的 SOL_SOCKET 选项返回 ENOPROTOOPT
@@ -368,7 +370,10 @@ impl UnixSocket {
                     return Err(Errno::EINVAL.into());
                 }
                 let optval_ptr = optval_ptr.cast::<OptType>();
-                let mut val: u64 = memory_manager.read(optval_ptr)?.try_into().or(Err(Errno::EINVAL))?;
+                let mut val: u64 = memory_manager
+                    .read(optval_ptr)?
+                    .try_into()
+                    .or(Err(Errno::EINVAL))?;
                 // Linux: kernel会加倍。我们也对齐该行为后存储。
                 val = val.saturating_mul(2);
                 // 合理下限与上限

@@ -1,0 +1,58 @@
+# Multi-host network checkpoint/restore config.
+# __NET_APP_PATH__ is rendered by orchestrator_verify.py.
+
+general:
+  stop_time: 180s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: 1_gbit_switch
+
+hosts:
+  host-a:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __NET_APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          ROLE: tcp_client
+          TCP_SERVER_HOST: host-b
+          TCP_PORT: "5001"
+          TCP_INTERVAL_SEC: "1"
+
+      - path: /usr/bin/python3
+        args: __NET_APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: udp_peer_a
+          UDP_PEER_HOST: host-b
+          UDP_A_PORT: "6001"
+          UDP_B_PORT: "6002"
+          UDP_INTERVAL_SEC: "1"
+
+  host-b:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __NET_APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          ROLE: tcp_server
+          TCP_PORT: "5001"
+
+      - path: /usr/bin/python3
+        args: __NET_APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: udp_peer_b
+          UDP_PEER_HOST: host-a
+          UDP_A_PORT: "6001"
+          UDP_B_PORT: "6002"
+          UDP_INTERVAL_SEC: "1"

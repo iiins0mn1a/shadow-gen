@@ -1702,6 +1702,88 @@ void tcp_getInfo(TCP* tcp, struct tcp_info *tcpinfo) {
     tcpinfo->tcpi_total_retrans = (u_int32_t)tcp->info.retransmitCount;
 }
 
+void tcp_getRestoreState(TCP* tcp, LegacyTcpRestoreState* out) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(out);
+
+    memset(out, 0, sizeof(*out));
+    out->state = tcp->state;
+    out->flags = tcp->flags;
+    out->error = tcp->error;
+    out->is_server = tcp->server != NULL;
+    if (tcp->server) {
+        out->server_pending_max = tcp->server->pendingMax;
+        out->server_pending_count = tcp->server->pendingCount;
+        out->server_process_for_children = tcp->server->processForChildren;
+        out->server_last_peer_ip = tcp->server->lastPeerIP;
+        out->server_last_peer_port = tcp->server->lastPeerPort;
+        out->server_last_ip = tcp->server->lastIP;
+    }
+    out->recv_start = tcp->receive.start;
+    out->recv_next = tcp->receive.next;
+    out->recv_window = tcp->receive.window;
+    out->recv_end = tcp->receive.end;
+    out->recv_last_window = tcp->receive.lastWindow;
+    out->recv_last_ack = tcp->receive.lastAcknowledgment;
+    out->recv_last_seq = tcp->receive.lastSequence;
+    out->send_unacked = tcp->send.unacked;
+    out->send_next = tcp->send.next;
+    out->send_window = tcp->send.window;
+    out->send_end = tcp->send.end;
+    out->send_last_ack = tcp->send.lastAcknowledgment;
+    out->send_last_window = tcp->send.lastWindow;
+    out->send_highest_seq = tcp->send.highestSequence;
+}
+
+static void _tcp_restore_common(TCP* tcp, const LegacyTcpRestoreState* state) {
+    tcp->flags = state->flags;
+    tcp->error = state->error;
+    tcp->receive.start = state->recv_start;
+    tcp->receive.next = state->recv_next;
+    tcp->receive.window = state->recv_window;
+    tcp->receive.end = state->recv_end;
+    tcp->receive.lastWindow = state->recv_last_window;
+    tcp->receive.lastAcknowledgment = state->recv_last_ack;
+    tcp->receive.lastSequence = state->recv_last_seq;
+    tcp->send.unacked = state->send_unacked;
+    tcp->send.next = state->send_next;
+    tcp->send.window = state->send_window;
+    tcp->send.end = state->send_end;
+    tcp->send.lastAcknowledgment = state->send_last_ack;
+    tcp->send.lastWindow = state->send_last_window;
+    tcp->send.highestSequence = state->send_highest_seq;
+}
+
+void tcp_restoreListenerState(TCP* tcp, const Host* host, const LegacyTcpRestoreState* state) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(host);
+    utility_alwaysAssert(state);
+
+    if (!tcp->server) {
+        tcp->server = _tcpserver_new((gint)state->server_pending_max,
+                                     state->server_process_for_children);
+    } else {
+        _tcpserver_updateBacklog(tcp->server, (gint)state->server_pending_max);
+        tcp->server->processForChildren = state->server_process_for_children;
+    }
+    tcp->server->pendingCount = state->server_pending_count;
+    tcp->server->lastPeerIP = state->server_last_peer_ip;
+    tcp->server->lastPeerPort = state->server_last_peer_port;
+    tcp->server->lastIP = state->server_last_ip;
+
+    _tcp_setState(tcp, host, (enum TCPState)state->state);
+    _tcp_restore_common(tcp, state);
+}
+
+void tcp_restoreEstablishedState(TCP* tcp, const Host* host, const LegacyTcpRestoreState* state) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(host);
+    utility_alwaysAssert(state);
+
+    _tcp_setState(tcp, host, (enum TCPState)state->state);
+    _tcp_restore_common(tcp, state);
+}
+
 /* Address and port must be in network byte order. */
 static gint _tcp_connectToPeer(LegacySocket* socket, const Host* host, in_addr_t ip, in_port_t port,
                                sa_family_t family) {

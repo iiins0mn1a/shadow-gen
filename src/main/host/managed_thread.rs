@@ -25,13 +25,19 @@ use shadow_shim_helper_rs::shim_event::{
     ShimEventAddThreadReq, ShimEventAddThreadRes, ShimEventStartRes, ShimEventSyscall,
     ShimEventSyscallComplete, ShimEventToShadow, ShimEventToShim,
 };
-use shadow_shim_helper_rs::syscall_types::{ForeignPtr, SyscallArgs, SyscallReg};
+use shadow_shim_helper_rs::syscall_types::{
+    ForeignPtr, SyscallArgs, SyscallReg, UntypedForeignPtr,
+};
 use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias, ShMemBlockSerialized, shdeserialize};
 use vasi_sync::scchannel::SelfContainedChannelError;
 
 use super::context::ThreadContext;
 use super::host::Host;
 use super::syscall::condition::SyscallCondition;
+use crate::core::checkpoint::snapshot_types::{
+    BlockedSyscallPhaseSnapshot, BlockedSyscallRestoreActionSnapshot, ThreadEventKindSnapshot,
+    ThreadRestorePolicySnapshot, ThreadRuntimeSnapshot,
+};
 use crate::core::worker::{WORKER_SHARED, Worker};
 use crate::cshadow;
 use crate::host::syscall::handler::SyscallHandler;
@@ -66,6 +72,9 @@ pub struct ManagedThread {
     // to AFFINITY_UNINIT if CPU pinning is not enabled or if the thread has
     // not yet been pinned to a CPU.
     affinity: Cell<i32>,
+    // If true, force one synthetic EINTR completion for the first restored syscall.
+    // This de-stales blocked syscall handshakes after checkpoint/restore.
+    force_syscall_eintr_once: Cell<bool>,
 }
 
 enum IpcShmem {
@@ -88,6 +97,97 @@ impl Deref for IpcShmem {
 }
 
 impl ManagedThread {
+    pub fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {
+        let event = *self.current_event.borrow();
+        match event {
+            ShimEventToShadow::StartReq(_) => ThreadRuntimeSnapshot {
+                event_kind: ThreadEventKindSnapshot::StartReq,
+                restore_policy: ThreadRestorePolicySnapshot::ProtocolV1,
+                restore_epoch: 0,
+                blocked_syscall_active: false,
+                blocked_syscall_instance_id: None,
+                blocked_syscall_phase: BlockedSyscallPhaseSnapshot::Unknown,
+                blocked_restore_action: BlockedSyscallRestoreActionSnapshot::None,
+                blocked_timeout_ns: None,
+                blocked_trigger_fd: None,
+                blocked_trigger_state_bits: None,
+                blocked_active_file_fd: None,
+                blocked_trigger_kind: None,
+                poll_watches: Vec::new(),
+                pending_result: None,
+                blocked_syscall_nr: None,
+            },
+            ShimEventToShadow::ProcessDeath => ThreadRuntimeSnapshot {
+                event_kind: ThreadEventKindSnapshot::ProcessDeath,
+                restore_policy: ThreadRestorePolicySnapshot::ProtocolV1,
+                restore_epoch: 0,
+                blocked_syscall_active: false,
+                blocked_syscall_instance_id: None,
+                blocked_syscall_phase: BlockedSyscallPhaseSnapshot::Unknown,
+                blocked_restore_action: BlockedSyscallRestoreActionSnapshot::None,
+                blocked_timeout_ns: None,
+                blocked_trigger_fd: None,
+                blocked_trigger_state_bits: None,
+                blocked_active_file_fd: None,
+                blocked_trigger_kind: None,
+                poll_watches: Vec::new(),
+                pending_result: None,
+                blocked_syscall_nr: None,
+            },
+            ShimEventToShadow::Syscall(syscall) => ThreadRuntimeSnapshot {
+                event_kind: ThreadEventKindSnapshot::Syscall,
+                restore_policy: ThreadRestorePolicySnapshot::ProtocolV1,
+                restore_epoch: 0,
+                blocked_syscall_active: true,
+                blocked_syscall_instance_id: None,
+                blocked_syscall_phase: BlockedSyscallPhaseSnapshot::Waiting,
+                blocked_restore_action: BlockedSyscallRestoreActionSnapshot::None,
+                blocked_timeout_ns: None,
+                blocked_trigger_fd: None,
+                blocked_trigger_state_bits: None,
+                blocked_active_file_fd: None,
+                blocked_trigger_kind: None,
+                poll_watches: Vec::new(),
+                pending_result: None,
+                blocked_syscall_nr: Some(syscall.syscall_args.number),
+            },
+            ShimEventToShadow::AddThreadRes(_) => ThreadRuntimeSnapshot {
+                event_kind: ThreadEventKindSnapshot::AddThreadRes,
+                restore_policy: ThreadRestorePolicySnapshot::ProtocolV1,
+                restore_epoch: 0,
+                blocked_syscall_active: false,
+                blocked_syscall_instance_id: None,
+                blocked_syscall_phase: BlockedSyscallPhaseSnapshot::Unknown,
+                blocked_restore_action: BlockedSyscallRestoreActionSnapshot::None,
+                blocked_timeout_ns: None,
+                blocked_trigger_fd: None,
+                blocked_trigger_state_bits: None,
+                blocked_active_file_fd: None,
+                blocked_trigger_kind: None,
+                poll_watches: Vec::new(),
+                pending_result: None,
+                blocked_syscall_nr: None,
+            },
+            ShimEventToShadow::SyscallComplete(_) => ThreadRuntimeSnapshot {
+                event_kind: ThreadEventKindSnapshot::SyscallComplete,
+                restore_policy: ThreadRestorePolicySnapshot::ProtocolV1,
+                restore_epoch: 0,
+                blocked_syscall_active: false,
+                blocked_syscall_instance_id: None,
+                blocked_syscall_phase: BlockedSyscallPhaseSnapshot::Unknown,
+                blocked_restore_action: BlockedSyscallRestoreActionSnapshot::None,
+                blocked_timeout_ns: None,
+                blocked_trigger_fd: None,
+                blocked_trigger_state_bits: None,
+                blocked_active_file_fd: None,
+                blocked_trigger_kind: None,
+                poll_watches: Vec::new(),
+                pending_result: None,
+                blocked_syscall_nr: None,
+            },
+        }
+    }
+
     pub fn native_pid(&self) -> linux_api::posix_types::Pid {
         self.native_pid
     }
@@ -108,6 +208,15 @@ impl ManagedThread {
         let size = std::mem::size_of_val(&event);
         let ptr = std::ptr::from_ref(&event).cast::<u8>();
         unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec()
+    }
+
+    pub fn current_syscall_args(
+        &self,
+    ) -> Option<shadow_shim_helper_rs::syscall_types::SyscallArgs> {
+        match *self.current_event.borrow() {
+            ShimEventToShadow::Syscall(syscall) => Some(syscall.syscall_args),
+            _ => None,
+        }
     }
 
     /// Make the specified syscall on the native thread.
@@ -149,15 +258,14 @@ impl ManagedThread {
         let ipc_shmem_serialized = ipc_shmem_block.serialize();
         let ipc_shmem = Arc::new(IpcShmem::Owned(ipc_shmem_block.clone()));
 
-        let child_pid =
-            Self::spawn_native(
-                plugin_path,
-                argv,
-                envv,
-                strace_file,
-                log_file,
-                &ipc_shmem_serialized,
-            )?;
+        let child_pid = Self::spawn_native(
+            plugin_path,
+            argv,
+            envv,
+            strace_file,
+            log_file,
+            &ipc_shmem_serialized,
+        )?;
 
         // In Linux, the PID is equal to the TID of its first thread.
         let native_pid = child_pid;
@@ -225,6 +333,7 @@ impl ManagedThread {
             native_pid,
             native_tid,
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
+            force_syscall_eintr_once: Cell::new(false),
         })
     }
 
@@ -297,56 +406,130 @@ impl ManagedThread {
                     return ResumeResult::ExitedProcess;
                 }
                 ShimEventToShadow::Syscall(syscall) => {
-                    // Emulate the given syscall.
-                    // `exit` is tricky since it only exits the *mthread*, and we don't have a way
-                    // to be notified that the mthread has exited. We have to "fire and forget"
-                    // the command to execute the syscall natively.
-                    //
-                    // TODO: We could use a tid futex in shared memory, as set by
-                    // `set_tid_address`, to block here until the thread has
-                    // actually exited.
-                    if syscall.syscall_args.number == libc::SYS_exit {
-                        let return_code = syscall.syscall_args.args[0].into();
-                        debug!("Short-circuiting syscall exit({return_code})");
-                        self.return_code.set(Some(return_code));
-                        // Tell mthread to go ahead and make the exit syscall itself.
-                        // We *don't* call `_managedthread_continuePlugin` here,
-                        // since that'd release the ShimSharedMemHostLock, and we
-                        // aren't going to get a message back to know when it'd be
-                        // safe to take it again.
-                        self.ipc_shmem
-                            .to_plugin()
-                            .send(ShimEventToShim::SyscallDoNative);
-                        self.cleanup_after_exit_initiated();
-                        return ResumeResult::ExitedThread(return_code);
-                    }
-
-                    let scr = syscall_handler.syscall(ctx, &syscall.syscall_args).into();
-
-                    // remove the mthread's old syscall condition since it's no longer needed
-                    ctx.thread.cleanup_syscall_condition();
-
-                    assert!(self.is_running());
-
-                    // Flush any writes that legacy C syscallhandlers may have
-                    // made.
-                    ctx.process.free_unsafe_borrows_flush().unwrap();
-
-                    match scr {
-                        SyscallReturn::Block(b) => {
-                            return ResumeResult::Blocked(unsafe {
-                                SyscallCondition::consume_from_c(b.cond)
-                            });
+                    let is_poll_family = matches!(
+                        syscall.syscall_args.number,
+                        x if x == libc::SYS_pselect6
+                            || x == libc::SYS_ppoll
+                            || x == libc::SYS_poll
+                            || x == libc::SYS_select
+                    );
+                    let has_restored_timeout = ctx
+                        .thread
+                        .syscall_condition()
+                        .and_then(|cond| cond.timeout())
+                        .is_some();
+                    let has_restored_poll_trigger = ctx
+                        .thread
+                        .syscall_condition()
+                        .is_some_and(|cond| {
+                            cond.trigger_kind()
+                                == crate::core::checkpoint::snapshot_types::BlockedTriggerKindSnapshot::LegacyDescriptor
+                        });
+                    let should_force_synthetic_completion = self
+                        .force_syscall_eintr_once
+                        .replace(false)
+                        && !syscall_handler.has_pending_result()
+                        && (!has_restored_timeout || (is_poll_family && has_restored_poll_trigger));
+                    if should_force_synthetic_completion {
+                        if syscall.syscall_args.number == libc::SYS_pselect6
+                            || syscall.syscall_args.number == libc::SYS_select
+                        {
+                            let zero_set =
+                                [0u8; std::mem::size_of::<linux_api::posix_types::kernel_fd_set>()];
+                            for arg_idx in [1usize, 2, 3] {
+                                let fdset_ptr: ForeignPtr<linux_api::posix_types::kernel_fd_set> =
+                                    syscall.syscall_args.args[arg_idx].into();
+                                if fdset_ptr.is_null() {
+                                    continue;
+                                }
+                                let untyped_ptr: UntypedForeignPtr = fdset_ptr.cast::<()>();
+                                let _ = unsafe {
+                                    crate::host::process::export::process_writePtr(
+                                        std::ptr::from_ref(ctx.process),
+                                        untyped_ptr,
+                                        zero_set.as_ptr().cast(),
+                                        zero_set.len(),
+                                    )
+                                };
+                            }
                         }
-                        SyscallReturn::Done(d) => self.continue_plugin(
+                        let synthetic_retval = match syscall.syscall_args.number {
+                            x if x == libc::SYS_pselect6
+                                || x == libc::SYS_ppoll
+                                || x == libc::SYS_nanosleep
+                                || x == libc::SYS_clock_nanosleep =>
+                            {
+                                SyscallReg::from(0i64)
+                            }
+                            _ => SyscallReg::from(Errno::EINTR.to_negated_i64()),
+                        };
+                        log::debug!(
+                            "restore de-stale: forcing synthetic completion pid={:?} tid={:?} syscall_nr={} retval={}",
+                            self.native_pid,
+                            self.native_tid,
+                            syscall.syscall_args.number,
+                            <i64 as From<SyscallReg>>::from(synthetic_retval)
+                        );
+                        syscall_handler.clear_blocked_syscall();
+                        self.continue_plugin(
                             ctx.host,
                             &ShimEventToShim::SyscallComplete(ShimEventSyscallComplete {
-                                retval: d.retval,
-                                restartable: d.restartable,
+                                retval: synthetic_retval,
+                                restartable: false,
                             }),
-                        ),
-                        SyscallReturn::Native => {
-                            self.continue_plugin(ctx.host, &ShimEventToShim::SyscallDoNative)
+                        )
+                    } else {
+                        // Emulate the given syscall.
+                        // `exit` is tricky since it only exits the *mthread*, and we don't have a way
+                        // to be notified that the mthread has exited. We have to "fire and forget"
+                        // the command to execute the syscall natively.
+                        //
+                        // TODO: We could use a tid futex in shared memory, as set by
+                        // `set_tid_address`, to block here until the thread has
+                        // actually exited.
+                        if syscall.syscall_args.number == libc::SYS_exit {
+                            let return_code = syscall.syscall_args.args[0].into();
+                            debug!("Short-circuiting syscall exit({return_code})");
+                            self.return_code.set(Some(return_code));
+                            // Tell mthread to go ahead and make the exit syscall itself.
+                            // We *don't* call `_managedthread_continuePlugin` here,
+                            // since that'd release the ShimSharedMemHostLock, and we
+                            // aren't going to get a message back to know when it'd be
+                            // safe to take it again.
+                            self.ipc_shmem
+                                .to_plugin()
+                                .send(ShimEventToShim::SyscallDoNative);
+                            self.cleanup_after_exit_initiated();
+                            return ResumeResult::ExitedThread(return_code);
+                        }
+
+                        let scr = syscall_handler.syscall(ctx, &syscall.syscall_args).into();
+
+                        // remove the mthread's old syscall condition since it's no longer needed
+                        ctx.thread.cleanup_syscall_condition();
+
+                        assert!(self.is_running());
+
+                        // Flush any writes that legacy C syscallhandlers may have
+                        // made.
+                        ctx.process.free_unsafe_borrows_flush().unwrap();
+
+                        match scr {
+                            SyscallReturn::Block(b) => {
+                                return ResumeResult::Blocked(unsafe {
+                                    SyscallCondition::consume_from_c(b.cond)
+                                });
+                            }
+                            SyscallReturn::Done(d) => self.continue_plugin(
+                                ctx.host,
+                                &ShimEventToShim::SyscallComplete(ShimEventSyscallComplete {
+                                    retval: d.retval,
+                                    restartable: d.restartable,
+                                }),
+                            ),
+                            SyscallReturn::Native => {
+                                self.continue_plugin(ctx.host, &ShimEventToShim::SyscallDoNative)
+                            }
                         }
                     }
                 }
@@ -471,17 +654,20 @@ impl ManagedThread {
             native_tid: child_native_tid,
             // TODO: can we assume it's inherited from the current thread affinity?
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
+            force_syscall_eintr_once: Cell::new(false),
         })
     }
 
     #[must_use]
     fn continue_plugin(&self, host: &Host, event: &ShimEventToShim) -> ShimEventToShadow {
         // Update shared state before transferring control.
-        host.shim_shmem_lock_borrow_mut().unwrap().max_runahead_time =
-            Worker::max_event_runahead_time(host);
+        let max_runahead_time = Worker::max_event_runahead_time(host);
+        host.shim_shmem_lock_borrow_mut().unwrap().max_runahead_time = max_runahead_time;
+        let sim_time = Worker::current_time().unwrap();
         host.shim_shmem()
             .sim_time
-            .store(Worker::current_time().unwrap(), atomic::Ordering::Relaxed);
+            .store(sim_time, atomic::Ordering::Relaxed);
+        host.mirror_restored_shim_clock_state(sim_time, max_runahead_time);
 
         // Release lock so that plugin can take it. Reacquired in `wait_for_next_event`.
         host.unlock_shmem();
@@ -830,26 +1016,35 @@ impl ManagedThread {
         native_tid: Pid,
         ipc_shmem_handle: &str,
         current_event_bytes: &[u8],
+        force_syscall_eintr_once: bool,
     ) -> Self {
         let ipc_shmem_serialized = ShMemBlockSerialized::from_str(ipc_shmem_handle).unwrap();
         let ipc_shmem = Arc::new(IpcShmem::Restored {
             block: unsafe { shdeserialize::<IPCData>(&ipc_shmem_serialized) },
             handle: ipc_shmem_handle.to_string(),
         });
-        log::info!(
+        log::debug!(
             "Rebuilding ManagedThread from checkpoint: pid={:?} tid={:?}",
             native_pid,
             native_tid,
         );
 
+        let restored_event = event_from_bytes(current_event_bytes);
+        log::debug!(
+            "Rebuilt ManagedThread event kind at restore: pid={:?} tid={:?} event={:?}",
+            native_pid,
+            native_tid,
+            restored_event
+        );
         Self {
             ipc_shmem,
             is_running: Cell::new(true),
             return_code: Cell::new(None),
-            current_event: RefCell::new(event_from_bytes(current_event_bytes)),
+            current_event: RefCell::new(restored_event),
             native_pid,
             native_tid,
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
+            force_syscall_eintr_once: Cell::new(force_syscall_eintr_once),
         }
     }
 }

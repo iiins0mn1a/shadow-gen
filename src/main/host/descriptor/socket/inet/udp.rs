@@ -12,6 +12,9 @@ use nix::sys::socket::{MsgFlags, SockaddrIn};
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
+use crate::core::checkpoint::snapshot_types::{
+    UdpBufferedRecvMessageSnapshot, UdpBufferedSendMessageSnapshot, UdpSocketRuntimeSnapshot,
+};
 use crate::core::worker::Worker;
 use crate::cshadow as c;
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
@@ -1028,6 +1031,158 @@ impl UdpSocket {
 
     pub fn state(&self) -> FileState {
         self.state
+    }
+
+    pub fn runtime_snapshot(&self) -> UdpSocketRuntimeSnapshot {
+        let send_queue = self
+            .send_buffer
+            .buffer
+            .iter()
+            .map(|(payload, hdr)| UdpBufferedSendMessageSnapshot {
+                payload: payload.to_vec(),
+                src_ip: hdr.src.ip().to_string(),
+                src_port: hdr.src.port(),
+                dst_ip: hdr.dst.ip().to_string(),
+                dst_port: hdr.dst.port(),
+                packet_priority: hdr.packet_priority,
+            })
+            .collect();
+        let recv_queue = self
+            .recv_buffer
+            .buffer
+            .iter()
+            .map(|(payload, hdr)| UdpBufferedRecvMessageSnapshot {
+                payload: payload.to_vec(),
+                src_ip: hdr.src.ip().to_string(),
+                src_port: hdr.src.port(),
+                dst_ip: hdr.dst.ip().to_string(),
+                dst_port: hdr.dst.port(),
+                recv_time_ns: hdr
+                    .recv_time
+                    .saturating_duration_since(&EmulatedTime::SIMULATION_START)
+                    .as_nanos() as u64,
+            })
+            .collect();
+
+        UdpSocketRuntimeSnapshot {
+            state_bits: self.state.bits(),
+            shutdown_read: self.shutdown_status.contains(ShutdownFlags::READ),
+            shutdown_write: self.shutdown_status.contains(ShutdownFlags::WRITE),
+            peer_ip: self.peer_addr.as_ref().map(|x| x.ip().to_string()),
+            peer_port: self.peer_addr.as_ref().map(|x| x.port()),
+            bound_ip: self.bound_addr.as_ref().map(|x| x.ip().to_string()),
+            bound_port: self.bound_addr.as_ref().map(|x| x.port()),
+            has_association: self.association.is_some(),
+            recv_time_of_last_read_packet_ns: self.recv_time_of_last_read_packet.map(|x| {
+                x.saturating_duration_since(&EmulatedTime::SIMULATION_START)
+                    .as_nanos() as u64
+            }),
+            send_buffer_soft_limit_bytes: self.send_buffer.soft_limit_bytes(),
+            recv_buffer_soft_limit_bytes: self.recv_buffer.soft_limit_bytes(),
+            send_buffer_len_bytes: self.send_buffer.len_bytes(),
+            recv_buffer_len_bytes: self.recv_buffer.len_bytes(),
+            send_queue,
+            recv_queue,
+        }
+    }
+
+    pub fn restore_runtime(
+        &mut self,
+        snapshot: &UdpSocketRuntimeSnapshot,
+        cb_queue: &mut CallbackQueue,
+    ) {
+        self.state = FileState::from_bits_truncate(snapshot.state_bits);
+        self.shutdown_status = ShutdownFlags::empty();
+        self.shutdown_status
+            .set(ShutdownFlags::READ, snapshot.shutdown_read);
+        self.shutdown_status
+            .set(ShutdownFlags::WRITE, snapshot.shutdown_write);
+        self.peer_addr = snapshot
+            .peer_ip
+            .as_ref()
+            .and_then(|ip| ip.parse::<Ipv4Addr>().ok())
+            .zip(snapshot.peer_port)
+            .map(|(ip, port)| SocketAddrV4::new(ip, port));
+        self.bound_addr = snapshot
+            .bound_ip
+            .as_ref()
+            .and_then(|ip| ip.parse::<Ipv4Addr>().ok())
+            .zip(snapshot.bound_port)
+            .map(|(ip, port)| SocketAddrV4::new(ip, port));
+        self.recv_time_of_last_read_packet = snapshot.recv_time_of_last_read_packet_ns.map(|x| {
+            EmulatedTime::SIMULATION_START
+                + shadow_shim_helper_rs::simulation_time::SimulationTime::from_nanos(x)
+        });
+
+        self.send_buffer = MessageBuffer::new(snapshot.send_buffer_soft_limit_bytes);
+        self.send_buffer.buffer = snapshot
+            .send_queue
+            .iter()
+            .map(|msg| {
+                (
+                    Bytes::from(msg.payload.clone()),
+                    MessageSendHeader {
+                        src: SocketAddrV4::new(
+                            msg.src_ip
+                                .parse::<Ipv4Addr>()
+                                .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                            msg.src_port,
+                        ),
+                        dst: SocketAddrV4::new(
+                            msg.dst_ip
+                                .parse::<Ipv4Addr>()
+                                .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                            msg.dst_port,
+                        ),
+                        packet_priority: msg.packet_priority,
+                    },
+                )
+            })
+            .collect();
+        let restored_send_bytes: usize = self.send_buffer.buffer.iter().map(|(p, _)| p.len()).sum();
+        self.send_buffer.len_bytes = restored_send_bytes;
+
+        self.recv_buffer = MessageBuffer::new(snapshot.recv_buffer_soft_limit_bytes);
+        self.recv_buffer.buffer =
+            snapshot
+                .recv_queue
+                .iter()
+                .map(|msg| {
+                    (
+                    Bytes::from(msg.payload.clone()),
+                    MessageRecvHeader {
+                        src: SocketAddrV4::new(
+                            msg.src_ip.parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED),
+                            msg.src_port,
+                        ),
+                        dst: SocketAddrV4::new(
+                            msg.dst_ip.parse::<Ipv4Addr>().unwrap_or(Ipv4Addr::UNSPECIFIED),
+                            msg.dst_port,
+                        ),
+                        recv_time: EmulatedTime::SIMULATION_START
+                            + shadow_shim_helper_rs::simulation_time::SimulationTime::from_nanos(
+                                msg.recv_time_ns,
+                            ),
+                    },
+                )
+                })
+                .collect();
+        let restored_recv_bytes: usize = self.recv_buffer.buffer.iter().map(|(p, _)| p.len()).sum();
+        self.recv_buffer.len_bytes = restored_recv_bytes;
+
+        if restored_send_bytes != snapshot.send_buffer_len_bytes
+            || restored_recv_bytes != snapshot.recv_buffer_len_bytes
+        {
+            log::debug!(
+                "udp runtime restore adjusted buffer lengths send:{}->{} recv:{}->{}",
+                snapshot.send_buffer_len_bytes,
+                restored_send_bytes,
+                snapshot.recv_buffer_len_bytes,
+                restored_recv_bytes
+            );
+        }
+
+        self.refresh_readable_writable(FileSignals::empty(), cb_queue);
     }
 
     fn refresh_readable_writable(&mut self, signals: FileSignals, cb_queue: &mut CallbackQueue) {

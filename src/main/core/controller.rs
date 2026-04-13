@@ -9,11 +9,11 @@ use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::util::time::TimeParts;
 
-use crate::core::configuration::ConfigOptions;
 use crate::core::checkpoint::snapshot_types::SimulationCheckpoint;
+use crate::core::configuration::ConfigOptions;
 use crate::core::manager::{Manager, ManagerConfig};
-use crate::core::run_control::commands::SimulationRunResult;
 use crate::core::run_control::TimeController;
+use crate::core::run_control::commands::SimulationRunResult;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
 use crate::utility::status_bar::{self, StatusBar, StatusPrinter};
@@ -46,7 +46,10 @@ impl<'a> Controller<'a> {
         }
     }
 
-    pub fn run(mut self, time_controller: &dyn TimeController) -> anyhow::Result<SimulationRunResult> {
+    pub fn run(
+        mut self,
+        time_controller: &dyn TimeController,
+    ) -> anyhow::Result<SimulationRunResult> {
         let mut sim_config = self.sim_config.take().unwrap();
 
         let status_logger = self.config.general.progress.unwrap().then(|| {

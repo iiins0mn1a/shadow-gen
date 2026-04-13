@@ -43,5 +43,8 @@ pub fn reregister_child_watcher(
 ) {
     watcher.register_pid(new_pid);
     watcher.register_callback(new_pid, on_exit);
-    log::debug!("Registered child_pid_watcher for restored PID {:?}", new_pid);
+    log::debug!(
+        "Registered child_pid_watcher for restored PID {:?}",
+        new_pid
+    );
 }

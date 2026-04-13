@@ -599,7 +599,7 @@ impl CountedLegacyFileRef {
 impl std::clone::Clone for CountedLegacyFileRef {
     fn clone(&self) -> Self {
         // ref the legacy file object
-        unsafe { c::legacyfile_ref(self.0.ptr() as *mut core::ffi::c_void) };
+        unsafe { c::legacyfile_ref(self.0.ptr_unchecked() as *mut core::ffi::c_void) };
         Self(self.0)
     }
 }
@@ -607,7 +607,7 @@ impl std::clone::Clone for CountedLegacyFileRef {
 impl Drop for CountedLegacyFileRef {
     fn drop(&mut self) {
         // unref the legacy file object
-        unsafe { c::legacyfile_unref(self.0.ptr() as *mut core::ffi::c_void) };
+        unsafe { c::legacyfile_unref(self.0.ptr_unchecked() as *mut core::ffi::c_void) };
     }
 }
 
@@ -655,7 +655,12 @@ impl LegacyFileCounter {
 
 impl std::ops::Drop for LegacyFileCounter {
     fn drop(&mut self) {
-        worker::Worker::with_active_host(|host| self.close_helper(host)).unwrap();
+        if let Some(()) = worker::Worker::with_active_host(|host| self.close_helper(host)) {
+            return;
+        }
+        // During manager-level checkpoint bookkeeping we may temporarily clone
+        // descriptor structures outside any active-host context.
+        log::debug!("Dropping LegacyFileCounter without active host; skipping close_helper");
     }
 }
 

@@ -30,10 +30,94 @@ pub struct SimulationCheckpoint {
     pub shmem_backup_dir: PathBuf,
     /// CRIU images base directory.
     pub criu_base_dir: PathBuf,
+    /// Explicit restore protocol metadata used to recover network and blocked syscall
+    /// semantics without relying on legacy heuristics.
+    #[serde(default)]
+    pub restore_protocol: RestoreProtocolSnapshot,
 }
 
 impl SimulationCheckpoint {
-    pub const CURRENT_VERSION: u32 = 4;
+    pub const CURRENT_VERSION: u32 = 13;
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RestoreProtocolModeSnapshot {
+    #[default]
+    LegacyHeuristic,
+    ProtocolV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreProtocolSnapshot {
+    #[serde(default)]
+    pub mode: RestoreProtocolModeSnapshot,
+    #[serde(default)]
+    pub restore_epoch: u64,
+    #[serde(default)]
+    pub connections: Vec<ConnectionProtocolSnapshot>,
+    #[serde(default)]
+    pub blocked_syscalls: Vec<BlockedSyscallProtocolSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionProtocolSnapshot {
+    pub connection_id: u64,
+    pub host_id: u32,
+    pub process_id: u32,
+    pub fd: u32,
+    #[serde(default)]
+    pub canonical_handle: Option<u64>,
+    pub role: ConnectionProtocolRoleSnapshot,
+    pub transport: DescriptorSocketTransport,
+    pub implementation: Option<DescriptorSocketImplementation>,
+    pub local_ip: Option<String>,
+    pub local_port: Option<u16>,
+    pub peer_ip: Option<String>,
+    pub peer_port: Option<u16>,
+    pub is_listening: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ConnectionProtocolRoleSnapshot {
+    #[default]
+    Unspecified,
+    Listener,
+    Connected,
+    Unconnected,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BlockedSyscallPhaseSnapshot {
+    #[default]
+    Unknown,
+    Waiting,
+    Completing,
+    Resuming,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedSyscallProtocolSnapshot {
+    pub host_id: u32,
+    pub process_id: u32,
+    pub thread_id: u32,
+    pub syscall_nr: i64,
+    pub instance_id: u64,
+    pub phase: BlockedSyscallPhaseSnapshot,
+    #[serde(default)]
+    pub action: BlockedSyscallRestoreActionSnapshot,
+    pub timeout_ns: Option<u64>,
+    #[serde(default)]
+    pub poll_watches: Vec<PollWatchSnapshot>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BlockedSyscallRestoreActionSnapshot {
+    #[default]
+    None,
+    ResumeImmediately,
+    RearmTimeout,
+    RearmCondition,
+    RearmPoll,
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +186,7 @@ pub struct LocalEventSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskDescriptor {
     /// Resume a process thread that was blocked on a syscall condition.
-    ResumeProcess {
-        process_id: u32,
-        thread_id: u32,
-    },
+    ResumeProcess { process_id: u32, thread_id: u32 },
     /// Start an application process at the configured start time.
     StartApplication {
         plugin_name: String,
@@ -118,29 +199,17 @@ pub enum TaskDescriptor {
         expected_final_state: ProcessFinalState,
     },
     /// Send a shutdown signal to a process.
-    ShutdownProcess {
-        process_id: u32,
-        signal: i32,
-    },
+    ShutdownProcess { process_id: u32, signal: i32 },
     /// Relay packet forwarding (intra-host).
-    RelayForward {
-        relay_id: u64,
-    },
+    RelayForward { relay_id: u64 },
     /// Timer expiry callback.
-    TimerExpire {
-        timer_id: u64,
-        expire_id: u64,
-    },
+    TimerExpire { timer_id: u64, expire_id: u64 },
     /// Continuation after execve replaces a process image.
-    ExecContinuation {
-        process_id: u32,
-    },
+    ExecContinuation { process_id: u32 },
     /// A generic opaque task that cannot be meaningfully serialized. This
     /// variant exists as a fallback; checkpointing will skip events
     /// containing opaque tasks and log a warning.
-    Opaque {
-        description: String,
-    },
+    Opaque { description: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +301,189 @@ pub struct ProcessCheckpoint {
     pub threads: Vec<ThreadCheckpoint>,
     /// Serialized handle for ProcessShmem.
     pub process_shmem_handle: String,
+    /// Best-effort visibility into descriptor state at checkpoint time.
+    /// Used for restore diagnostics and sanity checks.
+    pub descriptor_count_hint: u32,
+    /// Descriptor table snapshot (fd-level metadata) for restore diagnostics and replay.
+    pub descriptors: Vec<DescriptorEntrySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescriptorEntrySnapshot {
+    pub fd: u32,
+    pub descriptor_flags_bits: i32,
+    pub file_status_bits: i32,
+    pub file_mode_bits: u32,
+    pub file_kind: DescriptorFileKind,
+    #[serde(default)]
+    pub canonical_handle: Option<u64>,
+    #[serde(default)]
+    pub socket_transport: Option<DescriptorSocketTransport>,
+    #[serde(default)]
+    pub socket_implementation: Option<DescriptorSocketImplementation>,
+    #[serde(default)]
+    pub socket_local_ip: Option<String>,
+    #[serde(default)]
+    pub socket_local_port: Option<u16>,
+    #[serde(default)]
+    pub socket_peer_ip: Option<String>,
+    #[serde(default)]
+    pub socket_peer_port: Option<u16>,
+    #[serde(default)]
+    pub socket_is_listening: bool,
+    #[serde(default)]
+    pub socket_runtime: Option<SocketRuntimeSnapshot>,
+    #[serde(default)]
+    pub epoll_watches: Vec<EpollWatchSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SocketRuntimeSnapshot {
+    LegacyTcp(LegacyTcpSocketRuntimeSnapshot),
+    Tcp(TcpSocketRuntimeSnapshot),
+    Udp(UdpSocketRuntimeSnapshot),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpollWatchSnapshot {
+    pub watched_fd: u32,
+    #[serde(default)]
+    pub watched_canonical_handle: Option<u64>,
+    pub interest_bits: u32,
+    pub data: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyTcpSocketRuntimeSnapshot {
+    pub tcp_state: u32,
+    pub tcp_flags: u32,
+    pub tcp_error: u32,
+    pub is_server: bool,
+    #[serde(default)]
+    pub server_pending_max: Option<u32>,
+    #[serde(default)]
+    pub server_pending_count: Option<u32>,
+    #[serde(default)]
+    pub server_process_for_children: Option<u32>,
+    #[serde(default)]
+    pub server_last_peer_ip: Option<String>,
+    #[serde(default)]
+    pub server_last_peer_port: Option<u16>,
+    #[serde(default)]
+    pub server_last_ip: Option<String>,
+    pub recv_start: u32,
+    pub recv_next: u32,
+    pub recv_window: u32,
+    pub recv_end: u32,
+    pub recv_last_window: u32,
+    pub recv_last_ack: u32,
+    pub recv_last_seq: u32,
+    pub send_unacked: u32,
+    pub send_next: u32,
+    pub send_window: u32,
+    pub send_end: u32,
+    pub send_last_ack: u32,
+    pub send_last_window: u32,
+    pub send_highest_seq: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpSocketRuntimeSnapshot {
+    pub file_state_bits: u16,
+    pub connect_result_is_pending: bool,
+    pub shutdown_read: bool,
+    pub shutdown_write: bool,
+    pub has_association: bool,
+    pub has_data_to_send: bool,
+    pub tcp_state_kind: String,
+    pub tcp_poll_state_bits: u32,
+    pub tcp_local_ip: Option<String>,
+    pub tcp_local_port: Option<u16>,
+    pub tcp_remote_ip: Option<String>,
+    pub tcp_remote_port: Option<u16>,
+    #[serde(default)]
+    pub tcp_listen_child_count: Option<u32>,
+    #[serde(default)]
+    pub tcp_listen_accept_queue_len: Option<u32>,
+    #[serde(default)]
+    pub tcp_send_buffer_len: Option<u32>,
+    #[serde(default)]
+    pub tcp_send_transmitted_up_to: Option<u32>,
+    #[serde(default)]
+    pub tcp_send_next_seq: Option<u32>,
+    #[serde(default)]
+    pub tcp_recv_buffer_len: Option<u32>,
+    #[serde(default)]
+    pub tcp_recv_next_seq: Option<u32>,
+    #[serde(default)]
+    pub tcp_recv_window_len: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpBufferedSendMessageSnapshot {
+    pub payload: Vec<u8>,
+    pub src_ip: String,
+    pub src_port: u16,
+    pub dst_ip: String,
+    pub dst_port: u16,
+    pub packet_priority: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpBufferedRecvMessageSnapshot {
+    pub payload: Vec<u8>,
+    pub src_ip: String,
+    pub src_port: u16,
+    pub dst_ip: String,
+    pub dst_port: u16,
+    pub recv_time_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpSocketRuntimeSnapshot {
+    pub state_bits: u16,
+    pub shutdown_read: bool,
+    pub shutdown_write: bool,
+    pub peer_ip: Option<String>,
+    pub peer_port: Option<u16>,
+    pub bound_ip: Option<String>,
+    pub bound_port: Option<u16>,
+    pub has_association: bool,
+    pub recv_time_of_last_read_packet_ns: Option<u64>,
+    pub send_buffer_soft_limit_bytes: usize,
+    pub recv_buffer_soft_limit_bytes: usize,
+    pub send_buffer_len_bytes: usize,
+    pub recv_buffer_len_bytes: usize,
+    pub send_queue: Vec<UdpBufferedSendMessageSnapshot>,
+    pub recv_queue: Vec<UdpBufferedRecvMessageSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DescriptorFileKind {
+    Legacy,
+    Pipe,
+    EventFd,
+    Socket,
+    TimerFd,
+    Epoll,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DescriptorSocketTransport {
+    Tcp,
+    Udp,
+    Unix,
+    Netlink,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DescriptorSocketImplementation {
+    LegacyTcp,
+    Tcp,
+    Udp,
+    Unix,
+    Netlink,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,4 +500,77 @@ pub struct ThreadCheckpoint {
     pub thread_shmem_handle: String,
     /// Raw bytes of `ShimEventToShadow`, preserving where the shim was parked.
     pub current_event_bytes: Vec<u8>,
+    #[serde(default)]
+    pub runtime: Option<ThreadRuntimeSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadRuntimeSnapshot {
+    pub event_kind: ThreadEventKindSnapshot,
+    #[serde(default)]
+    pub restore_policy: ThreadRestorePolicySnapshot,
+    #[serde(default)]
+    pub restore_epoch: u64,
+    #[serde(default)]
+    pub blocked_syscall_active: bool,
+    #[serde(default)]
+    pub blocked_syscall_instance_id: Option<u64>,
+    #[serde(default)]
+    pub blocked_syscall_phase: BlockedSyscallPhaseSnapshot,
+    #[serde(default)]
+    pub blocked_restore_action: BlockedSyscallRestoreActionSnapshot,
+    #[serde(default)]
+    pub blocked_timeout_ns: Option<u64>,
+    #[serde(default)]
+    pub blocked_trigger_fd: Option<u32>,
+    #[serde(default)]
+    pub blocked_trigger_state_bits: Option<u16>,
+    #[serde(default)]
+    pub blocked_active_file_fd: Option<u32>,
+    #[serde(default)]
+    pub blocked_trigger_kind: Option<BlockedTriggerKindSnapshot>,
+    #[serde(default)]
+    pub poll_watches: Vec<PollWatchSnapshot>,
+    #[serde(default)]
+    pub pending_result: Option<PendingSyscallResultSnapshot>,
+    pub blocked_syscall_nr: Option<i64>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThreadRestorePolicySnapshot {
+    #[default]
+    LegacyHeuristic,
+    ProtocolV1,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockedTriggerKindSnapshot {
+    File,
+    LegacyDescriptor,
+    Futex,
+    Child,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollWatchSnapshot {
+    pub fd: u32,
+    pub epoll_events: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingSyscallResultSnapshot {
+    Done { retval_raw: u64 },
+    Failed { errno: i32, restartable: bool },
+    Native,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreadEventKindSnapshot {
+    StartReq,
+    ProcessDeath,
+    Syscall,
+    AddThreadRes,
+    SyscallComplete,
+    Other,
 }

@@ -800,32 +800,37 @@ impl SyscallHandler {
             // TODO: Split TaskRef into another type that only requires `FnOnce` and `Send`.
             let mthread = RootedRefCell::new(ctx.objs.host.root(), Some(mthread));
             ctx.objs.host.schedule_task_with_delay(
-                TaskRef::new_with_descriptor(move |host| {
-                    // Take the `mthread` out of the captured wrapper.
-                    // This task shouldn't run multiple times, so this should be
-                    // infallible.
-                    let mthread = mthread.borrow_mut(host.root()).take().unwrap();
-                    // The exec'ing thread's ID is changed to match the pid, since it's
-                    // the new thread-group-leader.
-                    let new_tglid = {
-                        let Some(processrc) = host.process_borrow(pid) else {
-                            // Can happen if another event runs before this one
-                            // and causes the Process to exit (e.g. exit_group
-                            // called from anothe Thread).
-                            log::debug!("Process {pid:?} disappeared before exec could complete");
-                            mthread.kill_and_drop();
-                            return;
+                TaskRef::new_with_descriptor(
+                    move |host| {
+                        // Take the `mthread` out of the captured wrapper.
+                        // This task shouldn't run multiple times, so this should be
+                        // infallible.
+                        let mthread = mthread.borrow_mut(host.root()).take().unwrap();
+                        // The exec'ing thread's ID is changed to match the pid, since it's
+                        // the new thread-group-leader.
+                        let new_tglid = {
+                            let Some(processrc) = host.process_borrow(pid) else {
+                                // Can happen if another event runs before this one
+                                // and causes the Process to exit (e.g. exit_group
+                                // called from anothe Thread).
+                                log::debug!(
+                                    "Process {pid:?} disappeared before exec could complete"
+                                );
+                                mthread.kill_and_drop();
+                                return;
+                            };
+                            Worker::set_active_process(&processrc);
+                            let mut process = processrc.borrow_mut(host.root());
+                            process.update_for_exec(host, tid, mthread);
+                            Worker::clear_active_process();
+                            process.thread_group_leader_id()
                         };
-                        Worker::set_active_process(&processrc);
-                        let mut process = processrc.borrow_mut(host.root());
-                        process.update_for_exec(host, tid, mthread);
-                        Worker::clear_active_process();
-                        process.thread_group_leader_id()
-                    };
-                    host.resume(pid, new_tglid);
-                }, TaskDescriptor::ExecContinuation {
-                    process_id: u32::from(pid),
-                }),
+                        host.resume(pid, new_tglid);
+                    },
+                    TaskDescriptor::ExecContinuation {
+                        process_id: u32::from(pid),
+                    },
+                ),
                 SimulationTime::ZERO,
             );
         }

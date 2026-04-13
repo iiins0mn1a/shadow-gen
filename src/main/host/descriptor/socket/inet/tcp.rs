@@ -11,6 +11,7 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
 use crate::core::checkpoint::snapshot_types::TaskDescriptor;
+use crate::core::checkpoint::snapshot_types::TcpSocketRuntimeSnapshot;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow as c;
@@ -1020,6 +1021,49 @@ impl TcpSocket {
         self.file_state
     }
 
+    pub fn runtime_snapshot(&self) -> TcpSocketRuntimeSnapshot {
+        let tcp_runtime = self.tcp_state.runtime_snapshot();
+        let (shutdown_read, shutdown_write) = match self.shutdown_status {
+            Some(Shutdown::SHUT_RD) => (true, false),
+            Some(Shutdown::SHUT_WR) => (false, true),
+            Some(Shutdown::SHUT_RDWR) => (true, true),
+            None => (false, false),
+        };
+        TcpSocketRuntimeSnapshot {
+            file_state_bits: self.file_state.bits(),
+            connect_result_is_pending: self.connect_result_is_pending,
+            shutdown_read,
+            shutdown_write,
+            has_association: self.association.is_some(),
+            has_data_to_send: self.has_data_to_send(),
+            tcp_state_kind: format!("{:?}", tcp_runtime.state_kind),
+            tcp_poll_state_bits: tcp_runtime.poll_state_bits,
+            tcp_local_ip: tcp_runtime.local_addr.as_ref().map(|x| x.ip().to_string()),
+            tcp_local_port: tcp_runtime.local_addr.as_ref().map(|x| x.port()),
+            tcp_remote_ip: tcp_runtime.remote_addr.as_ref().map(|x| x.ip().to_string()),
+            tcp_remote_port: tcp_runtime.remote_addr.as_ref().map(|x| x.port()),
+            tcp_listen_child_count: tcp_runtime.listen_child_count,
+            tcp_listen_accept_queue_len: tcp_runtime.listen_accept_queue_len,
+            tcp_send_buffer_len: tcp_runtime.send_buffer_len,
+            tcp_send_transmitted_up_to: tcp_runtime.send_transmitted_up_to,
+            tcp_send_next_seq: tcp_runtime.send_next_seq,
+            tcp_recv_buffer_len: tcp_runtime.recv_buffer_len,
+            tcp_recv_next_seq: tcp_runtime.recv_next_seq,
+            tcp_recv_window_len: tcp_runtime.recv_window_len,
+        }
+    }
+
+    pub fn restore_runtime(&mut self, snapshot: &TcpSocketRuntimeSnapshot) {
+        self.connect_result_is_pending = snapshot.connect_result_is_pending;
+        self.file_state = FileState::from_bits_truncate(snapshot.file_state_bits);
+        self.shutdown_status = match (snapshot.shutdown_read, snapshot.shutdown_write) {
+            (true, true) => Some(Shutdown::SHUT_RDWR),
+            (true, false) => Some(Shutdown::SHUT_RD),
+            (false, true) => Some(Shutdown::SHUT_WR),
+            (false, false) => None,
+        };
+    }
+
     fn update_state(
         &mut self,
         mask: FileState,
@@ -1109,19 +1153,22 @@ impl tcp::Dependencies for TcpDeps {
 
         // schedule a task with the host
         Worker::with_active_host(|host| {
-            let task = TaskRef::new_with_descriptor(move |_host| {
-                // take ownership of the task; will panic if the task is run more than once
-                let f = f.borrow_mut().take().unwrap();
+            let task = TaskRef::new_with_descriptor(
+                move |_host| {
+                    // take ownership of the task; will panic if the task is run more than once
+                    let f = f.borrow_mut().take().unwrap();
 
-                // run the original closure on the tcp state
-                CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
-                    socket.borrow_mut().with_tcp_state(cb_queue, |state| {
-                        f(state, registered_by);
-                    })
-                });
-            }, TaskDescriptor::Opaque {
-                description: "tcp_timer_callback".to_string(),
-            });
+                    // run the original closure on the tcp state
+                    CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+                        socket.borrow_mut().with_tcp_state(cb_queue, |state| {
+                            f(state, registered_by);
+                        })
+                    });
+                },
+                TaskDescriptor::Opaque {
+                    description: "tcp_timer_callback".to_string(),
+                },
+            );
 
             host.schedule_task_at_emulated_time(task, time);
         })

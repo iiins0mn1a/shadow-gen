@@ -7,9 +7,9 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::OsStringExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 #[cfg(feature = "enable_perf_logging")]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "enable_perf_logging")]
 use std::time::Instant;
 
@@ -30,7 +30,7 @@ use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
 use shadow_shim_helper_rs::shim_shmem::{HostShmem, HostShmemProtected, ManagerShmem};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
-use shadow_shmem::allocator::ShMemBlock;
+use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias};
 use vasi_sync::scmutex::SelfContainedMutexGuard;
 
 // Host::execute 真实时间统计：全局累加，每隔若干次调用打印一次聚合信息。
@@ -42,11 +42,11 @@ static HOST_EXEC_ACC_NS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "enable_perf_logging")]
 const HOST_EXEC_LOG_EVERY: u64 = 1_000;
 
+use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::configuration::{ProcessFinalState, QDiscMode};
 use crate::core::sim_config::PcapConfig;
 use crate::core::work::event::{Event, EventData};
 use crate::core::work::event_queue::EventQueue;
-use crate::core::checkpoint::snapshot_types::TaskDescriptor;
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow;
@@ -201,6 +201,10 @@ pub struct Host {
     // `self.shim_shmem...protected.lock()` will fail if the lock is already
     // held.
     shim_shmem: UnsafeCell<ShMemBlock<'static, HostShmem>>,
+    // During restore the native shim may still reference the checkpoint-restored
+    // host shmem. Mirror time-sensitive fields into that block until we fully
+    // rebind shim state to the new host-owned shmem.
+    restored_shim_shmem: RefCell<Option<ShMemBlockAlias<'static, HostShmem>>>,
 
     in_notify_socket_has_packets: RootedCell<bool>,
 
@@ -309,6 +313,7 @@ impl Host {
             futex_table: RefCell::new(FutexTable::new()),
             random,
             shim_shmem,
+            restored_shim_shmem: RefCell::new(None),
             shim_shmem_lock: RefCell::new(None),
             cpu,
             net_ns,
@@ -374,6 +379,34 @@ impl Host {
         &self.data_dir_path
     }
 
+    pub fn attach_restored_shim_shmem(&self, shim_shmem: ShMemBlockAlias<'static, HostShmem>) {
+        *self.restored_shim_shmem.borrow_mut() = Some(shim_shmem);
+    }
+
+    pub fn mirror_restored_shim_clock_state(
+        &self,
+        sim_time: EmulatedTime,
+        max_runahead_time: EmulatedTime,
+    ) {
+        let restored = self.restored_shim_shmem.borrow();
+        let Some(restored) = restored.as_ref() else {
+            return;
+        };
+
+        if std::ptr::eq::<HostShmem>(
+            std::ptr::from_ref(&**restored),
+            std::ptr::from_ref(&*self.shim_shmem()),
+        ) {
+            return;
+        }
+
+        restored
+            .sim_time
+            .store(sim_time, std::sync::atomic::Ordering::Relaxed);
+        let mut restored_lock = restored.protected().lock();
+        restored_lock.max_runahead_time = max_runahead_time;
+    }
+
     pub fn add_application(
         &self,
         start_time: SimulationTime,
@@ -405,59 +438,64 @@ impl Host {
             shutdown_time_ns: shutdown_time.map(|t| t.as_nanos() as u64),
             expected_final_state,
         };
-        let task = TaskRef::new_with_descriptor(move |host| {
-            // We can't move out of these captured variables, since TaskRef takes
-            // a Fn, not a FnOnce.
-            let envv = envv.clone();
-            let argv = argv.clone();
+        let task = TaskRef::new_with_descriptor(
+            move |host| {
+                // We can't move out of these captured variables, since TaskRef takes
+                // a Fn, not a FnOnce.
+                let envv = envv.clone();
+                let argv = argv.clone();
 
-            let process = Process::spawn(
-                host,
-                plugin_name.clone(),
-                &plugin_path,
-                argv,
-                envv,
-                pause_for_debugging,
-                host.params.strace_logging_options,
-                expected_final_state,
-            )
-            .unwrap_or_else(|e| panic!("Failed to initialize application {plugin_name:?}: {e:?}"));
-            let (process_id, thread_id) = {
-                let process = process.borrow(host.root());
-                (process.id(), process.thread_group_leader_id())
-            };
-            host.processes.borrow_mut().insert(process_id, process);
+                let process = Process::spawn(
+                    host,
+                    plugin_name.clone(),
+                    &plugin_path,
+                    argv,
+                    envv,
+                    pause_for_debugging,
+                    host.params.strace_logging_options,
+                    expected_final_state,
+                )
+                .unwrap_or_else(|e| {
+                    panic!("Failed to initialize application {plugin_name:?}: {e:?}")
+                });
+                let (process_id, thread_id) = {
+                    let process = process.borrow(host.root());
+                    (process.id(), process.thread_group_leader_id())
+                };
+                host.processes.borrow_mut().insert(process_id, process);
 
-            if let Some(shutdown_time) = shutdown_time {
-                let task = TaskRef::new_with_descriptor(
-                    move |host| {
-                        let Some(process) = host.process_borrow(process_id) else {
-                            debug!(
-                                "Can't send shutdown signal to process {process_id}; it no longer exists"
+                if let Some(shutdown_time) = shutdown_time {
+                    let task = TaskRef::new_with_descriptor(
+                        move |host| {
+                            let Some(process) = host.process_borrow(process_id) else {
+                                debug!(
+                                    "Can't send shutdown signal to process {process_id}; it no longer exists"
+                                );
+                                return;
+                            };
+                            let process = process.borrow(host.root());
+                            let siginfo = siginfo_t::new_for_kill(
+                                Signal::try_from(shutdown_signal as i32).unwrap(),
+                                1,
+                                0,
                             );
-                            return;
-                        };
-                        let process = process.borrow(host.root());
-                        let siginfo = siginfo_t::new_for_kill(
-                            Signal::try_from(shutdown_signal as i32).unwrap(),
-                            1,
-                            0,
-                        );
-                        process.signal(host, None, &siginfo);
-                    },
-                    TaskDescriptor::ShutdownProcess {
-                        process_id: u32::from(process_id),
-                        signal: shutdown_signal as i32,
-                    },
-                );
-                host.schedule_task_at_emulated_time(
-                    task,
-                    EmulatedTime::SIMULATION_START + shutdown_time,
-                );
-            }
+                            process.signal(host, None, &siginfo);
+                        },
+                        TaskDescriptor::ShutdownProcess {
+                            process_id: u32::from(process_id),
+                            signal: shutdown_signal as i32,
+                        },
+                    );
+                    host.schedule_task_at_emulated_time(
+                        task,
+                        EmulatedTime::SIMULATION_START + shutdown_time,
+                    );
+                }
 
-            host.resume(process_id, thread_id);
-        }, start_descriptor);
+                host.resume(process_id, thread_id);
+            },
+            start_descriptor,
+        );
         self.schedule_task_at_emulated_time(task, EmulatedTime::SIMULATION_START + start_time);
     }
 
@@ -762,11 +800,7 @@ impl Host {
         &self.event_queue
     }
 
-    pub fn replace_event_queue(
-        &self,
-        mut queue: EventQueue,
-        last_popped_event_time: EmulatedTime,
-    ) {
+    pub fn replace_event_queue(&self, mut queue: EventQueue, last_popped_event_time: EmulatedTime) {
         queue.set_last_popped_event_time(last_popped_event_time);
         *self.event_queue.lock().unwrap() = queue;
     }

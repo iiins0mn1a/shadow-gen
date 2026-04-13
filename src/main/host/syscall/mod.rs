@@ -63,4 +63,17 @@ impl Trigger {
             state: FileState::CHILD_EVENT,
         })
     }
+
+    /// # Safety
+    ///
+    /// `legacy_file` must remain valid for the lifetime of the condition using it.
+    pub unsafe fn from_legacy_file(legacy_file: *mut c::LegacyFile, state: FileState) -> Self {
+        Self(c::Trigger {
+            type_: c::_TriggerType_TRIGGER_DESCRIPTOR,
+            object: c::TriggerObject {
+                as_legacy_file: legacy_file,
+            },
+            state,
+        })
+    }
 }

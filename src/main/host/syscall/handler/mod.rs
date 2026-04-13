@@ -8,10 +8,14 @@ use linux_api::syscall::SyscallNum;
 use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::shadow_syscalls::ShadowSyscallNum;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
-use shadow_shim_helper_rs::syscall_types::SyscallArgs;
-use shadow_shim_helper_rs::syscall_types::SyscallReg;
+use shadow_shim_helper_rs::syscall_types::{
+    ForeignPtr, SyscallArgs, SyscallReg, UntypedForeignPtr,
+};
 use shadow_shim_helper_rs::util::SendPointer;
 
+use crate::core::checkpoint::snapshot_types::{
+    PendingSyscallResultSnapshot, PollWatchSnapshot, ThreadRuntimeSnapshot,
+};
 use crate::core::worker::Worker;
 use crate::cshadow as c;
 use crate::host::context::ThreadContext;
@@ -22,6 +26,7 @@ use crate::host::syscall::formatter::log_syscall_simple;
 use crate::host::syscall::is_shadow_syscall;
 use crate::host::syscall::types::SyscallReturn;
 use crate::host::syscall::types::{SyscallError, SyscallResult};
+use crate::host::thread::Thread;
 use crate::host::thread::ThreadId;
 use crate::utility::counter::Counter;
 
@@ -36,8 +41,8 @@ mod fcntl;
 mod file;
 mod fileat;
 mod futex;
-mod ioctl;
 mod inotify;
+mod ioctl;
 mod mman;
 mod poll;
 mod prctl;
@@ -55,6 +60,18 @@ mod timerfd;
 mod uio;
 mod unistd;
 mod wait;
+
+unsafe extern "C-unwind" {
+    fn epoll_reset(epoll: *mut c::Epoll);
+    fn epoll_control(
+        epoll: *mut c::Epoll,
+        operation: libc::c_int,
+        fd: libc::c_int,
+        descriptor: *const Descriptor,
+        event: *const libc::epoll_event,
+        host: *const crate::host::host::Host,
+    ) -> libc::c_int;
+}
 
 type LegacySyscallFn =
     unsafe extern "C-unwind" fn(*mut SyscallHandler, *const SyscallArgs) -> SyscallReturn;
@@ -79,6 +96,9 @@ pub struct SyscallHandler {
     /// forward. This stores the result of the completed syscall, to be returned when the caller
     /// resumes.
     pending_result: Option<SyscallResult>,
+    /// If true, the pending result represents a restored select/pselect timeout completion and the
+    /// user-provided fd_sets should be cleared before returning to the shim.
+    restored_select_timeout_completion: bool,
     /// We use this epoll to service syscalls that need to block on the status of multiple
     /// descriptors, like poll.
     epoll: SendPointer<c::Epoll>,
@@ -92,6 +112,117 @@ pub struct SyscallHandler {
 }
 
 impl SyscallHandler {
+    fn snapshot_pending_result(result: &SyscallResult) -> Option<PendingSyscallResultSnapshot> {
+        match result {
+            Ok(retval) => Some(PendingSyscallResultSnapshot::Done {
+                retval_raw: u64::from(*retval),
+            }),
+            Err(SyscallError::Failed(failed)) => Some(PendingSyscallResultSnapshot::Failed {
+                errno: i32::from(failed.errno),
+                restartable: failed.restartable,
+            }),
+            Err(SyscallError::Native) => Some(PendingSyscallResultSnapshot::Native),
+            Err(SyscallError::Blocked(_)) => None,
+        }
+    }
+
+    fn restore_pending_result(snapshot: &PendingSyscallResultSnapshot) -> SyscallResult {
+        match snapshot {
+            PendingSyscallResultSnapshot::Done { retval_raw } => Ok(SyscallReg::from(*retval_raw)),
+            PendingSyscallResultSnapshot::Failed { errno, restartable } => {
+                let errno = Errno::try_from(*errno).unwrap_or(Errno::EINVAL);
+                Err(SyscallError::Failed(crate::host::syscall::types::Failed {
+                    errno,
+                    restartable: *restartable,
+                }))
+            }
+            PendingSyscallResultSnapshot::Native => Err(SyscallError::Native),
+        }
+    }
+
+    pub fn clear_blocked_syscall(&mut self) {
+        self.blocked_syscall = None;
+        self.pending_result = None;
+        self.restored_select_timeout_completion = false;
+    }
+
+    pub fn has_pending_result(&self) -> bool {
+        self.pending_result.is_some()
+    }
+
+    pub fn pending_result_snapshot(&self) -> Option<PendingSyscallResultSnapshot> {
+        self.pending_result
+            .as_ref()
+            .and_then(Self::snapshot_pending_result)
+    }
+
+    pub fn restore_poll_watchers(
+        &mut self,
+        host: &crate::host::host::Host,
+        thread: &Thread,
+        watches: &[PollWatchSnapshot],
+    ) {
+        unsafe { epoll_reset(self.epoll.ptr()) };
+
+        let descriptor_table = thread.descriptor_table_borrow(host);
+        for watch in watches {
+            let Ok(fd) = DescriptorHandle::try_from(watch.fd) else {
+                continue;
+            };
+            let Some(desc) = descriptor_table.get(fd) else {
+                continue;
+            };
+            let event = libc::epoll_event {
+                events: watch.epoll_events,
+                u64: 0,
+            };
+            unsafe {
+                epoll_control(
+                    self.epoll.ptr(),
+                    libc::EPOLL_CTL_ADD,
+                    i32::try_from(watch.fd).unwrap_or_default(),
+                    std::ptr::from_ref(desc),
+                    std::ptr::from_ref(&event),
+                    host,
+                );
+            }
+        }
+    }
+
+    pub fn epoll_legacy_file(&self) -> *mut c::LegacyFile {
+        self.epoll.ptr() as *mut c::LegacyFile
+    }
+
+    pub fn apply_runtime_snapshot(&mut self, runtime: &ThreadRuntimeSnapshot) {
+        self.blocked_syscall = if runtime.blocked_syscall_active {
+            runtime
+                .blocked_syscall_nr
+                .and_then(|nr| u32::try_from(nr).ok())
+                .map(SyscallNum::new)
+        } else {
+            None
+        };
+        self.pending_result = runtime
+            .pending_result
+            .as_ref()
+            .map(Self::restore_pending_result);
+        self.restored_select_timeout_completion = false;
+    }
+
+    pub fn prepare_restored_poll_timeout_completion(&mut self, syscall_nr: i64) {
+        let Ok(syscall_nr) = u32::try_from(syscall_nr) else {
+            return;
+        };
+        let syscall = SyscallNum::new(syscall_nr);
+        if self.blocked_syscall != Some(syscall) || self.pending_result.is_some() {
+            return;
+        }
+        self.pending_result = Some(Ok(SyscallReg::from(0i64)));
+        self.restored_select_timeout_completion = syscall
+            == SyscallNum::new(libc::SYS_select as u32)
+            || syscall == SyscallNum::new(libc::SYS_pselect6 as u32);
+    }
+
     pub fn new(
         host_id: HostId,
         process_id: ProcessId,
@@ -106,6 +237,7 @@ impl SyscallHandler {
             syscall_counter: count_syscalls.then(Counter::new),
             blocked_syscall: None,
             pending_result: None,
+            restored_select_timeout_completion: false,
             epoll: unsafe { SendPointer::new(c::epoll_new()) },
             #[cfg(feature = "perf_timers")]
             perf_duration_current: Duration::ZERO,
@@ -142,8 +274,32 @@ impl SyscallHandler {
             log::trace!("Returning delayed result");
             assert!(!matches!(pending_result, Err(SyscallError::Blocked(_))));
 
+            if self.restored_select_timeout_completion
+                && (syscall == SyscallNum::new(libc::SYS_select as u32)
+                    || syscall == SyscallNum::new(libc::SYS_pselect6 as u32))
+            {
+                let zero_set = [0u8; std::mem::size_of::<linux_api::posix_types::kernel_fd_set>()];
+                for arg_idx in [1usize, 2, 3] {
+                    let fdset_ptr: ForeignPtr<linux_api::posix_types::kernel_fd_set> =
+                        args.args[arg_idx].into();
+                    if fdset_ptr.is_null() {
+                        continue;
+                    }
+                    let untyped_ptr: UntypedForeignPtr = fdset_ptr.cast::<()>();
+                    let _ = unsafe {
+                        crate::host::process::export::process_writePtr(
+                            std::ptr::from_ref(ctx.process),
+                            untyped_ptr,
+                            zero_set.as_ptr().cast(),
+                            zero_set.len(),
+                        )
+                    };
+                }
+            }
+
             self.blocked_syscall = None;
             self.pending_result = None;
+            self.restored_select_timeout_completion = false;
 
             return pending_result;
         }

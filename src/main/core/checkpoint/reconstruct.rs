@@ -111,10 +111,7 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
                 descriptor,
             ))
         }
-        TaskDescriptor::ShutdownProcess {
-            process_id,
-            signal,
-        } => {
+        TaskDescriptor::ShutdownProcess { process_id, signal } => {
             let pid = ProcessId::try_from(*process_id).unwrap();
             let sig = *signal;
             Some(TaskRef::new_with_descriptor(
@@ -127,11 +124,7 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
                         return;
                     };
                     let process = process.borrow(host.root());
-                    let siginfo = siginfo_t::new_for_kill(
-                        Signal::try_from(sig).unwrap(),
-                        1,
-                        0,
-                    );
+                    let siginfo = siginfo_t::new_for_kill(Signal::try_from(sig).unwrap(), 1, 0);
                     process.signal(host, None, &siginfo);
                 },
                 desc.clone(),
@@ -142,7 +135,10 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
                 let relay_id = *relay_id;
                 move |host| {
                     let Some(relay) = host.relay_by_descriptor_id(relay_id) else {
-                        log::warn!("Relay id {} disappeared before restore task execution", relay_id);
+                        log::warn!(
+                            "Relay id {} disappeared before restore task execution",
+                            relay_id
+                        );
                         return;
                     };
                     relay.run_scheduled_forward(host);
@@ -157,13 +153,25 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
             {
                 let timer_id = *timer_id;
                 let expire_id = *expire_id;
-                move |_host| {
-                    log::warn!(
-                        "TimerExpire(timer_id={}, expire_id={}) replayed as no-op; \
-                         timer internals are not yet serialized at restore time",
+                move |host| {
+                    log::debug!(
+                        "TimerExpire(timer_id={}, expire_id={}) replayed via compatibility wakeup",
                         timer_id,
                         expire_id
                     );
+                    let to_resume: Vec<_> = host
+                        .processes_borrow()
+                        .iter()
+                        .filter_map(|(pid, process_rc)| {
+                            let process = process_rc.borrow(host.root());
+                            process
+                                .is_running()
+                                .then_some((*pid, process.thread_group_leader_id()))
+                        })
+                        .collect();
+                    for (pid, tid) in to_resume {
+                        host.resume(pid, tid);
+                    }
                 }
             },
             desc.clone(),
@@ -182,11 +190,16 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
             ))
         }
         TaskDescriptor::Opaque { description } => {
-            log::warn!(
-                "Skipping opaque task during restore: {}",
-                description
-            );
-            None
+            let description = description.clone();
+            Some(TaskRef::new_with_descriptor(
+                move |_host| {
+                    log::warn!(
+                        "Replayed opaque task as no-op during restore: {}",
+                        description
+                    );
+                },
+                desc.clone(),
+            ))
         }
     }
 }

@@ -12,14 +12,21 @@ impl SyscallHandler {
         /* rv */ std::ffi::c_int,
         /* flags */ std::ffi::c_int,
     );
-    pub fn inotify_init1(ctx: &mut SyscallContext, flags: std::ffi::c_int) -> Result<DescriptorHandle, Errno> {
+    pub fn inotify_init1(
+        ctx: &mut SyscallContext,
+        flags: std::ffi::c_int,
+    ) -> Result<DescriptorHandle, Errno> {
         // Map a subset of inotify flags to eventfd flags for minimal behavior.
         let mut efd_flags = 0;
         // IN_NONBLOCK and IN_CLOEXEC share values with O_NONBLOCK/O_CLOEXEC on Linux.
         const IN_NONBLOCK: i32 = libc::IN_NONBLOCK as i32;
         const IN_CLOEXEC: i32 = libc::IN_CLOEXEC as i32;
-        if (flags & IN_NONBLOCK) != 0 { efd_flags |= EfdFlags::EFD_NONBLOCK.bits(); }
-        if (flags & IN_CLOEXEC) != 0 { efd_flags |= EfdFlags::EFD_CLOEXEC.bits(); }
+        if (flags & IN_NONBLOCK) != 0 {
+            efd_flags |= EfdFlags::EFD_NONBLOCK.bits();
+        }
+        if (flags & IN_CLOEXEC) != 0 {
+            efd_flags |= EfdFlags::EFD_CLOEXEC.bits();
+        }
 
         // Create an eventfd to represent the inotify instance; it'll remain non-readable
         // unless we later implement delivering events.
@@ -58,5 +65,3 @@ impl SyscallHandler {
         Ok(0)
     }
 }
-
-

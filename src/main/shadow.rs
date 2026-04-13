@@ -5,8 +5,8 @@
 use std::borrow::Borrow;
 use std::ffi::{CStr, OsStr};
 use std::fmt::Write;
-use std::str::FromStr;
 use std::os::unix::ffi::OsStrExt;
+use std::str::FromStr;
 use std::thread;
 
 use anyhow::Context;
@@ -19,13 +19,13 @@ use crate::core::checkpoint::store::{CheckpointStore, FilesystemStore};
 use crate::core::configuration::{CliOptions, ConfigFileOptions, ConfigOptions};
 use crate::core::controller::Controller;
 use crate::core::logger::shadow_logger;
-use crate::core::run_control::commands::SimulationRunResult;
-use crate::core::run_control::TimeController;
 #[cfg(feature = "enable_run_control")]
 use crate::core::run_control::InteractiveController;
 #[cfg(not(feature = "enable_run_control"))]
 use crate::core::run_control::NoopController;
 use crate::core::run_control::SocketController;
+use crate::core::run_control::TimeController;
+use crate::core::run_control::commands::SimulationRunResult;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
 use crate::cshadow as c;
@@ -232,24 +232,20 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
 
     // Build the appropriate time controller.
     // Priority: SHADOW_CONTROL_SOCKET env var > interactive (feature flag) > noop
-    let time_controller: Box<dyn TimeController> = if let Ok(socket_path) =
-        std::env::var("SHADOW_CONTROL_SOCKET")
-    {
-        log::info!(
-            "Using SocketController with path: {}",
-            socket_path
-        );
-        Box::new(SocketController::new(socket_path))
-    } else {
-        #[cfg(feature = "enable_run_control")]
-        {
-            Box::new(InteractiveController::new())
-        }
-        #[cfg(not(feature = "enable_run_control"))]
-        {
-            Box::new(NoopController)
-        }
-    };
+    let time_controller: Box<dyn TimeController> =
+        if let Ok(socket_path) = std::env::var("SHADOW_CONTROL_SOCKET") {
+            log::info!("Using SocketController with path: {}", socket_path);
+            Box::new(SocketController::new(socket_path))
+        } else {
+            #[cfg(feature = "enable_run_control")]
+            {
+                Box::new(InteractiveController::new())
+            }
+            #[cfg(not(feature = "enable_run_control"))]
+            {
+                Box::new(NoopController)
+            }
+        };
 
     let mut pending_restore: Option<crate::core::checkpoint::snapshot_types::SimulationCheckpoint> =
         None;
@@ -265,7 +261,10 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
             .context("Failed to run the simulation")?
         {
             SimulationRunResult::Completed { .. } => break,
-            SimulationRunResult::RestartRequested { run_until_ns, source } => {
+            SimulationRunResult::RestartRequested {
+                run_until_ns,
+                source,
+            } => {
                 use crate::core::run_control::commands::RestartSource;
                 crate::core::run_control::stdin_driver::set_restart_run_until(run_until_ns);
                 match source {
@@ -336,10 +335,14 @@ fn perform_restore(
     let mut checkpoint = store.load(label)?;
 
     log::info!(
-        "Loaded checkpoint '{}': sim_time_ns={}, shmem_backup={}",
+        "Loaded checkpoint '{}': sim_time_ns={}, shmem_backup={}, restore_protocol_mode={:?}, restore_epoch={}, protocol_connections={}, protocol_blocked_syscalls={}",
         label,
         checkpoint.sim_time_ns,
         checkpoint.shmem_backup_dir.display(),
+        checkpoint.restore_protocol.mode,
+        checkpoint.restore_protocol.restore_epoch,
+        checkpoint.restore_protocol.connections.len(),
+        checkpoint.restore_protocol.blocked_syscalls.len(),
     );
 
     // Restore shared memory files
@@ -393,7 +396,8 @@ fn perform_restore(
                     // restore fail with EEXIST ("Can't fork ... File exists").
                     for _ in 0..50 {
                         let mut status: libc::c_int = 0;
-                        let waited = unsafe { libc::waitpid(native_pid, &mut status, libc::WNOHANG) };
+                        let waited =
+                            unsafe { libc::waitpid(native_pid, &mut status, libc::WNOHANG) };
                         if waited == native_pid {
                             break;
                         }

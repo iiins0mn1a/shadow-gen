@@ -24,6 +24,7 @@ use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::option::FfiOption;
 use shadow_shim_helper_rs::shim_shmem::{ManagerShmem, NativePreemptionConfig};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
+use shadow_shim_helper_rs::syscall_types::{SyscallArgs, UntypedForeignPtr};
 use shadow_shmem::allocator::ShMemBlock;
 
 use crate::core::checkpoint::criu;
@@ -36,14 +37,15 @@ use crate::core::configuration::{self, ConfigOptions, Flatten};
 use crate::core::controller::{Controller, ShadowStatusBarState, SimController};
 use crate::core::cpu;
 use crate::core::resource_usage;
+use crate::core::run_control::TimeController;
 use crate::core::run_control::commands::{ControlDecision, SimulationRunResult};
 use crate::core::run_control::controller::WindowBoundaryContext;
-use crate::core::run_control::TimeController;
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::{Bandwidth, HostInfo};
 use crate::core::sim_stats;
 use crate::core::work::task::TaskRef;
 use crate::core::worker;
+use crate::core::worker::Worker;
 use crate::cshadow as c;
 use crate::host::host::{Host, HostParameters};
 use crate::host::process::Process;
@@ -409,7 +411,10 @@ impl<'a> Manager<'a> {
                 sim_end_time: self.end_time,
             });
 
-        let mut restart_request: Option<(Option<u64>, crate::core::run_control::commands::RestartSource)> = None;
+        let mut restart_request: Option<(
+            Option<u64>,
+            crate::core::run_control::commands::RestartSource,
+        )> = None;
 
         // scope used so that the scheduler is dropped before we log the global counters below
         {
@@ -449,11 +454,13 @@ impl<'a> Manager<'a> {
                         .map(|h| (h.hostname.clone(), h.clone()))
                         .collect(),
                 );
+                let restore_protocol_mode = sim_checkpoint.restore_protocol.mode;
                 let replay_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
                 scheduler.scope(|s| {
                     let checkpoints = Arc::clone(&checkpoints);
                     let replay_err = Arc::clone(&replay_err);
+                    let restore_protocol_mode = restore_protocol_mode;
                     s.run_with_hosts(move |_, hosts| {
                         for_each_host(hosts, |host| {
                             if replay_err.lock().unwrap().is_some() {
@@ -468,7 +475,8 @@ impl<'a> Manager<'a> {
                             };
 
                             host.lock_shmem();
-                            let apply_res = apply_host_checkpoint(host, checkpoint);
+                            let apply_res =
+                                apply_host_checkpoint(host, checkpoint, restore_protocol_mode);
                             host.unlock_shmem();
 
                             if let Err(e) = apply_res {
@@ -619,9 +627,9 @@ impl<'a> Manager<'a> {
                     );
                 }
 
-                let next_window =
-                    self.controller
-                        .manager_finished_current_round(min_next_event_time);
+                let next_window = self
+                    .controller
+                    .manager_finished_current_round(min_next_event_time);
 
                 // Consult the time controller at the window boundary.
                 let current_sim_time_ns =
@@ -679,13 +687,9 @@ impl<'a> Manager<'a> {
                     eprintln!(
                         "** Next window: t=[{}, {}]",
                         fmt_s(
-                            (next_window_start - EmulatedTime::SIMULATION_START).as_nanos()
-                                as u64
+                            (next_window_start - EmulatedTime::SIMULATION_START).as_nanos() as u64
                         ),
-                        fmt_s(
-                            (next_window_end - EmulatedTime::SIMULATION_START).as_nanos()
-                                as u64
-                        )
+                        fmt_s((next_window_end - EmulatedTime::SIMULATION_START).as_nanos() as u64)
                     );
                     eprintln!("** Hosts scheduled for next window:");
                     for (host_id, hostname, next_time, pids) in info.iter() {
@@ -693,9 +697,7 @@ impl<'a> Manager<'a> {
                             "**   Host {:?} ({}) - next event at t={}",
                             host_id,
                             hostname,
-                            fmt_s(
-                                (*next_time - EmulatedTime::SIMULATION_START).as_nanos() as u64
-                            )
+                            fmt_s((*next_time - EmulatedTime::SIMULATION_START).as_nanos() as u64)
                         );
                         if pids.is_empty() {
                             eprintln!("**     <no running processes>");
@@ -718,10 +720,9 @@ impl<'a> Manager<'a> {
                     window_end,
                 };
 
-                let decision = self.time_controller.on_window_boundary(
-                    &boundary_ctx,
-                    &mut print_next_window_info,
-                );
+                let decision = self
+                    .time_controller
+                    .on_window_boundary(&boundary_ctx, &mut print_next_window_info);
 
                 match decision {
                     ControlDecision::Continue => {
@@ -731,7 +732,10 @@ impl<'a> Manager<'a> {
                         // The controller already blocked; proceed to next window.
                         window = next_window;
                     }
-                    ControlDecision::Restart { run_until_ns, source } => {
+                    ControlDecision::Restart {
+                        run_until_ns,
+                        source,
+                    } => {
                         restart_request = Some((run_until_ns, source));
                         window = None;
                     }
@@ -829,7 +833,10 @@ impl<'a> Manager<'a> {
         })?;
 
         if let Some((run_until_ns, source)) = restart_request {
-            return Ok(SimulationRunResult::RestartRequested { run_until_ns, source });
+            return Ok(SimulationRunResult::RestartRequested {
+                run_until_ns,
+                source,
+            });
         }
 
         Ok(SimulationRunResult::Completed { num_plugin_errors })
@@ -894,54 +901,57 @@ impl<'a> Manager<'a> {
 
         host.lock_shmem();
 
-        let build_res: anyhow::Result<()> = if let Some(checkpoint) = self.host_checkpoint(host_info.name.as_str()) {
-            validate_host_checkpoint_native_state(checkpoint)
-                .with_context(|| format!("Host '{}' native restore pre-check failed", host_info.name))?;
-            // Replay in a separate phase after worker TLS is initialized.
-            Ok(())
-        } else {
-            for proc in &host_info.processes {
-                let plugin_path =
-                    CString::new(proc.plugin.clone().into_os_string().as_bytes()).unwrap();
-                let plugin_name = CString::new(proc.plugin.file_name().unwrap().as_bytes()).unwrap();
-                let pause_for_debugging = host_info.pause_for_debugging;
+        let build_res: anyhow::Result<()> =
+            if let Some(checkpoint) = self.host_checkpoint(host_info.name.as_str()) {
+                validate_host_checkpoint_native_state(checkpoint).with_context(|| {
+                    format!("Host '{}' native restore pre-check failed", host_info.name)
+                })?;
+                // Replay in a separate phase after worker TLS is initialized.
+                Ok(())
+            } else {
+                for proc in &host_info.processes {
+                    let plugin_path =
+                        CString::new(proc.plugin.clone().into_os_string().as_bytes()).unwrap();
+                    let plugin_name =
+                        CString::new(proc.plugin.file_name().unwrap().as_bytes()).unwrap();
+                    let pause_for_debugging = host_info.pause_for_debugging;
 
-                let argv: Vec<CString> = proc
-                    .args
-                    .iter()
-                    .map(|x| CString::new(x.as_bytes()).unwrap())
-                    .collect();
+                    let argv: Vec<CString> = proc
+                        .args
+                        .iter()
+                        .map(|x| CString::new(x.as_bytes()).unwrap())
+                        .collect();
 
-                let envv: Vec<CString> = proc
-                    .env
-                    .clone()
-                    .into_iter()
-                    .map(|(x, y)| {
-                        let mut x: OsString = String::from(x).into();
-                        x.push("=");
-                        x.push(y);
-                        CString::new(x.as_bytes()).unwrap()
-                    })
-                    .collect();
+                    let envv: Vec<CString> = proc
+                        .env
+                        .clone()
+                        .into_iter()
+                        .map(|(x, y)| {
+                            let mut x: OsString = String::from(x).into();
+                            x.push("=");
+                            x.push(y);
+                            CString::new(x.as_bytes()).unwrap()
+                        })
+                        .collect();
 
-                host.continue_execution_timer();
+                    host.continue_execution_timer();
 
-                host.add_application(
-                    proc.start_time,
-                    proc.shutdown_time,
-                    proc.shutdown_signal,
-                    plugin_name,
-                    plugin_path,
-                    argv,
-                    envv,
-                    pause_for_debugging,
-                    proc.expected_final_state,
-                );
+                    host.add_application(
+                        proc.start_time,
+                        proc.shutdown_time,
+                        proc.shutdown_signal,
+                        plugin_name,
+                        plugin_path,
+                        argv,
+                        envv,
+                        pause_for_debugging,
+                        proc.expected_final_state,
+                    );
 
-                host.stop_execution_timer();
-            }
-            Ok(())
-        };
+                    host.stop_execution_timer();
+                }
+                Ok(())
+            };
 
         // Always release shmem lock before returning, even on restore failure.
         host.unlock_shmem();
@@ -1078,13 +1088,28 @@ impl<'a> Manager<'a> {
         &self.shmem
     }
 
-    /// Perform a full checkpoint at the current window boundary.
+    /// Full checkpoint: persist everything needed to restore later as one labeled bundle.
     ///
-    /// This method:
-    /// 1. Collects all `/dev/shm` files used by Shadow
-    /// 2. Backs them up to a checkpoint directory
-    /// 3. CRIU-dumps all running managed processes (with `--leave-running`)
-    /// 4. Serializes simulation metadata to JSON
+    /// ## Why three artifacts?
+    /// Simulation state is split across:
+    /// - **Shadow (Rust)**: hosts, descriptors, syscall handlers, event queues, thread runtime
+    ///   snapshots — serialized to `{label}.checkpoint.json` via [`snapshot_host`].
+    /// - **Managed plugins (native processes)**: memory, registers, FD tables — captured by
+    ///   **CRIU** under `criu/host_*_proc_*` (Shadow does not duplicate that in JSON).
+    /// - **`/dev/shm` backing files**: MAP_SHARED regions are not fully inlined in CRIU
+    ///   images; we copy `shadow_shmemfile_*` into `shmem/` so restore can put them back
+    ///   before CRIU restore maps them again.
+    ///
+    /// ## Call site
+    /// Invoked from the main loop when run-control returns [`ControlDecision::CheckpointNow`],
+    /// i.e. after the current scheduling window has finished executing (see `on_window_boundary`).
+    ///
+    /// ## Order (high level)
+    /// 1. Backup shmem files.
+    /// 2. Snapshot every host (while holding per-host shmem locks) into `HostCheckpoint` trees.
+    /// 3. CRIU-dump each running managed process (`--leave-running` so the sim can continue).
+    /// 4. Build [`SimulationCheckpoint`] (JSON paths + embedded host snapshots + manager knobs)
+    ///    and write JSON next to the `checkpoints/<label>/` directory tree.
     fn perform_checkpoint(
         &self,
         label: &str,
@@ -1093,6 +1118,7 @@ impl<'a> Manager<'a> {
         window_start: EmulatedTime,
         window_end: EmulatedTime,
     ) -> anyhow::Result<()> {
+        // Layout: <data>/checkpoints/<label>/{shmem,criu}/ plus sibling <label>.checkpoint.json
         let checkpoint_base = self.data_path.join("checkpoints").join(label);
         let shmem_backup_dir = checkpoint_base.join("shmem");
         let criu_base_dir = checkpoint_base.join("criu");
@@ -1100,14 +1126,12 @@ impl<'a> Manager<'a> {
         std::fs::create_dir_all(&checkpoint_base)
             .context("Failed to create checkpoint directory")?;
 
-        // 1. Collect and backup shmem files
-        let shmem_paths = criu::collect_shadow_shmem_paths()
-            .unwrap_or_else(|e| {
-                log::warn!("Failed to collect shmem from /proc/self/maps: {e}; falling back");
-                shmem_backup::collect_all_shadow_shmem_files().unwrap_or_default()
-            });
+        // (1) SHMEM: copy MAP_SHARED backing files Shadow maps from /dev/shm into this checkpoint.
+        // CRIU restore expects those files to exist; primary list from /proc/self/maps, else scan /dev/shm.
+        let shmem_paths = collect_checkpoint_shmem_paths();
         shmem_backup::backup_shmem_files(&shmem_paths, &shmem_backup_dir)?;
 
+        // (2) SHADOW JSON: walk all hosts under the scheduler and capture in-memory emulator state.
         let host_snapshots = Arc::new(Mutex::new(Vec::<HostCheckpoint>::new()));
         scheduler.scope(|s| {
             let host_snapshots = Arc::clone(&host_snapshots);
@@ -1122,31 +1146,26 @@ impl<'a> Manager<'a> {
         });
         let mut host_snapshots = host_snapshots.lock().unwrap().clone();
 
-        for host_cp in &mut host_snapshots {
-            for proc_cp in &mut host_cp.processes {
-                if !proc_cp.is_running {
-                    continue;
-                }
-                let images_dir = criu_base_dir.join(format!(
-                    "host_{}_proc_{}",
-                    host_cp.host_id, proc_cp.process_id
-                ));
-                // Leave managed processes running after dump so the simulation can
-                // continue until the explicit restore request.
-                criu::checkpoint_process(proc_cp.native_pid, &images_dir, true)?;
-                proc_cp.criu_image_dir = Some(images_dir);
-            }
-        }
+        // (3) CRIU: freeze+dump each native plugin process tree; record image dir in the snapshot
+        // so JSON and CRIU dirs stay linked. leave_running=true: dump then resume — simulation
+        // keeps going until an explicit restore run.
+        checkpoint_running_process_images(&mut host_snapshots, &criu_base_dir)?;
 
+        // (4) ASSEMBLE + SAVE: one SimulationCheckpoint struct (hosts + paths + window/sim time + runahead).
         let worker_shared = worker::WORKER_SHARED.borrow();
         let worker_shared = worker_shared.as_ref().unwrap();
+        let restore_mode = restore_protocol_mode_from_env();
+        let restore_protocol =
+            build_restore_protocol_snapshot(&host_snapshots, current_sim_time_ns, restore_mode);
         let checkpoint = SimulationCheckpoint {
             version: SimulationCheckpoint::CURRENT_VERSION,
             sim_time_ns: current_sim_time_ns,
-            window_start_ns: window_start.duration_since(&EmulatedTime::SIMULATION_START).as_nanos()
-                as u64,
-            window_end_ns: window_end.duration_since(&EmulatedTime::SIMULATION_START).as_nanos()
-                as u64,
+            window_start_ns: window_start
+                .duration_since(&EmulatedTime::SIMULATION_START)
+                .as_nanos() as u64,
+            window_end_ns: window_end
+                .duration_since(&EmulatedTime::SIMULATION_START)
+                .as_nanos() as u64,
             prng_state: PrngSnapshot { s: [0; 4] },
             runahead: RunaheadSnapshot {
                 is_dynamic: worker_shared.runahead.is_dynamic(),
@@ -1165,9 +1184,10 @@ impl<'a> Manager<'a> {
             manager_shmem_handle: self.shmem().serialize().to_string(),
             shmem_backup_dir: shmem_backup_dir.clone(),
             criu_base_dir: criu_base_dir.clone(),
+            restore_protocol,
         };
 
-        // 4. Save checkpoint to filesystem
+        // Persist JSON (paths inside point at shmem/ and criu/ under checkpoint_base).
         let store = FilesystemStore::new(self.data_path.join("checkpoints"))?;
         store.save(label, &checkpoint)?;
 
@@ -1208,6 +1228,33 @@ fn for_each_host(host_iter: &mut HostIter<Box<Host>>, mut f: impl FnMut(&Host)) 
         .unwrap();
         worker::Worker::take_active_host()
     });
+}
+
+fn collect_checkpoint_shmem_paths() -> Vec<PathBuf> {
+    criu::collect_shadow_shmem_paths().unwrap_or_else(|e| {
+        log::warn!("Failed to collect shmem from /proc/self/maps: {e}; falling back");
+        shmem_backup::collect_all_shadow_shmem_files().unwrap_or_default()
+    })
+}
+
+fn checkpoint_running_process_images(
+    host_snapshots: &mut [HostCheckpoint],
+    criu_base_dir: &PathBuf,
+) -> anyhow::Result<()> {
+    for host_cp in host_snapshots {
+        for proc_cp in &mut host_cp.processes {
+            if !proc_cp.is_running {
+                continue;
+            }
+            let images_dir = criu_base_dir.join(format!(
+                "host_{}_proc_{}",
+                host_cp.host_id, proc_cp.process_id
+            ));
+            criu::checkpoint_process(proc_cp.native_pid, &images_dir, true)?;
+            proc_cp.criu_image_dir = Some(images_dir);
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_host(host: &Host) -> HostCheckpoint {
@@ -1251,7 +1298,10 @@ fn snapshot_host(host: &Host) -> HostCheckpoint {
             .values()
             .map(|proc_rc| {
                 let proc = proc_rc.borrow(host.root());
-                snapshot_process(host, &proc)
+                Worker::set_active_process(proc_rc);
+                let snapshot = snapshot_process(host, &proc);
+                Worker::clear_active_process();
+                snapshot
             })
             .collect(),
         host_shmem_handle: host.shim_shmem().serialize().to_string(),
@@ -1259,6 +1309,13 @@ fn snapshot_host(host: &Host) -> HostCheckpoint {
 }
 
 fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> ProcessCheckpoint {
+    let restore_mode = restore_protocol_mode_from_env();
+    let restore_epoch = host
+        .cpu_borrow()
+        .snapshot_times()
+        .0
+        .saturating_duration_since(&EmulatedTime::SIMULATION_START)
+        .as_nanos() as u64;
     let runnable = process.borrow_as_runnable();
     let native_pid = runnable
         .as_ref()
@@ -1272,12 +1329,72 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
                 .values()
                 .map(|thread_rc| {
                     let thread = thread_rc.borrow(host.root());
+                    let mut runtime = thread.mthread().runtime_snapshot();
+                    runtime.restore_policy = thread_restore_policy_from_mode(restore_mode);
+                    runtime.restore_epoch = restore_epoch;
+                    runtime.blocked_timeout_ns = thread
+                        .syscall_condition()
+                        .and_then(|cond| cond.timeout())
+                        .map(|timeout| {
+                            timeout
+                                .saturating_duration_since(
+                                    &shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START,
+                                )
+                                .as_nanos() as u64
+                        });
+                    if let Some(cond) = thread.syscall_condition() {
+                        let descriptor_table = thread.descriptor_table_borrow(host);
+                        let resolve_handle_to_fd = |target_handle: usize| {
+                            descriptor_table.iter().find_map(|(fd, desc)| {
+                                let crate::host::descriptor::CompatFile::New(open_file) = desc.file() else {
+                                    return None;
+                                };
+                                (open_file.inner_file().canonical_handle() == target_handle)
+                                    .then_some(u32::from(*fd))
+                            })
+                        };
+                        runtime.blocked_trigger_kind = Some(cond.trigger_kind());
+                        runtime.blocked_trigger_fd = cond
+                            .trigger_file_canonical_handle()
+                            .and_then(resolve_handle_to_fd);
+                        runtime.blocked_trigger_state_bits =
+                            cond.trigger_state().map(|state| state.bits());
+                        runtime.blocked_active_file_fd = cond
+                            .active_file_canonical_handle()
+                            .and_then(resolve_handle_to_fd);
+                    }
+                    if runtime.blocked_syscall_active
+                        && let Some(syscall_args) = thread.mthread().current_syscall_args()
+                    {
+                        runtime.poll_watches = snapshot_poll_watches(process, syscall_args);
+                        runtime.blocked_syscall_phase = BlockedSyscallPhaseSnapshot::Waiting;
+                        runtime.blocked_syscall_instance_id = Some(make_blocked_syscall_instance_id(
+                            u32::from(process.id()),
+                            u32::try_from(libc::pid_t::from(thread.id())).unwrap_or_default(),
+                            runtime.blocked_syscall_nr,
+                            restore_epoch,
+                        ));
+                    }
+                    if runtime.blocked_syscall_active && runtime.blocked_syscall_instance_id.is_none() {
+                        runtime.blocked_syscall_instance_id = Some(make_blocked_syscall_instance_id(
+                            u32::from(process.id()),
+                            u32::try_from(libc::pid_t::from(thread.id())).unwrap_or_default(),
+                            runtime.blocked_syscall_nr,
+                            restore_epoch,
+                        ));
+                    }
+                    runtime.pending_result = thread
+                        .syscallhandler_borrow(host)
+                        .pending_result_snapshot();
+                    runtime.blocked_restore_action =
+                        blocked_restore_action_for_runtime(&runtime);
                     ThreadCheckpoint {
                         thread_id: u32::try_from(libc::pid_t::from(thread.id())).unwrap(),
                         native_tid: thread.native_tid().as_raw_nonzero().get(),
                         ipc_shmem_handle: thread.mthread().ipc_shmem_handle(),
                         thread_shmem_handle: thread.shmem().serialize().to_string(),
                         current_event_bytes: thread.mthread().current_event_bytes(),
+                        runtime: Some(runtime),
                     }
                 })
                 .collect()
@@ -1288,6 +1405,15 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
         .as_ref()
         .map(|_| process.dumpable().val())
         .unwrap_or(linux_api::sched::SuidDump::SUID_DUMP_USER.val());
+
+    let descriptor_count_hint = runnable
+        .as_ref()
+        .map(|_| process.descriptor_count_hint(host) as u32)
+        .unwrap_or(0);
+    let descriptors = runnable
+        .as_ref()
+        .map(|_| process.snapshot_descriptor_entries(host))
+        .unwrap_or_default();
 
     ProcessCheckpoint {
         process_id: u32::from(process.id()),
@@ -1303,6 +1429,8 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
             .as_ref()
             .map(|_| process.shmem().serialize().to_string())
             .unwrap_or_default(),
+        descriptor_count_hint,
+        descriptors,
     }
 }
 
@@ -1319,22 +1447,334 @@ fn restore_rng(snapshot: &PrngSnapshot) -> Xoshiro256PlusPlus {
     unsafe { std::mem::transmute_copy(&snapshot.s) }
 }
 
-fn apply_host_checkpoint(host: &Host, checkpoint: &HostCheckpoint) -> anyhow::Result<()> {
+fn restore_protocol_mode_from_env() -> RestoreProtocolModeSnapshot {
+    let raw = std::env::var("SHADOW_RESTORE_PROTOCOL_MODE")
+        .ok()
+        .unwrap_or_else(|| "protocol_v1".to_string());
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "legacy" | "legacy_heuristic" => RestoreProtocolModeSnapshot::LegacyHeuristic,
+        _ => RestoreProtocolModeSnapshot::ProtocolV1,
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).map(|x| x == "1").unwrap_or(false)
+}
+
+fn socket_fixup_enabled(restore_protocol_mode: RestoreProtocolModeSnapshot) -> bool {
+    let force_disable_socket_fixup = env_flag("SHADOW_DISABLE_POST_RESTORE_SOCKET_FIXUP");
+    let force_enable_socket_fixup = env_flag("SHADOW_ENABLE_POST_RESTORE_SOCKET_FIXUP");
+    if force_disable_socket_fixup {
+        false
+    } else if force_enable_socket_fixup {
+        true
+    } else {
+        restore_protocol_mode == RestoreProtocolModeSnapshot::LegacyHeuristic
+    }
+}
+
+fn thread_restore_policy_from_mode(
+    mode: RestoreProtocolModeSnapshot,
+) -> ThreadRestorePolicySnapshot {
+    match mode {
+        RestoreProtocolModeSnapshot::LegacyHeuristic => {
+            ThreadRestorePolicySnapshot::LegacyHeuristic
+        }
+        RestoreProtocolModeSnapshot::ProtocolV1 => ThreadRestorePolicySnapshot::ProtocolV1,
+    }
+}
+
+fn make_blocked_syscall_instance_id(
+    process_id: u32,
+    thread_id: u32,
+    syscall_nr: Option<i64>,
+    restore_epoch: u64,
+) -> u64 {
+    let nr = syscall_nr.unwrap_or_default() as u64;
+    restore_epoch.rotate_left(19)
+        ^ (u64::from(process_id) << 32)
+        ^ u64::from(thread_id)
+        ^ nr.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn blocked_restore_action_for_runtime(
+    runtime: &ThreadRuntimeSnapshot,
+) -> BlockedSyscallRestoreActionSnapshot {
+    if runtime.pending_result.is_some() {
+        return BlockedSyscallRestoreActionSnapshot::ResumeImmediately;
+    }
+    if !runtime.blocked_syscall_active {
+        return BlockedSyscallRestoreActionSnapshot::None;
+    }
+    if !runtime.poll_watches.is_empty() {
+        return BlockedSyscallRestoreActionSnapshot::RearmPoll;
+    }
+    if runtime.blocked_trigger_fd.is_some() || runtime.blocked_active_file_fd.is_some() {
+        return BlockedSyscallRestoreActionSnapshot::RearmCondition;
+    }
+    if runtime.blocked_timeout_ns.is_some() {
+        return BlockedSyscallRestoreActionSnapshot::RearmTimeout;
+    }
+    BlockedSyscallRestoreActionSnapshot::ResumeImmediately
+}
+
+fn connection_role_from_descriptor(
+    desc: &DescriptorEntrySnapshot,
+) -> ConnectionProtocolRoleSnapshot {
+    if desc.socket_is_listening {
+        ConnectionProtocolRoleSnapshot::Listener
+    } else if desc.socket_peer_ip.is_some() && desc.socket_peer_port.is_some() {
+        ConnectionProtocolRoleSnapshot::Connected
+    } else {
+        ConnectionProtocolRoleSnapshot::Unconnected
+    }
+}
+
+fn make_connection_protocol_id(
+    host_id: u32,
+    process_id: u32,
+    desc: &DescriptorEntrySnapshot,
+) -> u64 {
+    let key = desc.canonical_handle.unwrap_or(u64::from(desc.fd));
+    (u64::from(host_id) << 48) ^ (u64::from(process_id) << 16) ^ key.rotate_left(7)
+}
+
+fn build_restore_protocol_snapshot(
+    hosts: &[HostCheckpoint],
+    restore_epoch: u64,
+    mode: RestoreProtocolModeSnapshot,
+) -> RestoreProtocolSnapshot {
+    let mut connections = Vec::new();
+    let mut blocked_syscalls = Vec::new();
+
+    for host in hosts {
+        for process in &host.processes {
+            for desc in &process.descriptors {
+                let Some(transport) = desc.socket_transport.clone() else {
+                    continue;
+                };
+                connections.push(ConnectionProtocolSnapshot {
+                    connection_id: make_connection_protocol_id(
+                        host.host_id,
+                        process.process_id,
+                        desc,
+                    ),
+                    host_id: host.host_id,
+                    process_id: process.process_id,
+                    fd: desc.fd,
+                    canonical_handle: desc.canonical_handle,
+                    role: connection_role_from_descriptor(desc),
+                    transport,
+                    implementation: desc.socket_implementation.clone(),
+                    local_ip: desc.socket_local_ip.clone(),
+                    local_port: desc.socket_local_port,
+                    peer_ip: desc.socket_peer_ip.clone(),
+                    peer_port: desc.socket_peer_port,
+                    is_listening: desc.socket_is_listening,
+                });
+            }
+
+            for thread in &process.threads {
+                let Some(runtime) = thread.runtime.as_ref() else {
+                    continue;
+                };
+                if !runtime.blocked_syscall_active {
+                    continue;
+                }
+                let Some(syscall_nr) = runtime.blocked_syscall_nr else {
+                    continue;
+                };
+                let instance_id = runtime.blocked_syscall_instance_id.unwrap_or_else(|| {
+                    make_blocked_syscall_instance_id(
+                        process.process_id,
+                        thread.thread_id,
+                        runtime.blocked_syscall_nr,
+                        restore_epoch,
+                    )
+                });
+                blocked_syscalls.push(BlockedSyscallProtocolSnapshot {
+                    host_id: host.host_id,
+                    process_id: process.process_id,
+                    thread_id: thread.thread_id,
+                    syscall_nr,
+                    instance_id,
+                    phase: runtime.blocked_syscall_phase,
+                    action: runtime.blocked_restore_action,
+                    timeout_ns: runtime.blocked_timeout_ns,
+                    poll_watches: runtime.poll_watches.clone(),
+                });
+            }
+        }
+    }
+
+    RestoreProtocolSnapshot {
+        mode,
+        restore_epoch,
+        connections,
+        blocked_syscalls,
+    }
+}
+
+fn read_process_object<T: Copy>(process: &Process, ptr: UntypedForeignPtr) -> Option<T> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut value = unsafe { std::mem::zeroed::<T>() };
+    let rv = crate::host::process::export::process_readPtr(
+        process,
+        std::ptr::from_mut(&mut value).cast(),
+        ptr,
+        std::mem::size_of::<T>(),
+    );
+    (rv == 0).then_some(value)
+}
+
+fn read_process_array<T: Copy>(
+    process: &Process,
+    ptr: UntypedForeignPtr,
+    len: usize,
+) -> Option<Vec<T>> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut values = vec![unsafe { std::mem::zeroed::<T>() }; len];
+    let rv = crate::host::process::export::process_readPtr(
+        process,
+        values.as_mut_ptr().cast(),
+        ptr,
+        len.saturating_mul(std::mem::size_of::<T>()),
+    );
+    (rv == 0).then_some(values)
+}
+
+fn snapshot_poll_watches(process: &Process, syscall_args: SyscallArgs) -> Vec<PollWatchSnapshot> {
+    match syscall_args.number {
+        x if x == libc::SYS_poll || x == libc::SYS_ppoll => {
+            let nfds = usize::from(syscall_args.args[1]);
+            let fds_ptr = UntypedForeignPtr::from(usize::from(syscall_args.args[0]));
+            let Some(pfds) = read_process_array::<libc::pollfd>(process, fds_ptr, nfds) else {
+                return Vec::new();
+            };
+            pfds.into_iter()
+                .filter_map(|pfd| {
+                    if pfd.fd < 0 {
+                        return None;
+                    }
+                    let mut epoll_events = 0u32;
+                    if (pfd.events & libc::POLLIN) != 0 {
+                        epoll_events |= libc::EPOLLIN as u32;
+                    }
+                    if (pfd.events & libc::POLLOUT) != 0 {
+                        epoll_events |= libc::EPOLLOUT as u32;
+                    }
+                    (epoll_events != 0).then_some(PollWatchSnapshot {
+                        fd: u32::try_from(pfd.fd).ok()?,
+                        epoll_events,
+                    })
+                })
+                .collect()
+        }
+        x if x == libc::SYS_select || x == libc::SYS_pselect6 => {
+            let nfds = isize::from(syscall_args.args[0]) as i32;
+            let nfds_max = nfds.clamp(0, libc::FD_SETSIZE as i32);
+            let readfds = read_process_object::<libc::fd_set>(
+                process,
+                UntypedForeignPtr::from(usize::from(syscall_args.args[1])),
+            );
+            let writefds = read_process_object::<libc::fd_set>(
+                process,
+                UntypedForeignPtr::from(usize::from(syscall_args.args[2])),
+            );
+
+            (0..nfds_max)
+                .filter_map(|fd| {
+                    let mut epoll_events = 0u32;
+                    if let Some(readfds) = readfds.as_ref()
+                        && unsafe { libc::FD_ISSET(fd, readfds as *const _ as *mut _) }
+                    {
+                        epoll_events |= libc::EPOLLIN as u32;
+                    }
+                    if let Some(writefds) = writefds.as_ref()
+                        && unsafe { libc::FD_ISSET(fd, writefds as *const _ as *mut _) }
+                    {
+                        epoll_events |= libc::EPOLLOUT as u32;
+                    }
+                    (epoll_events != 0).then_some(PollWatchSnapshot {
+                        fd: u32::try_from(fd).ok()?,
+                        epoll_events,
+                    })
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn apply_host_checkpoint(
+    host: &Host,
+    checkpoint: &HostCheckpoint,
+    restore_protocol_mode: RestoreProtocolModeSnapshot,
+) -> anyhow::Result<()> {
+    fn schedule_resume_process_task(
+        host: &Host,
+        process_id: crate::host::process::ProcessId,
+        tid: crate::host::thread::ThreadId,
+        when: EmulatedTime,
+    ) {
+        let task = TaskRef::new_with_descriptor(
+            move |host| {
+                host.resume(process_id, tid);
+            },
+            TaskDescriptor::ResumeProcess {
+                process_id: u32::from(process_id),
+                thread_id: u32::try_from(libc::pid_t::from(tid)).unwrap_or_default(),
+            },
+        );
+        host.schedule_task_at_emulated_time(task, when);
+    }
+
+    #[derive(Copy, Clone, Debug)]
+    enum RestoreTcpSocketRole {
+        Listener,
+        ConnectedPeer,
+        Unconnected,
+    }
+
+    if !checkpoint.host_shmem_handle.is_empty() {
+        let serialized =
+            shadow_shmem::allocator::ShMemBlockSerialized::from_str(&checkpoint.host_shmem_handle)
+                .context("Failed to parse restored host shmem handle")?;
+        let restored_shim_shmem = unsafe {
+            shadow_shmem::allocator::shdeserialize::<shadow_shim_helper_rs::shim_shmem::HostShmem>(
+                &serialized,
+            )
+        };
+        host.attach_restored_shim_shmem(restored_shim_shmem);
+        let restored_now =
+            EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
+        host.mirror_restored_shim_clock_state(restored_now, restored_now);
+    }
+
     {
         let mut processes = host.processes_borrow_mut();
         for process_cp in &checkpoint.processes {
             if !process_cp.is_running {
                 continue;
             }
-            let process = Process::from_checkpoint(host, process_cp)
-                .map_err(|e| anyhow::anyhow!("Process::from_checkpoint failed for pid {}: {:?}", process_cp.process_id, e))?;
+            let process = Process::from_checkpoint(host, process_cp, None).map_err(|e| {
+                anyhow::anyhow!(
+                    "Process::from_checkpoint failed for pid {}: {:?}",
+                    process_cp.process_id,
+                    e
+                )
+            })?;
             let process_id = process.borrow(host.root()).id();
             processes.insert(process_id, process);
         }
     }
     let queue = rebuild_event_queue(&checkpoint.event_queue, host);
-    let last_popped =
-        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.last_popped_event_time_ns);
+    let last_popped = EmulatedTime::SIMULATION_START
+        + SimulationTime::from_nanos(checkpoint.last_popped_event_time_ns);
     host.replace_event_queue(queue, last_popped);
     host.set_next_event_id_counter(checkpoint.next_event_id);
     host.set_next_thread_id_counter(checkpoint.next_thread_id);
@@ -1346,9 +1786,479 @@ fn apply_host_checkpoint(host: &Host, checkpoint: &HostCheckpoint) -> anyhow::Re
         EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns),
         EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_available_ns),
     );
+    let restored_now =
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
     // Kick restored runnable processes once after replay. The serialized event
     // queue may not include resume tasks for already-running workloads.
-    let replay_time = EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
+    let replay_time =
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
+    for process_cp in &checkpoint.processes {
+        let Ok(process_id) = crate::host::process::ProcessId::try_from(process_cp.process_id)
+        else {
+            continue;
+        };
+        for thread_cp in &process_cp.threads {
+            let Some(runtime) = thread_cp.runtime.as_ref() else {
+                continue;
+            };
+            if restore_protocol_mode == RestoreProtocolModeSnapshot::ProtocolV1
+                && runtime.blocked_syscall_active
+                && runtime.blocked_syscall_instance_id.is_none()
+            {
+                log::warn!(
+                    "restore: skipping blocked-syscall replay without instance_id in protocol_v1 mode (host='{}' pid={} tid={})",
+                    host.name(),
+                    process_cp.process_id,
+                    thread_cp.thread_id
+                );
+                continue;
+            }
+            let Ok(tid_raw) = libc::pid_t::try_from(thread_cp.thread_id) else {
+                continue;
+            };
+            let tid = crate::host::thread::ThreadId::try_from(tid_raw).unwrap();
+            let abs_timeout = runtime.blocked_timeout_ns.map(|timeout_ns| {
+                EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(timeout_ns)
+            });
+            let trigger_fd = runtime.blocked_trigger_fd;
+            let trigger_state_bits = runtime.blocked_trigger_state_bits;
+            let active_file_fd = runtime.blocked_active_file_fd;
+            let poll_watches = runtime.poll_watches.clone();
+            let blocked_restore_action = runtime.blocked_restore_action;
+            if blocked_restore_action == BlockedSyscallRestoreActionSnapshot::None {
+                continue;
+            }
+            if blocked_restore_action != BlockedSyscallRestoreActionSnapshot::ResumeImmediately
+                && abs_timeout.is_some_and(|timeout| timeout < restored_now)
+            {
+                continue;
+            }
+            if blocked_restore_action == BlockedSyscallRestoreActionSnapshot::ResumeImmediately {
+                schedule_resume_process_task(
+                    host,
+                    process_id,
+                    tid,
+                    replay_time + SimulationTime::NANOSECOND,
+                );
+                continue;
+            }
+            if !poll_watches.is_empty()
+                && let (Some(abs_timeout), Some(blocked_syscall_nr)) =
+                    (abs_timeout, runtime.blocked_syscall_nr)
+            {
+                let prepare_task = TaskRef::new_with_descriptor(
+                    move |host| {
+                        let Some(process_rc) = host.process_borrow(process_id) else {
+                            return;
+                        };
+                        let process = process_rc.borrow(host.root());
+                        let Some(thread_rc) = process.thread_borrow(tid) else {
+                            return;
+                        };
+                        let thread = thread_rc.borrow(host.root());
+                        thread
+                            .syscallhandler_borrow_mut(host)
+                            .prepare_restored_poll_timeout_completion(blocked_syscall_nr);
+                    },
+                    TaskDescriptor::Opaque {
+                        description: format!(
+                            "restore_poll_timeout_completion:{}:{}",
+                            process_id, tid
+                        ),
+                    },
+                );
+                host.schedule_task_at_emulated_time(prepare_task, abs_timeout);
+            }
+            let task = TaskRef::new_with_descriptor(
+                move |host| {
+                    let Some(process_rc) = host.process_borrow(process_id) else {
+                        return;
+                    };
+                    Worker::set_active_process(&process_rc);
+                    let process = process_rc.borrow(host.root());
+                    let Some(thread_rc) = process.thread_borrow(tid) else {
+                        Worker::clear_active_process();
+                        return;
+                    };
+                    let thread = thread_rc.borrow(host.root());
+                    match blocked_restore_action {
+                        BlockedSyscallRestoreActionSnapshot::RearmPoll => {
+                            thread.restore_poll_blocked_syscall_condition(
+                                host,
+                                &process,
+                                &poll_watches,
+                                abs_timeout,
+                            );
+                            Worker::clear_active_process();
+                            return;
+                        }
+                        BlockedSyscallRestoreActionSnapshot::RearmTimeout => {
+                            if let Some(abs_timeout) = abs_timeout {
+                                thread.restore_timeout_syscall_condition(
+                                    host,
+                                    &process,
+                                    abs_timeout,
+                                );
+                            }
+                            Worker::clear_active_process();
+                            return;
+                        }
+                        BlockedSyscallRestoreActionSnapshot::RearmCondition => {}
+                        BlockedSyscallRestoreActionSnapshot::ResumeImmediately
+                        | BlockedSyscallRestoreActionSnapshot::None => {
+                            Worker::clear_active_process();
+                            return;
+                        }
+                    }
+                    let descriptor_table = thread.descriptor_table_borrow(host);
+                    let trigger_file = trigger_fd.and_then(|trigger_fd| {
+                        let fd =
+                            crate::host::descriptor::descriptor_table::DescriptorHandle::try_from(
+                                trigger_fd,
+                            )
+                            .ok()?;
+                        let desc = descriptor_table.get(fd)?;
+                        let crate::host::descriptor::CompatFile::New(open_file) = desc.file()
+                        else {
+                            return None;
+                        };
+                        Some(open_file.inner_file().clone())
+                    });
+                    let active_file = active_file_fd.and_then(|active_file_fd| {
+                        let fd =
+                            crate::host::descriptor::descriptor_table::DescriptorHandle::try_from(
+                                active_file_fd,
+                            )
+                            .ok()?;
+                        let desc = descriptor_table.get(fd)?;
+                        let crate::host::descriptor::CompatFile::New(open_file) = desc.file()
+                        else {
+                            return None;
+                        };
+                        Some(open_file.clone())
+                    });
+                    drop(descriptor_table);
+                    let trigger_state = trigger_state_bits
+                        .map(crate::host::descriptor::FileState::from_bits_truncate);
+                    thread.restore_blocked_syscall_condition(
+                        host,
+                        &process,
+                        trigger_file,
+                        trigger_state,
+                        active_file,
+                        abs_timeout,
+                    );
+                    Worker::clear_active_process();
+                },
+                TaskDescriptor::Opaque {
+                    description: format!(
+                        "restore_blocked_syscall_condition(pid={},tid={})",
+                        u32::from(process_id),
+                        u32::try_from(libc::pid_t::from(tid)).unwrap_or_default()
+                    ),
+                },
+            );
+            host.schedule_task_at_emulated_time(task, replay_time + SimulationTime::NANOSECOND);
+        }
+    }
+    let strict_runtime_restore = env_flag("SHADOW_STRICT_RUNTIME_RESTORE");
+    let force_disable_socket_fixup = env_flag("SHADOW_DISABLE_POST_RESTORE_SOCKET_FIXUP");
+    let force_enable_socket_fixup = env_flag("SHADOW_ENABLE_POST_RESTORE_SOCKET_FIXUP");
+    let enable_socket_fixup = socket_fixup_enabled(restore_protocol_mode);
+    if !enable_socket_fixup {
+        log::debug!(
+            "restore: post_restore_socket_fixup disabled (mode={:?}, force_disable={}, force_enable={})",
+            restore_protocol_mode,
+            force_disable_socket_fixup,
+            force_enable_socket_fixup
+        );
+    }
+    // Compatibility fixup path. While object-level runtime snapshots are still evolving,
+    // protocol_v1 defaults this path OFF; use env flags to force on/off while migrating.
+    if enable_socket_fixup {
+        for process_cp in &checkpoint.processes {
+            if !process_cp.is_running {
+                continue;
+            }
+            let Ok(process_id) = crate::host::process::ProcessId::try_from(process_cp.process_id)
+            else {
+                continue;
+            };
+            for d in &process_cp.descriptors {
+                if strict_runtime_restore && d.socket_runtime.is_some() {
+                    // In strict runtime-restore mode, skip heuristic fixups when runtime snapshot exists.
+                    continue;
+                }
+                let transport = d.socket_transport.clone();
+                let Some(transport) = transport else {
+                    continue;
+                };
+                let Ok(fd) =
+                    crate::host::descriptor::descriptor_table::DescriptorHandle::try_from(d.fd)
+                else {
+                    continue;
+                };
+                let pid_for_log = process_cp.process_id;
+                let fd_for_log = d.fd;
+                let socket_impl = d.socket_implementation.clone();
+                let socket_peer_ip = d.socket_peer_ip.clone();
+                let socket_peer_port = d.socket_peer_port;
+                let socket_is_listening = d.socket_is_listening
+                    || (d.socket_peer_ip.is_none()
+                        && d.socket_peer_port.is_none()
+                        && d.socket_local_port.is_some()
+                        && matches!(
+                            transport,
+                            crate::core::checkpoint::snapshot_types::DescriptorSocketTransport::Tcp
+                        ));
+                let tcp_role = if matches!(
+                    transport,
+                    crate::core::checkpoint::snapshot_types::DescriptorSocketTransport::Tcp
+                ) {
+                    if socket_is_listening {
+                        Some(RestoreTcpSocketRole::Listener)
+                    } else if socket_peer_ip.is_some() && socket_peer_port.is_some() {
+                        Some(RestoreTcpSocketRole::ConnectedPeer)
+                    } else {
+                        Some(RestoreTcpSocketRole::Unconnected)
+                    }
+                } else {
+                    None
+                };
+                let task = TaskRef::new_with_descriptor(
+                    move |host| {
+                        log::debug!(
+                            "post_restore_socket_fixup start host='{}' pid={} fd={} transport={:?} role={:?}",
+                            host.name(),
+                            pid_for_log,
+                            fd_for_log,
+                            transport,
+                            tcp_role
+                        );
+                        let processes = host.processes_borrow();
+                        let Some(proc_rc) = processes.get(&process_id) else {
+                            log::warn!(
+                                "post_restore_socket_fixup missing process pid={}",
+                                pid_for_log
+                            );
+                            return;
+                        };
+                        Worker::set_active_process(proc_rc);
+                        let proc = proc_rc.borrow(host.root());
+                        let Some(thread_rc) = proc.first_live_thread_borrow(host.root()) else {
+                            Worker::clear_active_process();
+                            log::warn!(
+                                "post_restore_socket_fixup missing live thread pid={}",
+                                pid_for_log
+                            );
+                            return;
+                        };
+                        let thread = thread_rc.borrow(host.root());
+                        let mut table = thread.descriptor_table_borrow_mut(host);
+                        let Some(desc) = table.get_mut(fd) else {
+                            Worker::clear_active_process();
+                            log::warn!(
+                                "post_restore_socket_fixup missing descriptor pid={} fd={}",
+                                pid_for_log,
+                                fd_for_log
+                            );
+                            return;
+                        };
+                        let crate::host::descriptor::CompatFile::New(open_file) = desc.file()
+                        else {
+                            Worker::clear_active_process();
+                            return;
+                        };
+                        let crate::host::descriptor::File::Socket(socket) = open_file.inner_file()
+                        else {
+                            Worker::clear_active_process();
+                            return;
+                        };
+                        let socket = socket.clone();
+                        let mut rng = host.random_mut();
+                        let net_ns = host.network_namespace_borrow();
+                        let mut cb = crate::utility::callback_queue::CallbackQueue::new();
+                        // Note: socket was already bound in `recreate_socket_descriptor` during process restore.
+                        // We skip rebind to avoid EINVAL (socket is already bound).
+                        match tcp_role {
+                            Some(RestoreTcpSocketRole::Listener) => {
+                                let listen_res = socket.listen(16, &net_ns, &mut rng, &mut cb);
+                                log::debug!(
+                                    "post_restore_socket_fixup listen pid={} fd={} result={:?}",
+                                    pid_for_log,
+                                    fd_for_log,
+                                    listen_res
+                                );
+                            }
+                            Some(RestoreTcpSocketRole::ConnectedPeer) => {
+                                if matches!(
+                                socket_impl,
+                                Some(
+                                    crate::core::checkpoint::snapshot_types::DescriptorSocketImplementation::LegacyTcp
+                                )
+                            ) {
+                                log::debug!(
+                                    "post_restore_socket_fixup skipping legacy tcp connect pid={} fd={}",
+                                    pid_for_log,
+                                    fd_for_log
+                                );
+                                Worker::clear_active_process();
+                                return;
+                            }
+                                if let Some(peer_ip) = socket_peer_ip
+                                    .as_ref()
+                                    .and_then(|x| x.parse::<std::net::Ipv4Addr>().ok())
+                                    && let Some(peer_port) = socket_peer_port
+                                {
+                                    let sa = nix::sys::socket::SockaddrIn::from(
+                                        std::net::SocketAddrV4::new(peer_ip, peer_port),
+                                    );
+                                    let ss =
+                                        crate::utility::sockaddr::SockaddrStorage::from_inet(&sa);
+                                    let connect_res =
+                                        socket.connect(&ss, &net_ns, &mut rng, &mut cb);
+                                    log::debug!(
+                                        "post_restore_socket_fixup connect pid={} fd={} peer={:?}:{:?} result={:?}",
+                                        pid_for_log,
+                                        fd_for_log,
+                                        socket_peer_ip,
+                                        socket_peer_port,
+                                        connect_res
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                        Worker::clear_active_process();
+                    },
+                    TaskDescriptor::Opaque {
+                        description: format!(
+                            "post_restore_socket_fixup(pid={},fd={})",
+                            pid_for_log, fd_for_log
+                        ),
+                    },
+                );
+                host.schedule_task_at_emulated_time(task, replay_time);
+            }
+        }
+    }
+    let reduced_nudge_mode = env_flag("SHADOW_REDUCED_RESUME_NUDGE");
+    let blocked_condition_by_process: std::collections::HashMap<
+        crate::host::process::ProcessId,
+        bool,
+    > = checkpoint
+        .processes
+        .iter()
+        .filter_map(|p| {
+            crate::host::process::ProcessId::try_from(p.process_id)
+                .ok()
+                .map(|pid| {
+                    let has_restorable_blocked_syscall = p.threads.iter().any(|t| {
+                        t.runtime.as_ref().is_some_and(|rt| {
+                            rt.blocked_timeout_ns.is_some() || rt.blocked_trigger_fd.is_some()
+                        })
+                    });
+                    (pid, has_restorable_blocked_syscall)
+                })
+        })
+        .collect();
+    let file_trigger_blocked_by_process: std::collections::HashMap<
+        crate::host::process::ProcessId,
+        bool,
+    > = checkpoint
+        .processes
+        .iter()
+        .filter_map(|p| {
+            crate::host::process::ProcessId::try_from(p.process_id)
+                .ok()
+                .map(|pid| {
+                    let has_file_trigger_blocked_syscall = p.threads.iter().any(|t| {
+                        t.runtime
+                            .as_ref()
+                            .is_some_and(|rt| rt.blocked_trigger_fd.is_some())
+                    });
+                    (pid, has_file_trigger_blocked_syscall)
+                })
+        })
+        .collect();
+    let resume_schedule_by_process: std::collections::HashMap<
+        crate::host::process::ProcessId,
+        (EmulatedTime, EmulatedTime),
+    > = checkpoint
+        .processes
+        .iter()
+        .filter_map(|p| {
+            crate::host::process::ProcessId::try_from(p.process_id)
+                .ok()
+                .map(|pid| {
+                    let has_blocked_syscall = p.threads.iter().any(|t| {
+                        matches!(
+                            t.runtime.as_ref().map(|rt| &rt.event_kind),
+                            Some(crate::core::checkpoint::snapshot_types::ThreadEventKindSnapshot::Syscall)
+                        )
+                    });
+                    let has_pending_result = p.threads.iter().any(|t| {
+                        t.runtime
+                            .as_ref()
+                            .and_then(|rt| rt.pending_result.as_ref())
+                            .is_some()
+                    });
+                    let poll_timeout_resume = p.threads.iter().find_map(|t| {
+                        let rt = t.runtime.as_ref()?;
+                        if rt.poll_watches.is_empty() {
+                            return None;
+                        }
+                        let timeout_ns = rt.blocked_timeout_ns?;
+                        Some(
+                            EmulatedTime::SIMULATION_START
+                                + SimulationTime::from_nanos(timeout_ns)
+                                + SimulationTime::NANOSECOND,
+                        )
+                    });
+                    let resume_time = if has_pending_result {
+                        replay_time + SimulationTime::NANOSECOND
+                    } else if let Some(timeout_resume) = poll_timeout_resume {
+                        timeout_resume.max(replay_time + SimulationTime::NANOSECOND)
+                    } else if has_blocked_syscall {
+                        replay_time + SimulationTime::SECOND
+                    } else {
+                        replay_time + SimulationTime::NANOSECOND
+                    };
+                    let resume_nudge_start = resume_time + SimulationTime::from_millis(250);
+                    (pid, (resume_time, resume_nudge_start))
+                })
+        })
+        .collect();
+    let nudge_by_process: std::collections::HashMap<crate::host::process::ProcessId, u64> =
+        checkpoint
+            .processes
+            .iter()
+            .filter_map(|p| {
+                crate::host::process::ProcessId::try_from(p.process_id)
+                    .ok()
+                    .map(|pid| {
+                        let has_timeout_blocked_syscall =
+                            *blocked_condition_by_process.get(&pid).unwrap_or(&false);
+                        let has_poll_runtime = p.threads.iter().any(|t| {
+                            t.runtime
+                                .as_ref()
+                                .is_some_and(|rt| !rt.poll_watches.is_empty())
+                        });
+                        let all_threads_have_runtime =
+                            p.threads.iter().all(|t| t.runtime.is_some());
+                        let nudge_count = if has_timeout_blocked_syscall && has_poll_runtime {
+                            5
+                        } else if has_timeout_blocked_syscall {
+                            0
+                        } else if reduced_nudge_mode && all_threads_have_runtime {
+                            5
+                        } else {
+                            20
+                        };
+                        (pid, nudge_count)
+                    })
+            })
+            .collect();
     {
         let processes = host.processes_borrow();
         for (process_id, process_rc) in processes.iter() {
@@ -1359,19 +2269,48 @@ fn apply_host_checkpoint(host: &Host, checkpoint: &HostCheckpoint) -> anyhow::Re
             let thread_id = process.thread_group_leader_id();
             let pid_u32 = u32::from(*process_id);
             let tid_u32 = libc::pid_t::from(thread_id) as u32;
+            let (resume_time, resume_nudge_start) = resume_schedule_by_process
+                .get(process_id)
+                .copied()
+                .unwrap_or((
+                    replay_time + SimulationTime::NANOSECOND,
+                    replay_time + SimulationTime::from_millis(250),
+                ));
+            let skip_initial_resume = *file_trigger_blocked_by_process
+                .get(process_id)
+                .unwrap_or(&false);
+            if skip_initial_resume {
+                continue;
+            }
+            let process_id_for_log = *process_id;
             let task = TaskRef::new_with_descriptor(
-                {
-                    let process_id = *process_id;
-                    move |host| {
-                        host.resume(process_id, thread_id);
-                    }
+                move |host| {
+                    log::debug!(
+                        "post_restore_resume host='{}' pid={} tid={}",
+                        host.name(),
+                        pid_u32,
+                        tid_u32
+                    );
+                    host.resume(process_id_for_log, thread_id);
                 },
                 TaskDescriptor::ResumeProcess {
                     process_id: pid_u32,
                     thread_id: tid_u32,
                 },
             );
-            host.schedule_task_at_emulated_time(task, replay_time);
+            host.schedule_task_at_emulated_time(task, resume_time);
+            // Some restored threads can remain parked on stale syscall conditions
+            // right after restore. Keep a short compatibility burst, but use fewer retries
+            // when checkpoint includes per-thread runtime metadata.
+            let nudge_count = *nudge_by_process.get(process_id).unwrap_or(&20);
+            for nudge_i in 0u64..nudge_count {
+                schedule_resume_process_task(
+                    host,
+                    *process_id,
+                    thread_id,
+                    resume_nudge_start + SimulationTime::from_millis(250 * nudge_i),
+                );
+            }
         }
     }
     let running_processes = host
@@ -1387,10 +2326,138 @@ fn apply_host_checkpoint(host: &Host, checkpoint: &HostCheckpoint) -> anyhow::Re
         queue_len,
         host.next_event_time()
     );
+    for process_cp in &checkpoint.processes {
+        if !process_cp.is_running {
+            continue;
+        }
+        if let Ok(pid) = crate::host::process::ProcessId::try_from(process_cp.process_id)
+            && let Some(proc_rc) = host.processes_borrow().get(&pid)
+        {
+            let proc = proc_rc.borrow(host.root());
+            let restored_desc = proc.descriptor_count_hint(host);
+            let restored_entries = proc.snapshot_descriptor_entries(host);
+            let restored_by_fd: std::collections::HashMap<u32, _> =
+                restored_entries.iter().map(|d| (d.fd, d)).collect();
+            let cp_socket_fds = process_cp
+                .descriptors
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        d.file_kind,
+                        crate::core::checkpoint::snapshot_types::DescriptorFileKind::Socket
+                    )
+                })
+                .count();
+            let restored_socket_fds = restored_entries
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        d.file_kind,
+                        crate::core::checkpoint::snapshot_types::DescriptorFileKind::Socket
+                    )
+                })
+                .count();
+            if restored_desc < process_cp.descriptor_count_hint as usize {
+                log::warn!(
+                    "restore sanity: process {} descriptor count dropped (cp_hint={}, restored={})",
+                    process_cp.process_id,
+                    process_cp.descriptor_count_hint,
+                    restored_desc
+                );
+            }
+            if restored_socket_fds < cp_socket_fds {
+                log::warn!(
+                    "restore sanity: process {} socket descriptor count dropped (cp_socket={}, restored_socket={})",
+                    process_cp.process_id,
+                    cp_socket_fds,
+                    restored_socket_fds
+                );
+            }
+            // Structured descriptor consistency checks.
+            let mut missing_descriptor = 0usize;
+            let mut kind_mismatch = 0usize;
+            let mut socket_transport_mismatch = 0usize;
+            let mut host_binding_lost = 0usize;
+            let mut listen_socket_broken = 0usize;
+            let mut socket_runtime_missing = 0usize;
+            let mut socket_runtime_mismatch = 0usize;
+            for cp_d in &process_cp.descriptors {
+                let Some(restored_d) = restored_by_fd.get(&cp_d.fd) else {
+                    missing_descriptor += 1;
+                    continue;
+                };
+                if restored_d.file_kind != cp_d.file_kind {
+                    kind_mismatch += 1;
+                    continue;
+                }
+                if matches!(
+                    cp_d.file_kind,
+                    crate::core::checkpoint::snapshot_types::DescriptorFileKind::Socket
+                ) {
+                    if cp_d.socket_runtime.is_some() && restored_d.socket_runtime.is_none() {
+                        socket_runtime_missing += 1;
+                    }
+                    if let (
+                        Some(crate::core::checkpoint::snapshot_types::SocketRuntimeSnapshot::Tcp(
+                            cp_rt,
+                        )),
+                        Some(crate::core::checkpoint::snapshot_types::SocketRuntimeSnapshot::Tcp(
+                            restored_rt,
+                        )),
+                    ) = (&cp_d.socket_runtime, &restored_d.socket_runtime)
+                    {
+                        let mismatch = cp_rt.tcp_state_kind != restored_rt.tcp_state_kind
+                            || cp_rt.tcp_send_buffer_len != restored_rt.tcp_send_buffer_len
+                            || cp_rt.tcp_recv_buffer_len != restored_rt.tcp_recv_buffer_len
+                            || cp_rt.tcp_send_next_seq != restored_rt.tcp_send_next_seq
+                            || cp_rt.tcp_recv_next_seq != restored_rt.tcp_recv_next_seq
+                            || cp_rt.tcp_listen_child_count != restored_rt.tcp_listen_child_count
+                            || cp_rt.tcp_listen_accept_queue_len
+                                != restored_rt.tcp_listen_accept_queue_len;
+                        if mismatch {
+                            socket_runtime_mismatch += 1;
+                        }
+                    }
+                    if cp_d.socket_transport != restored_d.socket_transport {
+                        socket_transport_mismatch += 1;
+                    }
+                    if cp_d.socket_local_port.is_some() && restored_d.socket_local_port.is_none() {
+                        host_binding_lost += 1;
+                    }
+                    if cp_d.socket_is_listening && !restored_d.socket_is_listening {
+                        listen_socket_broken += 1;
+                    }
+                }
+            }
+            let total_issues = missing_descriptor
+                + kind_mismatch
+                + socket_transport_mismatch
+                + host_binding_lost
+                + listen_socket_broken
+                + socket_runtime_missing
+                + socket_runtime_mismatch;
+            if total_issues > 0 {
+                log::error!(
+                    "restore descriptor consistency issues host='{}' pid={} total={} missing_descriptor={} kind_mismatch={} socket_transport_mismatch={} host_binding_lost={} listen_socket_broken={} socket_runtime_missing={} socket_runtime_mismatch={}",
+                    host.name(),
+                    process_cp.process_id,
+                    total_issues,
+                    missing_descriptor,
+                    kind_mismatch,
+                    socket_transport_mismatch,
+                    host_binding_lost,
+                    listen_socket_broken,
+                    socket_runtime_missing,
+                    socket_runtime_mismatch
+                );
+            }
+        }
+    }
     Ok(())
 }
 
 fn validate_host_checkpoint_native_state(checkpoint: &HostCheckpoint) -> anyhow::Result<()> {
+    validate_host_checkpoint_runtime_coverage(checkpoint)?;
     for process_cp in &checkpoint.processes {
         if !process_cp.is_running {
             continue;
@@ -1433,13 +2500,15 @@ fn validate_host_checkpoint_native_state(checkpoint: &HostCheckpoint) -> anyhow:
         );
 
         // Validate process-level shmem handle is parseable.
-        let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(&process_cp.process_shmem_handle)
-            .with_context(|| {
-                format!(
-                    "invalid process shmem handle for process {}",
-                    process_cp.process_id
-                )
-            })?;
+        let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(
+            &process_cp.process_shmem_handle,
+        )
+        .with_context(|| {
+            format!(
+                "invalid process shmem handle for process {}",
+                process_cp.process_id
+            )
+        })?;
 
         // Conservative thread checks: each thread has parseable handles and
         // a correctly sized serialized current event buffer.
@@ -1453,22 +2522,24 @@ fn validate_host_checkpoint_native_state(checkpoint: &HostCheckpoint) -> anyhow:
                 );
             }
 
-            let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(&thread_cp.ipc_shmem_handle)
-                .with_context(|| {
-                    format!(
-                        "invalid ipc shmem handle for process {} thread {}",
-                        process_cp.process_id,
-                        thread_cp.thread_id
-                    )
-                })?;
-            let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(&thread_cp.thread_shmem_handle)
-                .with_context(|| {
-                    format!(
-                        "invalid thread shmem handle for process {} thread {}",
-                        process_cp.process_id,
-                        thread_cp.thread_id
-                    )
-                })?;
+            let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(
+                &thread_cp.ipc_shmem_handle,
+            )
+            .with_context(|| {
+                format!(
+                    "invalid ipc shmem handle for process {} thread {}",
+                    process_cp.process_id, thread_cp.thread_id
+                )
+            })?;
+            let _ = shadow_shmem::allocator::ShMemBlockSerialized::from_str(
+                &thread_cp.thread_shmem_handle,
+            )
+            .with_context(|| {
+                format!(
+                    "invalid thread shmem handle for process {} thread {}",
+                    process_cp.process_id, thread_cp.thread_id
+                )
+            })?;
 
             if thread_cp.current_event_bytes.len()
                 != std::mem::size_of::<shadow_shim_helper_rs::shim_event::ShimEventToShadow>()
@@ -1482,6 +2553,63 @@ fn validate_host_checkpoint_native_state(checkpoint: &HostCheckpoint) -> anyhow:
             }
         }
     }
+    Ok(())
+}
+
+fn validate_host_checkpoint_runtime_coverage(checkpoint: &HostCheckpoint) -> anyhow::Result<()> {
+    let mut total_network_sockets = 0usize;
+    let mut missing_socket_runtime = 0usize;
+    let mut total_threads = 0usize;
+    let mut missing_thread_runtime = 0usize;
+
+    for process_cp in &checkpoint.processes {
+        if !process_cp.is_running {
+            continue;
+        }
+        for d in &process_cp.descriptors {
+            if !matches!(
+                d.socket_transport,
+                Some(
+                    crate::core::checkpoint::snapshot_types::DescriptorSocketTransport::Tcp
+                        | crate::core::checkpoint::snapshot_types::DescriptorSocketTransport::Udp
+                )
+            ) {
+                continue;
+            }
+            total_network_sockets += 1;
+            if d.socket_runtime.is_none() {
+                missing_socket_runtime += 1;
+            }
+        }
+
+        total_threads += process_cp.threads.len();
+        missing_thread_runtime += process_cp
+            .threads
+            .iter()
+            .filter(|t| t.runtime.is_none())
+            .count();
+    }
+
+    let strict_runtime_snapshot = std::env::var("SHADOW_STRICT_RUNTIME_SNAPSHOT")
+        .map(|x| x == "1")
+        .unwrap_or(false);
+    if missing_socket_runtime > 0 || missing_thread_runtime > 0 {
+        let msg = format!(
+            "checkpoint runtime coverage is incomplete: missing_socket_runtime={}/{} missing_thread_runtime={}/{}",
+            missing_socket_runtime, total_network_sockets, missing_thread_runtime, total_threads
+        );
+        if strict_runtime_snapshot {
+            anyhow::bail!("{msg}");
+        }
+        log::warn!("{msg}");
+    } else {
+        log::info!(
+            "checkpoint runtime coverage complete: network_sockets={} threads={}",
+            total_network_sockets,
+            total_threads
+        );
+    }
+
     Ok(())
 }
 
@@ -1502,8 +2630,7 @@ fn observed_thread_tids(native_pid: i32) -> Vec<i32> {
 /// Get the raw speed of the experiment machine.
 fn get_raw_cpu_frequency_hz() -> anyhow::Result<u64> {
     // Original scheme: prefer cpufreq's cpuinfo_max_freq (kHz) when available.
-    const CONFIG_CPU_MAX_FREQ_FILE: &str =
-        "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
+    const CONFIG_CPU_MAX_FREQ_FILE: &str = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq";
     if let Ok(khz_s) = std::fs::read_to_string(CONFIG_CPU_MAX_FREQ_FILE) {
         if let Ok(khz) = khz_s.trim().parse::<u64>() {
             if khz > 0 {
@@ -1514,8 +2641,8 @@ fn get_raw_cpu_frequency_hz() -> anyhow::Result<u64> {
 
     // Fallback: parse /proc/cpuinfo and use the maximum "cpu MHz".
     // This is more likely to work in containers/VMs/WSL where cpufreq is missing.
-    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo")
-        .context("Could not read /proc/cpuinfo")?;
+    let cpuinfo =
+        std::fs::read_to_string("/proc/cpuinfo").context("Could not read /proc/cpuinfo")?;
 
     let mut max_mhz: Option<f64> = None;
     for line in cpuinfo.lines() {
@@ -1649,10 +2776,7 @@ mod tests {
             EmulatedTime::SIMULATION_START + SimulationTime::from_secs(5),
         );
         host.schedule_task_at_emulated_time(
-            TaskRef::new_with_descriptor(
-                |_host| {},
-                TaskDescriptor::RelayForward { relay_id: 0 },
-            ),
+            TaskRef::new_with_descriptor(|_host| {}, TaskDescriptor::RelayForward { relay_id: 0 }),
             EmulatedTime::SIMULATION_START + SimulationTime::from_secs(8),
         );
     }
@@ -1664,11 +2788,19 @@ mod tests {
         let snapshot = snapshot_host(&source);
 
         let restored = test_host("dst");
-        apply_host_checkpoint(&restored, &snapshot).unwrap();
+        apply_host_checkpoint(
+            &restored,
+            &snapshot,
+            RestoreProtocolModeSnapshot::LegacyHeuristic,
+        )
+        .unwrap();
         let restored_snapshot = snapshot_host(&restored);
 
         assert_eq!(snapshot.event_queue, restored_snapshot.event_queue);
-        assert_eq!(snapshot.last_popped_event_time_ns, restored_snapshot.last_popped_event_time_ns);
+        assert_eq!(
+            snapshot.last_popped_event_time_ns,
+            restored_snapshot.last_popped_event_time_ns
+        );
         assert_eq!(snapshot.next_event_id, restored_snapshot.next_event_id);
         assert_eq!(snapshot.next_thread_id, restored_snapshot.next_thread_id);
         assert_eq!(snapshot.next_packet_id, restored_snapshot.next_packet_id);
@@ -1681,7 +2813,10 @@ mod tests {
             restored_snapshot.packet_priority_counter
         );
         assert_eq!(snapshot.cpu_now_ns, restored_snapshot.cpu_now_ns);
-        assert_eq!(snapshot.cpu_available_ns, restored_snapshot.cpu_available_ns);
+        assert_eq!(
+            snapshot.cpu_available_ns,
+            restored_snapshot.cpu_available_ns
+        );
 
         source.shutdown();
         restored.shutdown();
@@ -1694,7 +2829,12 @@ mod tests {
         let snapshot = snapshot_host(&source);
 
         let restored = test_host("dst-replay");
-        apply_host_checkpoint(&restored, &snapshot).unwrap();
+        apply_host_checkpoint(
+            &restored,
+            &snapshot,
+            RestoreProtocolModeSnapshot::LegacyHeuristic,
+        )
+        .unwrap();
 
         let extra_time = EmulatedTime::SIMULATION_START + SimulationTime::from_secs(11);
         let extra_task = || {
@@ -1709,8 +2849,14 @@ mod tests {
         source.schedule_task_at_emulated_time(extra_task(), extra_time);
         restored.schedule_task_at_emulated_time(extra_task(), extra_time);
 
-        assert_eq!(snapshot_host(&source).event_queue, snapshot_host(&restored).event_queue);
-        assert_eq!(snapshot_host(&source).next_event_id, snapshot_host(&restored).next_event_id);
+        assert_eq!(
+            snapshot_host(&source).event_queue,
+            snapshot_host(&restored).event_queue
+        );
+        assert_eq!(
+            snapshot_host(&source).next_event_id,
+            snapshot_host(&restored).next_event_id
+        );
 
         source.shutdown();
         restored.shutdown();

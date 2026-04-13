@@ -64,9 +64,40 @@ void tcp_setRustSocket(TCP* tcp, InetSocketWeak* rustSocket);
 gint tcp_getConnectionError(TCP* tcp);
 // clang-format on
 
+typedef struct _LegacyTcpRestoreState LegacyTcpRestoreState;
+struct _LegacyTcpRestoreState {
+    guint state;
+    guint flags;
+    guint error;
+    gboolean is_server;
+    guint server_pending_max;
+    guint server_pending_count;
+    pid_t server_process_for_children;
+    in_addr_t server_last_peer_ip;
+    in_port_t server_last_peer_port;
+    in_addr_t server_last_ip;
+    guint32 recv_start;
+    guint32 recv_next;
+    guint32 recv_window;
+    guint32 recv_end;
+    guint32 recv_last_window;
+    guint32 recv_last_ack;
+    guint32 recv_last_seq;
+    guint32 send_unacked;
+    guint32 send_next;
+    guint32 send_window;
+    guint32 send_end;
+    guint32 send_last_ack;
+    guint32 send_last_window;
+    guint32 send_highest_seq;
+};
+
 void tcp_getInfo(TCP* tcp, struct tcp_info *tcpinfo);
 void tcp_enterServerMode(TCP* tcp, const Host* host, pid_t process, gint backlog);
 void tcp_updateServerBacklog(TCP* tcp, gint backlog);
+void tcp_getRestoreState(TCP* tcp, LegacyTcpRestoreState* out);
+void tcp_restoreListenerState(TCP* tcp, const Host* host, const LegacyTcpRestoreState* state);
+void tcp_restoreEstablishedState(TCP* tcp, const Host* host, const LegacyTcpRestoreState* state);
 /* Address and port must be in network byte order. */
 gint tcp_acceptServerPeer(TCP* tcp, const Host* host, in_addr_t* ip, in_port_t* port,
                           gint* acceptedHandle);

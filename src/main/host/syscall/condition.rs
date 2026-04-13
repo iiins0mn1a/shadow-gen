@@ -4,6 +4,7 @@ use linux_api::signal::Signal;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::util::SendPointer;
 
+use crate::core::checkpoint::snapshot_types::BlockedTriggerKindSnapshot;
 use crate::cshadow;
 use crate::host::descriptor::OpenFile;
 use crate::host::host::Host;
@@ -45,6 +46,52 @@ impl SyscallConditionRef<'_> {
     pub fn timeout(&self) -> Option<EmulatedTime> {
         let timeout = unsafe { cshadow::syscallcondition_getTimeout(self.c_ptr.ptr()) };
         EmulatedTime::from_c_emutime(timeout)
+    }
+
+    pub fn trigger_state(&self) -> Option<crate::host::descriptor::FileState> {
+        let trigger_type = unsafe { cshadow::syscallcondition_getTriggerType(self.c_ptr.ptr()) };
+        if trigger_type != cshadow::_TriggerType_TRIGGER_FILE
+            && trigger_type != cshadow::_TriggerType_TRIGGER_DESCRIPTOR
+        {
+            return None;
+        }
+        let state = unsafe { cshadow::syscallcondition_getTriggerState(self.c_ptr.ptr()) };
+        Some(crate::host::descriptor::FileState::from_bits_truncate(
+            state.bits(),
+        ))
+    }
+
+    pub fn trigger_kind(&self) -> BlockedTriggerKindSnapshot {
+        match unsafe { cshadow::syscallcondition_getTriggerType(self.c_ptr.ptr()) } {
+            x if x == cshadow::_TriggerType_TRIGGER_FILE => BlockedTriggerKindSnapshot::File,
+            x if x == cshadow::_TriggerType_TRIGGER_DESCRIPTOR => {
+                BlockedTriggerKindSnapshot::LegacyDescriptor
+            }
+            x if x == cshadow::_TriggerType_TRIGGER_FUTEX => BlockedTriggerKindSnapshot::Futex,
+            x if x == cshadow::_TriggerType_TRIGGER_CHILD => BlockedTriggerKindSnapshot::Child,
+            _ => BlockedTriggerKindSnapshot::None,
+        }
+    }
+
+    pub fn trigger_file_canonical_handle(&self) -> Option<usize> {
+        let file_ptr = unsafe { cshadow::syscallcondition_getTriggerFile(self.c_ptr.ptr()) };
+        if file_ptr.is_null() {
+            return None;
+        }
+        Some(unsafe { file_ptr.as_ref() }.unwrap().canonical_handle())
+    }
+
+    pub fn active_file_canonical_handle(&self) -> Option<usize> {
+        let file_ptr = unsafe { cshadow::syscallcondition_getActiveFile(self.c_ptr.ptr()) };
+        if file_ptr.is_null() {
+            return None;
+        }
+        Some(
+            unsafe { file_ptr.as_ref() }
+                .unwrap()
+                .inner_file()
+                .canonical_handle(),
+        )
     }
 }
 

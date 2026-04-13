@@ -17,6 +17,10 @@ impl Key {
         Self { fd, file }
     }
 
+    pub fn fd(&self) -> i32 {
+        self.fd
+    }
+
     pub fn file(&self) -> &File {
         &self.file
     }

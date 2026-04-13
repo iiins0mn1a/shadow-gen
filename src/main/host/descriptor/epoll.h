@@ -12,6 +12,7 @@
 
 #include "main/host/descriptor/descriptor.h"
 
+typedef struct epoll_event epoll_event;
 typedef struct _Epoll Epoll;
 
 /* free this with legacyfile_free() */

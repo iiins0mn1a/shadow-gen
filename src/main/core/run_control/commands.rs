@@ -19,16 +19,24 @@ pub enum RestartSource {
 pub enum ControlCommand {
     Pause,
     Continue,
-    ContinueFor { sim_duration_ns: u64 },
+    ContinueFor {
+        sim_duration_ns: u64,
+    },
     StepOneWindow,
     Restart {
         run_until_ns: Option<u64>,
         source: RestartSource,
     },
     ShowInfo,
-    AttachInfo { pid: i32 },
-    Checkpoint { label: String },
-    Restore { label: String },
+    AttachInfo {
+        pid: i32,
+    },
+    Checkpoint {
+        label: String,
+    },
+    Restore {
+        label: String,
+    },
 }
 
 /// Decision returned by the [`TimeController`](super::TimeController) at each window boundary.

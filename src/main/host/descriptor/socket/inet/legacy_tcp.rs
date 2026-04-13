@@ -10,6 +10,7 @@ use nix::sys::socket::{MsgFlags, SockaddrIn};
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
+use crate::core::checkpoint::snapshot_types::LegacyTcpSocketRuntimeSnapshot;
 use crate::core::worker::Worker;
 use crate::cshadow as c;
 use crate::host::descriptor::listener::{StateListenHandle, StateListenerFilter};
@@ -81,6 +82,134 @@ impl LegacyTcpSocket {
     /// rust socket and legacy socket have the same handle.
     pub fn canonical_handle(&self) -> usize {
         self.as_legacy_tcp() as usize
+    }
+
+    pub fn runtime_snapshot(&self) -> LegacyTcpSocketRuntimeSnapshot {
+        let mut state = unsafe { std::mem::zeroed::<c::LegacyTcpRestoreState>() };
+        unsafe { c::tcp_getRestoreState(self.as_legacy_tcp(), &mut state) };
+
+        LegacyTcpSocketRuntimeSnapshot {
+            tcp_state: state.state,
+            tcp_flags: state.flags,
+            tcp_error: state.error,
+            is_server: state.is_server != 0,
+            server_pending_max: (state.is_server != 0).then_some(state.server_pending_max),
+            server_pending_count: (state.is_server != 0).then_some(state.server_pending_count),
+            server_process_for_children: (state.is_server != 0)
+                .then_some(state.server_process_for_children as u32),
+            server_last_peer_ip: (state.server_last_peer_ip != 0)
+                .then(|| Ipv4Addr::from(u32::from_be(state.server_last_peer_ip)).to_string()),
+            server_last_peer_port: (state.server_last_peer_port != 0)
+                .then_some(u16::from_be(state.server_last_peer_port)),
+            server_last_ip: (state.server_last_ip != 0)
+                .then(|| Ipv4Addr::from(u32::from_be(state.server_last_ip)).to_string()),
+            recv_start: state.recv_start,
+            recv_next: state.recv_next,
+            recv_window: state.recv_window,
+            recv_end: state.recv_end,
+            recv_last_window: state.recv_last_window,
+            recv_last_ack: state.recv_last_ack,
+            recv_last_seq: state.recv_last_seq,
+            send_unacked: state.send_unacked,
+            send_next: state.send_next,
+            send_window: state.send_window,
+            send_end: state.send_end,
+            send_last_ack: state.send_last_ack,
+            send_last_window: state.send_last_window,
+            send_highest_seq: state.send_highest_seq,
+        }
+    }
+
+    pub fn restore_runtime(
+        socket: &Arc<AtomicRefCell<Self>>,
+        snapshot: &LegacyTcpSocketRuntimeSnapshot,
+        host: &Host,
+        local_addr: Option<SocketAddrV4>,
+        peer_addr: Option<SocketAddrV4>,
+        net_ns: &NetworkNamespace,
+        rng: impl rand::Rng,
+    ) -> Result<(), Errno> {
+        let mut state = unsafe { std::mem::zeroed::<c::LegacyTcpRestoreState>() };
+        state.state = snapshot.tcp_state;
+        state.flags = snapshot.tcp_flags;
+        state.error = snapshot.tcp_error;
+        state.is_server = snapshot.is_server.into();
+        state.server_pending_max = snapshot.server_pending_max.unwrap_or_default();
+        state.server_pending_count = snapshot.server_pending_count.unwrap_or_default();
+        state.server_process_for_children = snapshot
+            .server_process_for_children
+            .and_then(|x| i32::try_from(x).ok())
+            .unwrap_or_default();
+        state.server_last_peer_ip = snapshot
+            .server_last_peer_ip
+            .as_ref()
+            .and_then(|x| x.parse::<Ipv4Addr>().ok())
+            .map(|x| u32::from(x).to_be())
+            .unwrap_or_default();
+        state.server_last_peer_port = snapshot
+            .server_last_peer_port
+            .map(u16::to_be)
+            .unwrap_or_default();
+        state.server_last_ip = snapshot
+            .server_last_ip
+            .as_ref()
+            .and_then(|x| x.parse::<Ipv4Addr>().ok())
+            .map(|x| u32::from(x).to_be())
+            .unwrap_or_default();
+        state.recv_start = snapshot.recv_start;
+        state.recv_next = snapshot.recv_next;
+        state.recv_window = snapshot.recv_window;
+        state.recv_end = snapshot.recv_end;
+        state.recv_last_window = snapshot.recv_last_window;
+        state.recv_last_ack = snapshot.recv_last_ack;
+        state.recv_last_seq = snapshot.recv_last_seq;
+        state.send_unacked = snapshot.send_unacked;
+        state.send_next = snapshot.send_next;
+        state.send_window = snapshot.send_window;
+        state.send_end = snapshot.send_end;
+        state.send_last_ack = snapshot.send_last_ack;
+        state.send_last_window = snapshot.send_last_window;
+        state.send_highest_seq = snapshot.send_highest_seq;
+
+        if snapshot.is_server {
+            let socket_ref = socket.borrow();
+            unsafe { c::tcp_restoreListenerState(socket_ref.as_legacy_tcp(), host, &state) };
+            return Ok(());
+        }
+
+        let Some(local_addr) = local_addr else {
+            return Ok(());
+        };
+        let Some(peer_addr) = peer_addr else {
+            return Ok(());
+        };
+
+        let (_addr, handle) = inet::associate_socket(
+            InetSocket::LegacyTcp(Arc::clone(socket)),
+            local_addr,
+            peer_addr,
+            false,
+            net_ns,
+            rng,
+        )?;
+        std::mem::forget(handle);
+
+        let socket_ref = socket.borrow();
+        unsafe {
+            c::legacysocket_setSocketName(
+                socket_ref.as_legacy_socket(),
+                u32::from(*local_addr.ip()).to_be(),
+                local_addr.port().to_be(),
+            );
+            c::legacysocket_setPeerName(
+                socket_ref.as_legacy_socket(),
+                u32::from(*peer_addr.ip()).to_be(),
+                peer_addr.port().to_be(),
+            );
+            c::tcp_restoreEstablishedState(socket_ref.as_legacy_tcp(), host, &state);
+        }
+
+        Ok(())
     }
 
     /// Get the [`c::TCP`] pointer.

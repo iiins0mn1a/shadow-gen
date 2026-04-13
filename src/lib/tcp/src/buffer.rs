@@ -115,6 +115,10 @@ impl<T: Instant> SendQueue<T> {
         self.start_seq
     }
 
+    pub fn transmitted_up_to(&self) -> Seq {
+        self.transmitted_up_to
+    }
+
     pub fn next_seq(&self) -> Seq {
         self.end_seq
     }

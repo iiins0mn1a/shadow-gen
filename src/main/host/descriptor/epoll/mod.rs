@@ -26,6 +26,14 @@ use super::socket::inet::InetSocket;
 mod entry;
 mod key;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchRegistrationSnapshot {
+    pub watched_fd: i32,
+    pub watched_canonical_handle: usize,
+    pub interest_bits: u32,
+    pub data: u64,
+}
+
 pub struct Epoll {
     event_source: StateEventSource,
     status: FileStatus,
@@ -237,6 +245,21 @@ impl Epoll {
 
     pub fn state(&self) -> FileState {
         self.state
+    }
+
+    pub fn snapshot_registrations(&self) -> Vec<WatchRegistrationSnapshot> {
+        let mut watches: Vec<_> = self
+            .monitoring
+            .iter()
+            .map(|(key, entry)| WatchRegistrationSnapshot {
+                watched_fd: key.fd(),
+                watched_canonical_handle: key.file().canonical_handle(),
+                interest_bits: entry.interest().bits(),
+                data: entry.data(),
+            })
+            .collect();
+        watches.sort_by_key(|watch| (watch.watched_fd, watch.watched_canonical_handle, watch.data));
+        watches
     }
 
     fn refresh_state(&mut self, cb_queue: &mut CallbackQueue) {

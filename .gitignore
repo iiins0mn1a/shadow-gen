@@ -15,6 +15,9 @@ cscope.*
 *.swp
 target
 __pycache__
+.codex
+/tests/checkpoint-*/run*/
+/tests/checkpoint-*/__pycache__/
 # don't track the Cargo lock files of libraries
 /src/lib/logger/rust_bindings/Cargo.lock
 /src/lib/gml-parser/Cargo.lock

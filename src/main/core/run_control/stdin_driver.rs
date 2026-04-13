@@ -2,7 +2,7 @@ use std::io::{BufRead, IsTerminal};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use super::commands::{ControlDecision, RestartSource, INTERNAL_RESTART_WARNING};
+use super::commands::{ControlDecision, INTERNAL_RESTART_WARNING, RestartSource};
 use super::controller::{PrintNextWindowInfoFn, TimeController, WindowBoundaryContext};
 
 /// Interactive stdin-driven time controller.
@@ -155,7 +155,9 @@ impl InteractiveController {
                     s.skip_start_pause.store(true, Ordering::Relaxed);
                     s.restart_requested.store(true, Ordering::Relaxed);
                     s.cv.notify_all();
-                    eprintln!("** run-control: restart requested (run to t={secs}s, internal only)");
+                    eprintln!(
+                        "** run-control: restart requested (run to t={secs}s, internal only)"
+                    );
                     eprintln!("{INTERNAL_RESTART_WARNING}");
                     return;
                 }

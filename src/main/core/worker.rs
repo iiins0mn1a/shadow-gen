@@ -107,7 +107,6 @@ impl Worker {
         });
     }
 
-
     /// Run `f` with a reference to the current Host, or return None if there is no current Host.
     #[must_use]
     pub fn with_active_host<F, R>(f: F) -> Option<R>

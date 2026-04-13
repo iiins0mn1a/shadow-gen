@@ -243,6 +243,40 @@ where
 #[derive(Debug)]
 pub struct TcpState<X: Dependencies>(Option<TcpStateEnum<X>>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStateKind {
+    Init,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWaitOne,
+    FinWaitTwo,
+    Closing,
+    TimeWait,
+    CloseWait,
+    LastAck,
+    Rst,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSnapshot {
+    pub state_kind: RuntimeStateKind,
+    pub poll_state_bits: u32,
+    pub wants_to_send: bool,
+    pub local_addr: Option<SocketAddrV4>,
+    pub remote_addr: Option<SocketAddrV4>,
+    pub listen_child_count: Option<u32>,
+    pub listen_accept_queue_len: Option<u32>,
+    pub send_buffer_len: Option<u32>,
+    pub send_transmitted_up_to: Option<u32>,
+    pub send_next_seq: Option<u32>,
+    pub recv_buffer_len: Option<u32>,
+    pub recv_next_seq: Option<u32>,
+    pub recv_window_len: Option<u32>,
+}
+
 // this exposes many of the methods from `TcpStateTrait`, but not necessarily all of them (for
 // example we don't expose `rst_close()`).
 impl<X: Dependencies> TcpState<X> {
@@ -338,6 +372,104 @@ impl<X: Dependencies> TcpState<X> {
     pub fn local_remote_addrs(&self) -> Option<(SocketAddrV4, SocketAddrV4)> {
         self.0.as_ref().unwrap().local_remote_addrs()
     }
+
+    pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        let state = self.0.as_ref().unwrap();
+        let state_kind = match state {
+            TcpStateEnum::Init(_) => RuntimeStateKind::Init,
+            TcpStateEnum::Listen(_) => RuntimeStateKind::Listen,
+            TcpStateEnum::SynSent(_) => RuntimeStateKind::SynSent,
+            TcpStateEnum::SynReceived(_) => RuntimeStateKind::SynReceived,
+            TcpStateEnum::Established(_) => RuntimeStateKind::Established,
+            TcpStateEnum::FinWaitOne(_) => RuntimeStateKind::FinWaitOne,
+            TcpStateEnum::FinWaitTwo(_) => RuntimeStateKind::FinWaitTwo,
+            TcpStateEnum::Closing(_) => RuntimeStateKind::Closing,
+            TcpStateEnum::TimeWait(_) => RuntimeStateKind::TimeWait,
+            TcpStateEnum::CloseWait(_) => RuntimeStateKind::CloseWait,
+            TcpStateEnum::LastAck(_) => RuntimeStateKind::LastAck,
+            TcpStateEnum::Rst(_) => RuntimeStateKind::Rst,
+            TcpStateEnum::Closed(_) => RuntimeStateKind::Closed,
+        };
+        let addrs = state.local_remote_addrs();
+        let (
+            listen_child_count,
+            listen_accept_queue_len,
+            send_buffer_len,
+            send_transmitted_up_to,
+            send_next_seq,
+            recv_buffer_len,
+            recv_next_seq,
+            recv_window_len,
+        ) = match state {
+            TcpStateEnum::Listen(s) => (
+                Some(s.children.len().try_into().unwrap_or(u32::MAX)),
+                Some(s.accept_queue.len().try_into().unwrap_or(u32::MAX)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            TcpStateEnum::SynSent(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::SynReceived(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::Established(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::FinWaitOne(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::FinWaitTwo(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::Closing(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::TimeWait(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::CloseWait(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::LastAck(s) => connection_runtime_summary::<X>(&s.connection),
+            TcpStateEnum::Init(_) | TcpStateEnum::Rst(_) | TcpStateEnum::Closed(_) => {
+                (None, None, None, None, None, None, None, None)
+            }
+        };
+        RuntimeSnapshot {
+            state_kind,
+            poll_state_bits: state.poll().bits(),
+            wants_to_send: state.wants_to_send(),
+            local_addr: addrs.map(|x| x.0),
+            remote_addr: addrs.map(|x| x.1),
+            listen_child_count,
+            listen_accept_queue_len,
+            send_buffer_len,
+            send_transmitted_up_to,
+            send_next_seq,
+            recv_buffer_len,
+            recv_next_seq,
+            recv_window_len,
+        }
+    }
+}
+
+fn connection_runtime_summary<X: Dependencies>(
+    conn: &connection::Connection<X::Instant>,
+) -> (
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+) {
+    let send_buffer_len = Some(conn.send.buffer.len());
+    let send_transmitted_up_to = Some(conn.send.buffer.transmitted_up_to().into());
+    let send_next_seq = Some(conn.send.buffer.next_seq().into());
+    let recv_buffer_len = conn.recv.as_ref().map(|r| r.buffer.len());
+    let recv_next_seq = conn.recv.as_ref().map(|r| r.buffer.next_seq().into());
+    let recv_window_len = conn.recv_window().map(|w| w.len());
+    (
+        None,
+        None,
+        send_buffer_len,
+        send_transmitted_up_to,
+        send_next_seq,
+        recv_buffer_len,
+        recv_next_seq,
+        recv_window_len,
+    )
 }
 
 /// A macro that forwards an argument-less method to the inner type.

@@ -88,6 +88,11 @@ void syscallcondition_cancel(SysCallCondition* cond);
 /* Get the timer for the condition, or EMUTIME_INVALID if there isn't one. */
 CEmulatedTime syscallcondition_getTimeout(SysCallCondition* cond);
 
+/* Get trigger metadata for the condition. */
+TriggerType syscallcondition_getTriggerType(SysCallCondition* cond);
+FileState syscallcondition_getTriggerState(SysCallCondition* cond);
+const File* syscallcondition_getTriggerFile(SysCallCondition* cond);
+
 /* Get the active file for the condition, or NULL if there isn't one. */
 OpenFile* syscallcondition_getActiveFile(SysCallCondition* cond);
 

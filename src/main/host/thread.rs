@@ -19,12 +19,18 @@ use shadow_shmem::allocator::{ShMemBlock, shmalloc};
 
 use super::context::ProcessContext;
 use super::descriptor::descriptor_table::{DescriptorHandle, DescriptorTable};
+use super::descriptor::{File, FileState, OpenFile};
 use super::host::Host;
 use super::managed_thread::{self, ManagedThread};
 use super::process::{Process, ProcessId};
+use crate::core::checkpoint::snapshot_types::{
+    PollWatchSnapshot, ThreadCheckpoint, ThreadRestorePolicySnapshot,
+};
 use crate::cshadow as c;
-use crate::core::checkpoint::snapshot_types::ThreadCheckpoint;
-use crate::host::syscall::condition::{SyscallConditionRef, SyscallConditionRefMut};
+use crate::host::syscall::Trigger;
+use crate::host::syscall::condition::{
+    SyscallCondition, SyscallConditionRef, SyscallConditionRefMut,
+};
 use crate::host::syscall::handler::SyscallHandler;
 use crate::utility::callback_queue::CallbackQueue;
 use crate::utility::{IsSend, ObjectCounter, syscall};
@@ -73,6 +79,20 @@ impl Thread {
     /// Minimal wrapper around the native managed thread.
     pub fn mthread(&self) -> impl Deref<Target = ManagedThread> + '_ {
         self.mthread.borrow()
+    }
+
+    pub fn syscallhandler_borrow<'a>(
+        &'a self,
+        host: &'a Host,
+    ) -> impl Deref<Target = SyscallHandler> + 'a {
+        self.syscallhandler.borrow(host.root())
+    }
+
+    pub fn syscallhandler_borrow_mut<'a>(
+        &'a self,
+        host: &'a Host,
+    ) -> impl DerefMut<Target = SyscallHandler> + 'a {
+        self.syscallhandler.borrow_mut(host.root())
     }
 
     /// Update this thread to be the new thread group leader as part of an
@@ -252,6 +272,121 @@ impl Thread {
         } {
             unsafe { c::syscallcondition_cancel(c) };
             unsafe { c::syscallcondition_unref(c) };
+        }
+    }
+
+    pub fn restore_timeout_syscall_condition(
+        &self,
+        host: &Host,
+        process: &Process,
+        abs_timeout: shadow_shim_helper_rs::emulated_time::EmulatedTime,
+    ) {
+        self.cleanup_syscall_condition();
+        let cond = SyscallCondition::new_from_wakeup_time(abs_timeout);
+        let cond = cond.into_inner();
+        self.cond.set(unsafe { SendPointer::new(cond) });
+        if let Some(cond) = unsafe { cond.as_mut() } {
+            unsafe { c::syscallcondition_waitNonblock(cond, host, process, self) }
+        }
+    }
+
+    pub fn restore_blocked_syscall_condition(
+        &self,
+        host: &Host,
+        process: &Process,
+        trigger_file: Option<File>,
+        trigger_state: Option<FileState>,
+        active_file: Option<OpenFile>,
+        abs_timeout: Option<shadow_shim_helper_rs::emulated_time::EmulatedTime>,
+    ) {
+        self.cleanup_syscall_condition();
+
+        let mut cond = match (trigger_file, trigger_state, abs_timeout) {
+            (Some(file), Some(state), timeout) => {
+                let mut cond = SyscallCondition::new(Trigger::from_file(file, state));
+                cond.set_timeout(timeout);
+                cond
+            }
+            (None, None, Some(timeout)) => SyscallCondition::new_from_wakeup_time(timeout),
+            _ => return,
+        };
+
+        if let Some(active_file) = active_file {
+            cond.set_active_file(active_file);
+        }
+
+        let cond = cond.into_inner();
+        self.cond.set(unsafe { SendPointer::new(cond) });
+        if let Some(cond) = unsafe { cond.as_mut() } {
+            unsafe { c::syscallcondition_waitNonblock(cond, host, process, self) }
+        }
+    }
+
+    pub fn restore_poll_blocked_syscall_condition(
+        &self,
+        host: &Host,
+        process: &Process,
+        poll_watches: &[PollWatchSnapshot],
+        abs_timeout: Option<shadow_shim_helper_rs::emulated_time::EmulatedTime>,
+    ) {
+        self.cleanup_syscall_condition();
+
+        {
+            let mut syscall_handler = self.syscallhandler.borrow_mut(host.root());
+            let direct_file_watch = if poll_watches.len() == 1 {
+                let watch = &poll_watches[0];
+                let watch_state = FileState::from_bits_truncate(
+                    (if (watch.epoll_events & libc::EPOLLIN as u32) != 0 {
+                        FileState::READABLE.bits()
+                    } else {
+                        0
+                    }) | (if (watch.epoll_events & libc::EPOLLOUT as u32) != 0 {
+                        FileState::WRITABLE.bits()
+                    } else {
+                        0
+                    }),
+                );
+                let descriptor_table = self.descriptor_table_borrow(host);
+                let direct = DescriptorHandle::try_from(watch.fd)
+                    .ok()
+                    .and_then(|fd| descriptor_table.get(fd))
+                    .and_then(|desc| {
+                        let crate::host::descriptor::CompatFile::New(open_file) = desc.file()
+                        else {
+                            return None;
+                        };
+                        (!watch_state.is_empty()).then_some((
+                            open_file.inner_file().clone(),
+                            open_file.clone(),
+                            watch_state,
+                        ))
+                    });
+                drop(descriptor_table);
+                direct
+            } else {
+                None
+            };
+            let mut cond = if let Some((trigger_file, active_file, watch_state)) = direct_file_watch
+            {
+                let mut cond = SyscallCondition::new(Trigger::from_file(trigger_file, watch_state));
+                cond.set_active_file(active_file);
+                cond
+            } else {
+                syscall_handler.restore_poll_watchers(host, self, poll_watches);
+                let trigger = unsafe {
+                    Trigger::from_legacy_file(
+                        syscall_handler.epoll_legacy_file(),
+                        FileState::READABLE,
+                    )
+                };
+                SyscallCondition::new(trigger)
+            };
+            cond.set_timeout(abs_timeout);
+            let cond = cond.into_inner();
+            self.cond.set(unsafe { SendPointer::new(cond) });
+            if let Some(cond) = unsafe { cond.as_mut() } {
+                unsafe { c::syscallcondition_waitNonblock(cond, host, process, self) }
+            }
         }
     }
 
@@ -473,13 +608,24 @@ impl Thread {
     ) -> Result<Thread, Errno> {
         let tid = ThreadId::try_from(libc::pid_t::try_from(checkpoint.thread_id).unwrap()).unwrap();
         let native_tid = Pid::from_raw(checkpoint.native_tid).unwrap();
+        let force_restore_eintr = checkpoint.runtime.as_ref().map_or(true, |runtime| {
+            runtime.restore_policy == ThreadRestorePolicySnapshot::LegacyHeuristic
+        });
         let mthread = ManagedThread::from_checkpoint(
             native_pid,
             native_tid,
             &checkpoint.ipc_shmem_handle,
             &checkpoint.current_event_bytes,
+            force_restore_eintr,
         );
-        Self::wrap_mthread(host, mthread, desc_table, pid, tid)
+        let thread = Self::wrap_mthread(host, mthread, desc_table, pid, tid)?;
+        if let Some(runtime) = checkpoint.runtime.as_ref() {
+            thread
+                .syscallhandler
+                .borrow_mut(host.root())
+                .apply_runtime_snapshot(runtime);
+        }
+        Ok(thread)
     }
 
     /// Shared memory for this thread.

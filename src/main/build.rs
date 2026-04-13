@@ -210,6 +210,7 @@ fn run_bindgen(build_common: &ShadowBuildCommon) {
         .allowlist_type("SysCallCondition")
         .allowlist_type("LegacyFile")
         .allowlist_type("Manager")
+        .allowlist_type("LegacyTcpRestoreState")
         .allowlist_type("RegularFile")
         .allowlist_type("Epoll")
         .allowlist_type("FileType")

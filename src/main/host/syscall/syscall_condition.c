@@ -598,4 +598,19 @@ CEmulatedTime syscallcondition_getTimeout(SysCallCondition* cond) {
     return cond->timeoutExpiration;
 }
 
+TriggerType syscallcondition_getTriggerType(SysCallCondition* cond) {
+    return cond->trigger.type;
+}
+
+FileState syscallcondition_getTriggerState(SysCallCondition* cond) {
+    return cond->trigger.state;
+}
+
+const File* syscallcondition_getTriggerFile(SysCallCondition* cond) {
+    if (cond->trigger.type != TRIGGER_FILE) {
+        return NULL;
+    }
+    return cond->trigger.object.as_file;
+}
+
 OpenFile* syscallcondition_getActiveFile(SysCallCondition* cond) { return cond->activeFile; }

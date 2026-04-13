@@ -59,15 +59,11 @@ pub fn drain_event_queue_to_snapshots(queue: &mut EventQueue) -> Vec<EventSnapsh
 /// Rebuild an `EventQueue` from a vector of `EventSnapshot`s.
 ///
 /// Events whose tasks cannot be reconstructed are dropped with a warning.
-pub fn rebuild_event_queue(
-    snapshots: &[EventSnapshot],
-    _host: &Host,
-) -> EventQueue {
+pub fn rebuild_event_queue(snapshots: &[EventSnapshot], _host: &Host) -> EventQueue {
     let mut queue = EventQueue::new();
 
     for snap in snapshots {
-        let time = EmulatedTime::SIMULATION_START
-            + SimulationTime::from_nanos(snap.time_ns);
+        let time = EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(snap.time_ns);
 
         match &snap.data {
             EventDataSnapshot::Packet(pkt_snap) => {
@@ -81,7 +77,10 @@ pub fn rebuild_event_queue(
                     );
                     queue.push(event);
                 } else {
-                    log::warn!("Failed to reconstruct packet event at time_ns={}", snap.time_ns);
+                    log::warn!(
+                        "Failed to reconstruct packet event at time_ns={}",
+                        snap.time_ns
+                    );
                 }
             }
             EventDataSnapshot::Local(local_snap) => {
@@ -128,19 +127,16 @@ pub fn packet_to_snapshot(packet: &PacketRc) -> PacketSnapshot {
                     window: tcp_hdr.window_size,
                     selective_acks: tcp_hdr
                         .selective_acks
-                        .map(|sacks| {
-                            sacks
-                                .iter()
-                                .map(|&(a, b)| (a, b))
-                                .collect()
-                        })
+                        .map(|sacks| sacks.iter().map(|&(a, b)| (a, b)).collect())
                         .unwrap_or_default(),
                     window_scale: tcp_hdr.window_scale,
                     timestamp: tcp_hdr.timestamp,
                     timestamp_echo: tcp_hdr.timestamp_echo,
                 })
             } else {
-                log::warn!("TCP packet without accessible header (legacy?); using minimal snapshot");
+                log::warn!(
+                    "TCP packet without accessible header (legacy?); using minimal snapshot"
+                );
                 PacketProtocolSnapshot::Tcp(TcpHeaderSnapshot {
                     src_ip: u32::from(*src.ip()),
                     src_port: src.port(),
@@ -179,9 +175,7 @@ pub fn packet_to_snapshot(packet: &PacketRc) -> PacketSnapshot {
 /// Uses the public packet constructors. For TCP, selective_acks are
 /// currently not restored (set to None) because `SmallArrayBackedSlice`
 /// is private in the tcp crate.
-pub fn packet_from_snapshot(
-    snap: &PacketSnapshot,
-) -> Option<crate::network::packet::Packet> {
+pub fn packet_from_snapshot(snap: &PacketSnapshot) -> Option<crate::network::packet::Packet> {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
     match &snap.protocol {
@@ -215,7 +209,9 @@ pub fn packet_from_snapshot(
             );
 
             Some(crate::network::packet::Packet::new_ipv4_tcp(
-                header, payload, snap.priority,
+                header,
+                payload,
+                snap.priority,
             ))
         }
         PacketProtocolSnapshot::Udp(udp) => {
@@ -223,7 +219,10 @@ pub fn packet_from_snapshot(
             let dst = SocketAddrV4::new(Ipv4Addr::from(udp.dst_ip), udp.dst_port);
             let payload = Bytes::copy_from_slice(&snap.payload);
             Some(crate::network::packet::Packet::new_ipv4_udp(
-                src, dst, payload, snap.priority,
+                src,
+                dst,
+                payload,
+                snap.priority,
             ))
         }
     }

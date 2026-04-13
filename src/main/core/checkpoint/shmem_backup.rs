@@ -14,10 +14,7 @@ use anyhow::Context;
 ///
 /// The files are copied (not moved) so that the running simulation is not
 /// affected when using `--leave-running` during checkpoint.
-pub fn backup_shmem_files(
-    shmem_paths: &[PathBuf],
-    backup_dir: &Path,
-) -> anyhow::Result<()> {
+pub fn backup_shmem_files(shmem_paths: &[PathBuf], backup_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(backup_dir).with_context(|| {
         format!(
             "Failed to create shmem backup directory: {}",

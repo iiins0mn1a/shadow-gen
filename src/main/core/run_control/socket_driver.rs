@@ -103,17 +103,11 @@ impl SocketController {
         std::thread::spawn(move || {
             let listener = match UnixListener::bind(&path) {
                 Ok(l) => {
-                    eprintln!(
-                        "** Shadow control socket listening on: {}",
-                        path.display()
-                    );
+                    eprintln!("** Shadow control socket listening on: {}", path.display());
                     l
                 }
                 Err(e) => {
-                    log::error!(
-                        "Failed to bind control socket at {}: {e}",
-                        path.display()
-                    );
+                    log::error!("Failed to bind control socket at {}: {e}", path.display());
                     return;
                 }
             };
@@ -237,10 +231,7 @@ fn handle_client(stream: UnixStream, state: &SharedState) -> anyhow::Result<()> 
             // 3a. For duration commands, wait until the sim parks again
             //     (meaning it reached the deadline or end of simulation).
             let guard = state.inner.lock().unwrap();
-            let guard = state
-                .cv
-                .wait_while(guard, |g| !g.sim_waiting)
-                .unwrap();
+            let guard = state.cv.wait_while(guard, |g| !g.sim_waiting).unwrap();
             let time = guard.sim_time_ns;
             drop(guard);
 
@@ -254,10 +245,7 @@ fn handle_client(stream: UnixStream, state: &SharedState) -> anyhow::Result<()> 
             // 3b. For instant commands (checkpoint, restore, pause),
             //     wait until the sim parks again after processing.
             let guard = state.inner.lock().unwrap();
-            let guard = state
-                .cv
-                .wait_while(guard, |g| !g.sim_waiting)
-                .unwrap();
+            let guard = state.cv.wait_while(guard, |g| !g.sim_waiting).unwrap();
             let time = guard.sim_time_ns;
             drop(guard);
 

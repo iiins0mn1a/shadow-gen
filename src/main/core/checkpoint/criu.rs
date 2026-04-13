@@ -40,6 +40,13 @@ fn format_cmd_for_logs(cmd: &Command) -> String {
     format!("{prog} {}", args.join(" "))
 }
 
+fn criu_network_lock_method() -> Option<String> {
+    std::env::var("CRIU_NETWORK_LOCK")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
 /// Check whether CRIU is available on this system.
 pub fn criu_available() -> bool {
     let Ok(criu_bin) = criu_bin_required() else {
@@ -66,14 +73,7 @@ pub fn criu_available() -> bool {
 ///
 /// * `pid` - The root PID of the process tree to checkpoint.
 /// * `images_dir` - Directory where CRIU writes its image files.
-/// * `leave_running` - If `true`, the original process continues running
-///   after the dump (`--leave-running`). If `false`, the process is killed
-///   after the dump (default CRIU behavior).
-pub fn checkpoint_process(
-    pid: i32,
-    images_dir: &Path,
-    leave_running: bool,
-) -> anyhow::Result<()> {
+pub fn checkpoint_process(pid: i32, images_dir: &Path, leave_running: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(images_dir).with_context(|| {
         format!(
             "Failed to create CRIU images directory: {}",
@@ -88,12 +88,17 @@ pub fn checkpoint_process(
     cmd.arg("dump")
         .arg("--unprivileged")
         .arg("--shell-job")
+        .arg("--tcp-established")
         .arg("--tree")
         .arg(pid.to_string())
         .arg("--images-dir")
         .arg(images_dir)
         .arg("--log-file")
         .arg(&dump_log);
+    let network_lock_method = criu_network_lock_method();
+    if let Some(method) = network_lock_method.as_ref() {
+        cmd.arg("--network-lock").arg(method);
+    }
 
     // Shadow sometimes needs to continue running after checkpoint, so this flag
     // is intentionally retained even though criu-demo doesn't use it.
@@ -102,10 +107,11 @@ pub fn checkpoint_process(
     }
 
     log::info!(
-        "CRIU dump (aligned): pid={}, images_dir={}, leave_running={}, cmd={}",
+        "CRIU dump (aligned): pid={}, images_dir={}, leave_running={}, network_lock={:?}, cmd={}",
         pid,
         images_dir.display(),
         leave_running,
+        network_lock_method,
         format_cmd_for_logs(&cmd),
     );
 
@@ -139,24 +145,22 @@ pub fn checkpoint_process(
 ///
 /// * `images_dir` - Directory containing the CRIU image files.
 /// * `pidfile` - Optional path where CRIU will write the new root PID.
-pub fn restore_process(
-    images_dir: &Path,
-    pidfile: Option<&Path>,
-) -> anyhow::Result<i32> {
+pub fn restore_process(images_dir: &Path, pidfile: Option<&Path>) -> anyhow::Result<i32> {
     let criu_bin = criu_bin_required()?;
 
-    let pidfile_path = pidfile
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // Align with criu-demo behavior: keep pidfile outside the images
-            // directory to avoid conflicts between attempts/runs.
-            let dir_name = images_dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("criu_images");
-            std::env::temp_dir()
-                .join(format!("shadow-criu-restore-{}-{}.pid", std::process::id(), dir_name))
-        });
+    let pidfile_path = pidfile.map(PathBuf::from).unwrap_or_else(|| {
+        // Align with criu-demo behavior: keep pidfile outside the images
+        // directory to avoid conflicts between attempts/runs.
+        let dir_name = images_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("criu_images");
+        std::env::temp_dir().join(format!(
+            "shadow-criu-restore-{}-{}.pid",
+            std::process::id(),
+            dir_name
+        ))
+    });
 
     // CRIU may treat an existing pidfile as an error in some versions
     // (demo explicitly removes the pidfile before restore).
@@ -167,6 +171,7 @@ pub fn restore_process(
     let mut cmd = Command::new(criu_bin);
     cmd.arg("restore")
         .arg("--unprivileged")
+        .arg("--tcp-established")
         .arg("--restore-detached")
         .arg("--restore-sibling")
         .arg("--images-dir")
@@ -175,11 +180,16 @@ pub fn restore_process(
         .arg(&restore_log)
         .arg("--pidfile")
         .arg(&pidfile_path);
+    let network_lock_method = criu_network_lock_method();
+    if let Some(method) = network_lock_method.as_ref() {
+        cmd.arg("--network-lock").arg(method);
+    }
 
     log::info!(
-        "CRIU restore (aligned): images_dir={}, pidfile={}, cmd={}",
+        "CRIU restore (aligned): images_dir={}, pidfile={}, network_lock={:?}, cmd={}",
         images_dir.display(),
         pidfile_path.display(),
+        network_lock_method,
         format_cmd_for_logs(&cmd),
     );
 
@@ -201,12 +211,8 @@ pub fn restore_process(
         );
     }
 
-    let pid_str = std::fs::read_to_string(&pidfile_path).with_context(|| {
-        format!(
-            "Failed to read CRIU pidfile: {}",
-            pidfile_path.display()
-        )
-    })?;
+    let pid_str = std::fs::read_to_string(&pidfile_path)
+        .with_context(|| format!("Failed to read CRIU pidfile: {}", pidfile_path.display()))?;
     let new_pid: i32 = pid_str
         .trim()
         .parse()
@@ -256,8 +262,8 @@ pub fn restore_all_processes(
 /// Returns deduplicated paths.
 pub fn collect_shmem_paths_for_pid(pid: i32) -> anyhow::Result<Vec<PathBuf>> {
     let maps_path = format!("/proc/{pid}/maps");
-    let file = std::fs::File::open(&maps_path)
-        .with_context(|| format!("Failed to open {maps_path}"))?;
+    let file =
+        std::fs::File::open(&maps_path).with_context(|| format!("Failed to open {maps_path}"))?;
     let reader = std::io::BufReader::new(file);
 
     let mut paths = std::collections::BTreeSet::new();

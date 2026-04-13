@@ -41,7 +41,10 @@ impl EventQueue {
                 .as_nanos();
             eprintln!(
                 "[event-queue] op={} count={} len={} last_pop_time_ns={}",
-                op, count, self.queue.len(), time_ns
+                op,
+                count,
+                self.queue.len(),
+                time_ns
             );
         }
     }
@@ -98,7 +101,11 @@ impl EventQueue {
     }
 
     pub fn cloned_events(&self) -> Vec<Event> {
-        let mut events: Vec<_> = self.queue.iter().map(|x| x.0.clone().into_inner()).collect();
+        let mut events: Vec<_> = self
+            .queue
+            .iter()
+            .map(|x| x.0.clone().into_inner())
+            .collect();
         events.sort_by(|a, b| a.partial_cmp(b).unwrap());
         events
     }

@@ -1,7 +1,7 @@
 //! An emulated Linux process.
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt::Write;
 use std::num::TryFromIntError;
@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 #[cfg(feature = "perf_timers")]
 use std::time::Duration;
 
+use linux_api::epoll::{EpollCtlOp, EpollEvents};
 use linux_api::errno::Errno;
 use linux_api::fcntl::OFlag;
 use linux_api::posix_types::Pid;
@@ -34,6 +35,8 @@ use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::{ForeignPtr, ManagedPhysicalMemoryAddr};
 use shadow_shmem::allocator::ShMemBlock;
 
+use crate::core::checkpoint::snapshot_types::DescriptorSocketImplementation;
+
 use super::descriptor::descriptor_table::{DescriptorHandle, DescriptorTable};
 use super::descriptor::listener::StateEventSource;
 use super::descriptor::{FileSignals, FileState};
@@ -43,11 +46,14 @@ use super::syscall::formatter::StraceFmtMode;
 use super::syscall::types::ForeignArrayPtr;
 use super::thread::{Thread, ThreadId};
 use super::timer::Timer;
-use crate::core::configuration::{ProcessFinalState, RunningVal};
 use crate::core::checkpoint::ipc_rebuild;
-use crate::core::checkpoint::snapshot_types::{ProcessCheckpoint, TaskDescriptor};
-use crate::core::worker::WORKER_SHARED;
+use crate::core::checkpoint::snapshot_types::{
+    DescriptorEntrySnapshot, DescriptorFileKind, DescriptorSocketTransport, EpollWatchSnapshot,
+    ProcessCheckpoint, SocketRuntimeSnapshot, TaskDescriptor,
+};
+use crate::core::configuration::{ProcessFinalState, RunningVal};
 use crate::core::work::task::TaskRef;
+use crate::core::worker::WORKER_SHARED;
 use crate::core::worker::Worker;
 use crate::cshadow;
 use crate::host::context::ProcessContext;
@@ -917,6 +923,127 @@ fn itimer_real_expiration(host: &Host, pid: ProcessId) {
     process.signal(host, None, &siginfo_t);
 }
 
+struct DescriptorRestoreContext<'a> {
+    host: &'a Host,
+    table: &'a mut DescriptorTable,
+    checkpoint: &'a ProcessCheckpoint,
+    restored_open_files: HashMap<u64, crate::host::descriptor::OpenFile>,
+    rebound_epolls: HashSet<u64>,
+}
+
+impl<'a> DescriptorRestoreContext<'a> {
+    fn new(
+        host: &'a Host,
+        table: &'a mut DescriptorTable,
+        checkpoint: &'a ProcessCheckpoint,
+    ) -> Self {
+        Self {
+            host,
+            table,
+            checkpoint,
+            restored_open_files: HashMap::new(),
+            rebound_epolls: HashSet::new(),
+        }
+    }
+
+    fn replay_all(&mut self) {
+        for descriptor in &self.checkpoint.descriptors {
+            self.replay_descriptor(descriptor);
+        }
+        self.rebind_epolls();
+    }
+
+    fn replay_descriptor(&mut self, descriptor: &DescriptorEntrySnapshot) {
+        let Ok(fd) = DescriptorHandle::try_from(descriptor.fd) else {
+            return;
+        };
+        match descriptor.file_kind {
+            DescriptorFileKind::Socket => {
+                Process::recreate_socket_descriptor(
+                    self.host,
+                    self.table,
+                    self.checkpoint,
+                    descriptor,
+                    fd,
+                    &mut self.restored_open_files,
+                );
+            }
+            DescriptorFileKind::Epoll => {
+                Process::recreate_epoll_descriptor(
+                    self.table,
+                    self.checkpoint,
+                    descriptor,
+                    fd,
+                    &mut self.restored_open_files,
+                );
+            }
+            _ => self.restore_existing_descriptor_or_stdio(descriptor, fd),
+        }
+    }
+
+    fn restore_existing_descriptor_or_stdio(
+        &mut self,
+        descriptor: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+    ) {
+        if let Some(existing) = self.table.get_mut(fd) {
+            let restored = linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+                descriptor.descriptor_flags_bits,
+            );
+            existing.set_flags(restored);
+            return;
+        }
+
+        if descriptor.fd > 2 {
+            return;
+        }
+
+        match descriptor.fd {
+            0 => {
+                Process::open_stdio_file_helper(self.table, fd, "/dev/null".into(), OFlag::O_RDONLY)
+            }
+            1 | 2 => {
+                let mut base = PathBuf::new();
+                base.push(self.host.data_dir_path());
+                base.push(format!("restored.{}", self.checkpoint.process_id));
+                let extension = if descriptor.fd == 1 {
+                    "stdout"
+                } else {
+                    "stderr"
+                };
+                Process::open_stdio_file_helper(
+                    self.table,
+                    fd,
+                    Process::static_output_file_name(&base, extension),
+                    OFlag::O_WRONLY,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn rebind_epolls(&mut self) {
+        for descriptor in &self.checkpoint.descriptors {
+            if !matches!(descriptor.file_kind, DescriptorFileKind::Epoll)
+                || descriptor.epoll_watches.is_empty()
+            {
+                continue;
+            }
+            if let Some(canonical_handle) = descriptor.canonical_handle
+                && !self.rebound_epolls.insert(canonical_handle)
+            {
+                continue;
+            }
+            Process::rebind_epoll_watches(
+                self.table,
+                self.checkpoint,
+                descriptor,
+                &self.restored_open_files,
+            );
+        }
+    }
+}
+
 impl Process {
     fn common(&self) -> Ref<'_, Common> {
         Ref::map(self.state.borrow(), |state| {
@@ -1171,12 +1298,15 @@ impl Process {
     pub fn from_checkpoint(
         host: &Host,
         checkpoint: &ProcessCheckpoint,
+        inherited_desc_table: Option<DescriptorTable>,
     ) -> Result<RootedRc<RootedRefCell<Process>>, Errno> {
         let process_id = ProcessId::try_from(checkpoint.process_id).unwrap();
         let native_pid = Pid::from_raw(checkpoint.native_pid).unwrap();
+        let had_inherited_desc_table = inherited_desc_table.is_some();
+        let desc_table_init = inherited_desc_table.unwrap_or_default();
         let desc_table = RootedRc::new(
             host.root(),
-            RootedRefCell::new(host.root(), DescriptorTable::new()),
+            RootedRefCell::new(host.root(), desc_table_init),
         );
         let itimer_real = RefCell::new(Timer::new(move |host| {
             itimer_real_expiration(host, process_id)
@@ -1189,7 +1319,7 @@ impl Process {
         file_basename.push(host.data_dir_path());
         file_basename.push(format!("restored.{}", checkpoint.process_id));
 
-        {
+        if !had_inherited_desc_table {
             let mut descriptor_table = desc_table.borrow_mut(host.root());
             Self::open_stdio_file_helper(
                 &mut descriptor_table,
@@ -1209,6 +1339,10 @@ impl Process {
                 Self::static_output_file_name(&file_basename, "stderr"),
                 OFlag::O_WRONLY,
             );
+        }
+        {
+            let mut descriptor_table = desc_table.borrow_mut(host.root());
+            Self::replay_descriptor_entries(host, &mut descriptor_table, checkpoint);
         }
 
         let shimlog_file = Arc::new(
@@ -1262,7 +1396,8 @@ impl Process {
             let watcher = watcher.as_ref().unwrap().child_pid_watcher();
             ipc_rebuild::reregister_child_watcher(watcher, native_pid_for_watcher, move |_pid| {
                 for handle in &ipc_handles {
-                    let Ok(serialized) = shadow_shmem::allocator::ShMemBlockSerialized::from_str(handle)
+                    let Ok(serialized) =
+                        shadow_shmem::allocator::ShMemBlockSerialized::from_str(handle)
                     else {
                         continue;
                     };
@@ -1665,6 +1800,610 @@ impl Process {
         self.as_runnable().is_some()
     }
 
+    /// Best-effort descriptor table size for diagnostics.
+    pub fn descriptor_count_hint(&self, host: &Host) -> usize {
+        let Some(thread) = self.first_live_thread_borrow(host.root()) else {
+            return 0;
+        };
+        let thread = thread.borrow(host.root());
+        thread.descriptor_table_borrow(host).iter().count()
+    }
+
+    /// Best-effort descriptor table snapshot from a live thread.
+    pub fn snapshot_descriptor_table(&self, host: &Host) -> Option<DescriptorTable> {
+        let thread = self.first_live_thread_borrow(host.root())?;
+        let thread = thread.borrow(host.root());
+        Some(DescriptorTable::clone(
+            &thread.descriptor_table_borrow(host),
+        ))
+    }
+
+    pub fn snapshot_descriptor_entries(&self, host: &Host) -> Vec<DescriptorEntrySnapshot> {
+        let Some(thread) = self.first_live_thread_borrow(host.root()) else {
+            return Vec::new();
+        };
+        let thread = thread.borrow(host.root());
+        let table = thread.descriptor_table_borrow(host);
+        table
+            .iter()
+            .map(|(fd, desc)| {
+                let (
+                    kind,
+                    status_bits,
+                    mode_bits,
+                    socket_transport,
+                    socket_implementation,
+                    socket_local_ip,
+                    socket_local_port,
+                    socket_peer_ip,
+                    socket_peer_port,
+                    socket_is_listening,
+                    socket_runtime,
+                    epoll_watches,
+                ) = match desc.file() {
+                    crate::host::descriptor::CompatFile::Legacy(_) => {
+                        (
+                            DescriptorFileKind::Legacy,
+                            0,
+                            0,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            false,
+                            None,
+                            Vec::new(),
+                        )
+                    }
+                    crate::host::descriptor::CompatFile::New(open_file) => {
+                        let file_ref = open_file.inner_file().borrow();
+                        let (
+                            socket_transport,
+                            socket_implementation,
+                            socket_local_ip,
+                            socket_local_port,
+                            socket_peer_ip,
+                            socket_peer_port,
+                            socket_is_listening,
+                            socket_runtime,
+                            epoll_watches,
+                        ) =
+                            match open_file.inner_file() {
+                                crate::host::descriptor::File::Socket(socket) => {
+                                    let socket_ref = socket.borrow();
+                                    let socket_transport = match socket {
+                                        crate::host::descriptor::socket::Socket::Inet(
+                                            crate::host::descriptor::socket::inet::InetSocket::Tcp(_),
+                                        ) => Some(DescriptorSocketTransport::Tcp),
+                                        crate::host::descriptor::socket::Socket::Inet(
+                                            crate::host::descriptor::socket::inet::InetSocket::LegacyTcp(_),
+                                        ) => Some(DescriptorSocketTransport::Tcp),
+                                        crate::host::descriptor::socket::Socket::Inet(
+                                            crate::host::descriptor::socket::inet::InetSocket::Udp(_),
+                                        ) => Some(DescriptorSocketTransport::Udp),
+                                        crate::host::descriptor::socket::Socket::Unix(_) => {
+                                            Some(DescriptorSocketTransport::Unix)
+                                        }
+                                        crate::host::descriptor::socket::Socket::Netlink(_) => {
+                                            Some(DescriptorSocketTransport::Netlink)
+                                        }
+                                    };
+                                    let socket_implementation = match socket {
+                                        crate::host::descriptor::socket::Socket::Inet(
+                                            crate::host::descriptor::socket::inet::InetSocket::LegacyTcp(_),
+                                        ) => Some(DescriptorSocketImplementation::LegacyTcp),
+                                        crate::host::descriptor::socket::Socket::Inet(
+                                            crate::host::descriptor::socket::inet::InetSocket::Tcp(_),
+                                        ) => Some(DescriptorSocketImplementation::Tcp),
+                                        crate::host::descriptor::socket::Socket::Inet(
+                                            crate::host::descriptor::socket::inet::InetSocket::Udp(_),
+                                        ) => Some(DescriptorSocketImplementation::Udp),
+                                        crate::host::descriptor::socket::Socket::Unix(_) => {
+                                            Some(DescriptorSocketImplementation::Unix)
+                                        }
+                                        crate::host::descriptor::socket::Socket::Netlink(_) => {
+                                            Some(DescriptorSocketImplementation::Netlink)
+                                        }
+                                    };
+                                    let local = socket_ref
+                                        .getsockname()
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|x| x.as_inet().map(|y| (*y).into()));
+                                    let peer = socket_ref
+                                        .getpeername()
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|x| x.as_inet().map(|y| (*y).into()));
+                                    let socket_is_listening = socket_ref
+                                        .state()
+                                        .contains(crate::host::descriptor::FileState::SOCKET_ALLOWING_CONNECT);
+                                    let inferred_listening = matches!(
+                                        socket_transport,
+                                        Some(DescriptorSocketTransport::Tcp)
+                                    ) && local
+                                        .as_ref()
+                                        .map(|x: &std::net::SocketAddrV4| x.port() != 0)
+                                        .unwrap_or(false)
+                                        && peer.is_none();
+                                    (
+                                        socket_transport,
+                                        socket_implementation,
+                                        local.as_ref().map(|x: &std::net::SocketAddrV4| x.ip().to_string()),
+                                        local.as_ref().map(|x| x.port()),
+                                        peer.as_ref().map(|x: &std::net::SocketAddrV4| x.ip().to_string()),
+                                        peer.as_ref().map(|x| x.port()),
+                                        socket_is_listening || inferred_listening,
+                                        match socket {
+                                            crate::host::descriptor::socket::Socket::Inet(
+                                                crate::host::descriptor::socket::inet::InetSocket::LegacyTcp(
+                                                    tcp_socket,
+                                                ),
+                                            ) => Some(SocketRuntimeSnapshot::LegacyTcp(
+                                                tcp_socket.borrow().runtime_snapshot(),
+                                            )),
+                                            crate::host::descriptor::socket::Socket::Inet(
+                                                crate::host::descriptor::socket::inet::InetSocket::Tcp(
+                                                    tcp_socket,
+                                                ),
+                                            ) => Some(SocketRuntimeSnapshot::Tcp(
+                                                tcp_socket.borrow().runtime_snapshot(),
+                                            )),
+                                            crate::host::descriptor::socket::Socket::Inet(
+                                                crate::host::descriptor::socket::inet::InetSocket::Udp(
+                                                    udp_socket,
+                                                ),
+                                            ) => Some(SocketRuntimeSnapshot::Udp(
+                                                udp_socket.borrow().runtime_snapshot(),
+                                            )),
+                                            _ => None,
+                                        },
+                                        Vec::new(),
+                                    )
+                                }
+                                crate::host::descriptor::File::Epoll(epoll) => (
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                    None,
+                                    epoll
+                                        .borrow()
+                                        .snapshot_registrations()
+                                        .into_iter()
+                                        .map(|watch| EpollWatchSnapshot {
+                                            watched_fd: watch
+                                                .watched_fd
+                                                .try_into()
+                                                .unwrap_or_default(),
+                                            watched_canonical_handle: Some(
+                                                watch.watched_canonical_handle as u64,
+                                            ),
+                                            interest_bits: watch.interest_bits,
+                                            data: watch.data,
+                                        })
+                                        .collect(),
+                                ),
+                                _ => (None, None, None, None, None, None, false, None, Vec::new()),
+                            };
+                        let kind = match open_file.inner_file() {
+                            crate::host::descriptor::File::Pipe(_) => DescriptorFileKind::Pipe,
+                            crate::host::descriptor::File::EventFd(_) => {
+                                DescriptorFileKind::EventFd
+                            }
+                            crate::host::descriptor::File::Socket(_) => DescriptorFileKind::Socket,
+                            crate::host::descriptor::File::TimerFd(_) => {
+                                DescriptorFileKind::TimerFd
+                            }
+                            crate::host::descriptor::File::Epoll(_) => DescriptorFileKind::Epoll,
+                        };
+                        (
+                            kind,
+                            file_ref.status().bits(),
+                            file_ref.mode().bits(),
+                            socket_transport,
+                            socket_implementation,
+                            socket_local_ip,
+                            socket_local_port,
+                            socket_peer_ip,
+                            socket_peer_port,
+                            socket_is_listening,
+                            socket_runtime,
+                            epoll_watches,
+                        )
+                    }
+                };
+                DescriptorEntrySnapshot {
+                    fd: u32::from(*fd),
+                    descriptor_flags_bits: desc.flags().bits(),
+                    file_status_bits: status_bits,
+                    file_mode_bits: mode_bits,
+                    file_kind: kind,
+                    canonical_handle: match desc.file() {
+                        crate::host::descriptor::CompatFile::Legacy(_) => None,
+                        crate::host::descriptor::CompatFile::New(open_file) => {
+                            Some(open_file.inner_file().canonical_handle() as u64)
+                        }
+                    },
+                    socket_transport,
+                    socket_implementation,
+                    socket_local_ip,
+                    socket_local_port,
+                    socket_peer_ip,
+                    socket_peer_port,
+                    socket_is_listening,
+                    socket_runtime,
+                    epoll_watches,
+                }
+            })
+            .collect()
+    }
+
+    fn replay_descriptor_entries(
+        host: &Host,
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+    ) {
+        let mut restore_ctx = DescriptorRestoreContext::new(host, table, checkpoint);
+        restore_ctx.replay_all();
+    }
+
+    fn recreate_socket_descriptor(
+        host: &Host,
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        use crate::host::descriptor::socket::Socket;
+        use crate::host::descriptor::socket::inet::{
+            InetSocket, legacy_tcp::LegacyTcpSocket, tcp::TcpSocket, udp::UdpSocket,
+        };
+        if let Some(canonical_handle) = d.canonical_handle
+            && let Some(open_file) = restored_open_files.get(&canonical_handle).cloned()
+        {
+            let mut desc = crate::host::descriptor::Descriptor::new(
+                crate::host::descriptor::CompatFile::New(open_file),
+            );
+            desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+                d.descriptor_flags_bits,
+            ));
+            let _ = table.register_descriptor_with_fd(desc, fd);
+            log::debug!(
+                "restore: reused restored socket open-file pid={} fd={} canonical_handle={}",
+                checkpoint.process_id,
+                d.fd,
+                canonical_handle
+            );
+            return;
+        }
+        let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
+        let socket = match (
+            d.socket_transport.as_ref(),
+            d.socket_implementation.as_ref(),
+        ) {
+            (Some(DescriptorSocketTransport::Udp), _) => {
+                Socket::Inet(InetSocket::Udp(UdpSocket::new(
+                    status,
+                    host.params
+                        .init_sock_send_buf_size
+                        .try_into()
+                        .unwrap_or(65536),
+                    host.params
+                        .init_sock_recv_buf_size
+                        .try_into()
+                        .unwrap_or(65536),
+                )))
+            }
+            (
+                Some(DescriptorSocketTransport::Tcp),
+                Some(DescriptorSocketImplementation::LegacyTcp),
+            ) => Socket::Inet(InetSocket::LegacyTcp(LegacyTcpSocket::new(status, host))),
+            (Some(DescriptorSocketTransport::Tcp), _) => {
+                Socket::Inet(InetSocket::Tcp(TcpSocket::new(status)))
+            }
+            _ => return,
+        };
+        let open_file = crate::host::descriptor::OpenFile::new(
+            crate::host::descriptor::File::Socket(socket.clone()),
+        );
+        if let Some(canonical_handle) = d.canonical_handle {
+            restored_open_files.insert(canonical_handle, open_file.clone());
+        }
+        let mut desc = crate::host::descriptor::Descriptor::new(
+            crate::host::descriptor::CompatFile::New(open_file),
+        );
+        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+            d.descriptor_flags_bits,
+        ));
+        let _ = table.register_descriptor_with_fd(desc, fd);
+
+        let local_addr = d
+            .socket_local_ip
+            .as_ref()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .zip(d.socket_local_port)
+            .map(|(ip, port)| {
+                nix::sys::socket::SockaddrIn::from(std::net::SocketAddrV4::new(ip, port))
+            })
+            .map(|x| crate::utility::sockaddr::SockaddrStorage::from_inet(&x));
+        let peer_addr = d
+            .socket_peer_ip
+            .as_ref()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .zip(d.socket_peer_port)
+            .map(|(ip, port)| {
+                nix::sys::socket::SockaddrIn::from(std::net::SocketAddrV4::new(ip, port))
+            })
+            .map(|x| crate::utility::sockaddr::SockaddrStorage::from_inet(&x));
+        let local_socket_addr = d
+            .socket_local_ip
+            .as_ref()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .zip(d.socket_local_port)
+            .map(|(ip, port)| std::net::SocketAddrV4::new(ip, port));
+        let peer_socket_addr = d
+            .socket_peer_ip
+            .as_ref()
+            .and_then(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+            .zip(d.socket_peer_port)
+            .map(|(ip, port)| std::net::SocketAddrV4::new(ip, port));
+        let legacy_connected_runtime = matches!(d.socket_runtime.as_ref(), Some(SocketRuntimeSnapshot::LegacyTcp(runtime)) if !runtime.is_server);
+
+        if let Some(addr) = local_addr.as_ref()
+            && !legacy_connected_runtime
+        {
+            let mut rng = host.random_mut();
+            let net_ns = host.network_namespace_borrow();
+            let _ = socket.bind(Some(addr), &net_ns, rng.deref_mut());
+        }
+        if matches!(d.socket_transport, Some(DescriptorSocketTransport::Tcp))
+            && d.socket_is_listening
+        {
+            let mut cb = crate::utility::callback_queue::CallbackQueue::new();
+            let mut rng = host.random_mut();
+            let net_ns = host.network_namespace_borrow();
+            let listen_result = match &socket {
+                crate::host::descriptor::socket::Socket::Inet(
+                    crate::host::descriptor::socket::inet::InetSocket::Tcp(tcp_socket),
+                ) => crate::host::descriptor::socket::inet::tcp::TcpSocket::listen(
+                    tcp_socket,
+                    16,
+                    &net_ns,
+                    rng.deref_mut(),
+                    &mut cb,
+                ),
+                _ => Ok(()),
+            };
+            log::debug!(
+                "restore: recreated listening tcp socket pid={} fd={} result={:?}",
+                checkpoint.process_id,
+                d.fd,
+                listen_result
+            );
+        }
+        if matches!(d.socket_transport, Some(DescriptorSocketTransport::Udp))
+            && let Some(addr) = peer_addr.as_ref()
+        {
+            let mut cb = crate::utility::callback_queue::CallbackQueue::new();
+            let mut rng = host.random_mut();
+            let net_ns = host.network_namespace_borrow();
+            let _ = socket.connect(addr, &net_ns, rng.deref_mut(), &mut cb);
+        }
+        let strict_runtime_restore = std::env::var("SHADOW_STRICT_RUNTIME_RESTORE")
+            .map(|x| x == "1")
+            .unwrap_or(false);
+        let should_apply_runtime = d.socket_runtime.as_ref().is_some_and(|runtime| {
+            strict_runtime_restore
+                || matches!(
+                    runtime,
+                    SocketRuntimeSnapshot::Udp(_) | SocketRuntimeSnapshot::LegacyTcp(_)
+                )
+        });
+        if should_apply_runtime && let Some(runtime) = d.socket_runtime.as_ref() {
+            let mut cb = crate::utility::callback_queue::CallbackQueue::new();
+            match (runtime, &socket) {
+                (
+                    SocketRuntimeSnapshot::LegacyTcp(runtime),
+                    crate::host::descriptor::socket::Socket::Inet(
+                        crate::host::descriptor::socket::inet::InetSocket::LegacyTcp(tcp_socket),
+                    ),
+                ) => {
+                    let mut rng = host.random_mut();
+                    let net_ns = host.network_namespace_borrow();
+                    if let Err(e) = crate::host::descriptor::socket::inet::legacy_tcp::LegacyTcpSocket::restore_runtime(
+                        tcp_socket,
+                        runtime,
+                        host,
+                        local_socket_addr,
+                        peer_socket_addr,
+                        &net_ns,
+                        rng.deref_mut(),
+                    ) {
+                        log::warn!(
+                            "restore: legacy tcp runtime restore failed pid={} fd={} err={:?}",
+                            checkpoint.process_id,
+                            d.fd,
+                            e
+                        );
+                    }
+                }
+                (
+                    SocketRuntimeSnapshot::Tcp(runtime),
+                    crate::host::descriptor::socket::Socket::Inet(
+                        crate::host::descriptor::socket::inet::InetSocket::Tcp(tcp_socket),
+                    ),
+                ) => {
+                    tcp_socket.borrow_mut().restore_runtime(runtime);
+                }
+                (
+                    SocketRuntimeSnapshot::Udp(runtime),
+                    crate::host::descriptor::socket::Socket::Inet(
+                        crate::host::descriptor::socket::inet::InetSocket::Udp(udp_socket),
+                    ),
+                ) => {
+                    udp_socket.borrow_mut().restore_runtime(runtime, &mut cb);
+                }
+                _ => {
+                    log::warn!(
+                        "restore: socket runtime snapshot mismatched transport pid={} fd={} runtime={:?} transport={:?}",
+                        checkpoint.process_id,
+                        d.fd,
+                        runtime,
+                        d.socket_transport
+                    );
+                }
+            }
+        } else if d.socket_runtime.is_some() {
+            log::debug!(
+                "restore: socket runtime snapshot present but strict runtime restore disabled pid={} fd={}",
+                checkpoint.process_id,
+                d.fd
+            );
+        }
+        log::debug!(
+            "restore: recreated socket descriptor pid={} fd={} transport={:?} local={:?} peer={:?} listen={}",
+            checkpoint.process_id,
+            d.fd,
+            d.socket_transport,
+            local_addr,
+            peer_addr,
+            d.socket_is_listening
+        );
+    }
+
+    fn recreate_epoll_descriptor(
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        use crate::host::descriptor::{CompatFile, File, OpenFile};
+
+        if let Some(canonical_handle) = d.canonical_handle
+            && let Some(open_file) = restored_open_files.get(&canonical_handle).cloned()
+        {
+            let mut desc = Descriptor::new(CompatFile::New(open_file));
+            desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+                d.descriptor_flags_bits,
+            ));
+            let _ = table.register_descriptor_with_fd(desc, fd);
+            log::debug!(
+                "restore: reused restored epoll open-file pid={} fd={} canonical_handle={}",
+                checkpoint.process_id,
+                d.fd,
+                canonical_handle
+            );
+            return;
+        }
+
+        let open_file = OpenFile::new(File::Epoll(crate::host::descriptor::epoll::Epoll::new()));
+        open_file.inner_file().borrow_mut().set_status(
+            crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits),
+        );
+        let mut desc = Descriptor::new(CompatFile::New(open_file.clone()));
+        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+            d.descriptor_flags_bits,
+        ));
+        let _ = table.register_descriptor_with_fd(desc, fd);
+        if let Some(canonical_handle) = d.canonical_handle {
+            restored_open_files.insert(canonical_handle, open_file.clone());
+        }
+        log::debug!(
+            "restore: recreated epoll descriptor pid={} fd={} watches={}",
+            checkpoint.process_id,
+            d.fd,
+            d.epoll_watches.len()
+        );
+    }
+
+    fn rebind_epoll_watches(
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        restored_open_files: &HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        use crate::host::descriptor::{CompatFile, File};
+
+        let Ok(epoll_fd) = DescriptorHandle::try_from(d.fd) else {
+            return;
+        };
+        let Some(epoll_desc) = table.get(epoll_fd) else {
+            log::warn!(
+                "restore: missing epoll descriptor while rebinding pid={} fd={}",
+                checkpoint.process_id,
+                d.fd
+            );
+            return;
+        };
+        let CompatFile::New(epoll_open_file) = epoll_desc.file() else {
+            log::warn!(
+                "restore: epoll descriptor is legacy while rebinding pid={} fd={}",
+                checkpoint.process_id,
+                d.fd
+            );
+            return;
+        };
+        let File::Epoll(epoll) = epoll_open_file.inner_file() else {
+            log::warn!(
+                "restore: descriptor kind mismatch while rebinding epoll pid={} fd={}",
+                checkpoint.process_id,
+                d.fd
+            );
+            return;
+        };
+
+        for watch in &d.epoll_watches {
+            let Some(target_open_file) = watch
+                .watched_canonical_handle
+                .and_then(|handle| restored_open_files.get(&handle))
+                .cloned()
+            else {
+                log::warn!(
+                    "restore: missing epoll target during rebind pid={} epfd={} watched_fd={} watched_handle={:?}",
+                    checkpoint.process_id,
+                    d.fd,
+                    watch.watched_fd,
+                    watch.watched_canonical_handle
+                );
+                continue;
+            };
+            let watched_fd = i32::try_from(watch.watched_fd).unwrap_or(-1);
+            if watched_fd < 0 {
+                continue;
+            }
+            let target_file = target_open_file.inner_file().clone();
+            let events = EpollEvents::from_bits_truncate(watch.interest_bits);
+            let result = CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+                epoll.borrow_mut().ctl(
+                    EpollCtlOp::EPOLL_CTL_ADD,
+                    watched_fd,
+                    target_file,
+                    events,
+                    watch.data,
+                    Arc::downgrade(epoll),
+                    cb_queue,
+                )
+            });
+            if let Err(err) = result {
+                log::warn!(
+                    "restore: failed to rebind epoll watch pid={} epfd={} watched_fd={} errno={}",
+                    checkpoint.process_id,
+                    d.fd,
+                    watch.watched_fd,
+                    err
+                );
+            }
+        }
+    }
+
     /// Transitions `self` from a `RunnableProcess` to a `ZombieProcess`.
     fn handle_process_exit(&self, host: &Host, killed_by_shadow: bool) {
         debug!(
@@ -1854,10 +2593,14 @@ impl Process {
     /// when xferring control to/from shim.
     fn set_shared_time(host: &Host) {
         let mut host_shmem = host.shim_shmem_lock_borrow_mut().unwrap();
-        host_shmem.max_runahead_time = Worker::max_event_runahead_time(host);
+        let max_runahead_time = Worker::max_event_runahead_time(host);
+        host_shmem.max_runahead_time = max_runahead_time;
+        let sim_time = Worker::current_time().unwrap();
         host.shim_shmem()
             .sim_time
-            .store(Worker::current_time().unwrap(), Ordering::Relaxed);
+            .store(sim_time, Ordering::Relaxed);
+        drop(host_shmem);
+        host.mirror_restored_shim_clock_state(sim_time, max_runahead_time);
     }
 
     /// Deprecated wrapper for `RunnableProcess::shmem`
@@ -2236,7 +2979,7 @@ fn make_name(host: &Host, exe_name: &str, id: ProcessId) -> CString {
     .unwrap()
 }
 
-mod export {
+pub mod export {
     use std::os::raw::c_void;
 
     use libc::size_t;

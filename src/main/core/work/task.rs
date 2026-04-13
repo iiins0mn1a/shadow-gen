@@ -133,11 +133,14 @@ pub mod export {
     impl Drop for CTaskHostTreePtrs {
         fn drop(&mut self) {
             if let Some(object_free) = self.object_free {
-                let ptr = unsafe { self.object.ptr() };
+                // Teardown paths (e.g., restart/restore transitions) may drop
+                // bound tasks without an active host context.
+                let ptr = unsafe { self.object.ptr_unchecked() };
                 object_free(ptr);
             }
             if let Some(argument_free) = self.argument_free {
-                let ptr = unsafe { self.argument.ptr() };
+                // Same rationale as above; avoid requiring active host during drop.
+                let ptr = unsafe { self.argument.ptr_unchecked() };
                 argument_free(ptr);
             }
         }

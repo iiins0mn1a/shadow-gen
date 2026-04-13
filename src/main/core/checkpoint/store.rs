@@ -29,8 +29,12 @@ pub struct FilesystemStore {
 impl FilesystemStore {
     pub fn new(base_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let base_dir = base_dir.into();
-        std::fs::create_dir_all(&base_dir)
-            .with_context(|| format!("Failed to create checkpoint directory: {}", base_dir.display()))?;
+        std::fs::create_dir_all(&base_dir).with_context(|| {
+            format!(
+                "Failed to create checkpoint directory: {}",
+                base_dir.display()
+            )
+        })?;
         Ok(Self { base_dir })
     }
 
@@ -54,8 +58,10 @@ impl CheckpointStore for FilesystemStore {
         let path = self.path_for(label);
         let file = std::fs::File::open(&path)
             .with_context(|| format!("Checkpoint file not found: {}", path.display()))?;
-        let checkpoint: SimulationCheckpoint = serde_json::from_reader(file)
-            .with_context(|| format!("Failed to deserialize checkpoint from: {}", path.display()))?;
+        let checkpoint: SimulationCheckpoint =
+            serde_json::from_reader(file).with_context(|| {
+                format!("Failed to deserialize checkpoint from: {}", path.display())
+            })?;
         log::info!("Checkpoint '{}' loaded from {}", label, path.display());
         Ok(checkpoint)
     }
