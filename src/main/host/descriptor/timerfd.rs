@@ -10,6 +10,7 @@ use shadow_shim_helper_rs::{
 };
 
 use crate::cshadow as c;
+use crate::core::checkpoint::snapshot_types::TimerFdSnapshot;
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::{FileMode, FileSignals, FileState, FileStatus};
 use crate::host::host::Host;
@@ -17,6 +18,7 @@ use crate::host::memory_manager::MemoryManager;
 use crate::host::syscall::io::{IoVec, IoVecWriter};
 use crate::host::syscall::types::{SyscallError, SyscallResult};
 use crate::host::timer::Timer;
+use crate::core::worker::Worker;
 use crate::utility::HostTreePointer;
 use crate::utility::callback_queue::CallbackQueue;
 
@@ -128,6 +130,37 @@ impl TimerFd {
 
     pub fn set_has_open_file(&mut self, val: bool) {
         self.has_open_file = val;
+    }
+
+    pub fn snapshot(&self) -> TimerFdSnapshot {
+        let now = Worker::current_time().unwrap();
+        self.snapshot_at(now)
+    }
+
+    pub fn snapshot_at(&self, now: EmulatedTime) -> TimerFdSnapshot {
+        TimerFdSnapshot {
+            remaining_ns: self
+                .timer
+                .remaining_time_at(now)
+                .map(|t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX)),
+            interval_ns: self
+                .get_timer_interval()
+                .map(|t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX)),
+            expiration_count: self.get_timer_count(),
+        }
+    }
+
+    pub fn restore_from_snapshot(
+        &mut self,
+        host: &Host,
+        snapshot: &TimerFdSnapshot,
+        cb_queue: &mut CallbackQueue,
+    ) {
+        let remaining = snapshot.remaining_ns.map(SimulationTime::from_nanos);
+        let interval = snapshot.interval_ns.map(SimulationTime::from_nanos);
+        self.timer
+            .restore(host, remaining, interval, snapshot.expiration_count);
+        self.refresh_state(cb_queue);
     }
 
     pub fn readv(

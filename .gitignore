@@ -3,6 +3,7 @@ build
 # area for local temp files
 /local
 /install
+/shadow.data
 # python build files
 *.egg-info/
 # ide-specific settings

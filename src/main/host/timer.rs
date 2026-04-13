@@ -92,8 +92,13 @@ impl Timer {
     /// armed, or None otherwise.
     pub fn remaining_time(&self) -> Option<SimulationTime> {
         self.magic.debug_check();
-        let t = self.internal.borrow().next_expire_time?;
         let now = Worker::current_time().unwrap();
+        self.remaining_time_at(now)
+    }
+
+    pub fn remaining_time_at(&self, now: EmulatedTime) -> Option<SimulationTime> {
+        self.magic.debug_check();
+        let t = self.internal.borrow().next_expire_time?;
         Some(t.saturating_duration_since(&now))
     }
 
@@ -161,7 +166,9 @@ impl Timer {
         internal_ptr: Weak<AtomicRefCell<TimerInternal>>,
         host: &Host,
     ) {
-        let now = Worker::current_time().unwrap();
+        let now = Worker::current_time().unwrap_or_else(|| {
+            host.restore_time_hint()
+        });
 
         // have the timer expire between (1,2] seconds from now, but on a 1-second edge so that all
         // timer events for all hosts will expire at the same times (and therefore in the same
@@ -212,6 +219,31 @@ impl Timer {
         let mut internal = self.internal.borrow_mut();
         internal.reset(Some(expire_time), expire_interval);
         Self::schedule_new_expire_event(&mut internal, Arc::downgrade(&self.internal), host);
+    }
+
+    pub fn restore(
+        &mut self,
+        host: &Host,
+        remaining_time: Option<SimulationTime>,
+        expire_interval: Option<SimulationTime>,
+        expiration_count: u64,
+    ) {
+        self.magic.debug_check();
+
+        if let Some(interval) = expire_interval {
+            debug_assert!(interval.is_positive());
+        }
+
+        let now = host.restore_time_hint();
+        let mut internal = self.internal.borrow_mut();
+        internal.min_valid_expire_id = internal.next_expire_id;
+        internal.next_expire_time = remaining_time.map(|remaining| now + remaining);
+        internal.expire_interval = expire_interval;
+        internal.expiration_count = expiration_count;
+
+        if internal.next_expire_time.is_some() {
+            Self::schedule_new_expire_event(&mut internal, Arc::downgrade(&self.internal), host);
+        }
     }
 }
 

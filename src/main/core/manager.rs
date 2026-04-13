@@ -1414,6 +1414,7 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
         .as_ref()
         .map(|_| process.snapshot_descriptor_entries(host))
         .unwrap_or_default();
+    log_descriptor_census("checkpoint", host.name(), u32::from(process.id()), &descriptors);
 
     ProcessCheckpoint {
         process_id: u32::from(process.id()),
@@ -1445,6 +1446,65 @@ fn snapshot_rng(rng: &Xoshiro256PlusPlus) -> PrngSnapshot {
 
 fn restore_rng(snapshot: &PrngSnapshot) -> Xoshiro256PlusPlus {
     unsafe { std::mem::transmute_copy(&snapshot.s) }
+}
+
+fn restore_host_globals(host: &Host, checkpoint: &HostCheckpoint) {
+    let queue = rebuild_event_queue(&checkpoint.event_queue, host);
+    let last_popped = EmulatedTime::SIMULATION_START
+        + SimulationTime::from_nanos(checkpoint.last_popped_event_time_ns);
+
+    host.replace_event_queue(queue, last_popped);
+    host.set_next_event_id_counter(checkpoint.next_event_id);
+    host.set_next_thread_id_counter(checkpoint.next_thread_id);
+    host.set_next_packet_id_counter(checkpoint.next_packet_id);
+    host.set_determinism_sequence_counter(checkpoint.determinism_sequence_counter);
+    host.set_packet_priority_counter(checkpoint.packet_priority_counter);
+    host.set_random_state(restore_rng(&checkpoint.random_state));
+    host.cpu_borrow_mut().restore_times(
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns),
+        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_available_ns),
+    );
+}
+
+fn descriptor_census_enabled() -> bool {
+    std::env::var("SHADOW_LOG_DESCRIPTOR_CENSUS")
+        .map(|x| x == "1")
+        .unwrap_or(false)
+}
+
+fn log_descriptor_census(
+    stage: &str,
+    host_name: &str,
+    process_id: u32,
+    descriptors: &[DescriptorEntrySnapshot],
+) {
+    if !descriptor_census_enabled() {
+        return;
+    }
+
+    let mut by_kind: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for descriptor in descriptors {
+        let label = match descriptor.file_kind {
+            DescriptorFileKind::Legacy => "legacy",
+            DescriptorFileKind::Pipe => "pipe",
+            DescriptorFileKind::EventFd => "eventfd",
+            DescriptorFileKind::Socket => "socket",
+            DescriptorFileKind::TimerFd => "timerfd",
+            DescriptorFileKind::Epoll => "epoll",
+            DescriptorFileKind::Unknown => "unknown",
+        };
+        *by_kind.entry(label).or_default() += 1;
+    }
+
+    log::info!(
+        "descriptor census stage={} host='{}' pid={} total={} by_kind={:?}",
+        stage,
+        host_name,
+        process_id,
+        descriptors.len(),
+        by_kind
+    );
 }
 
 fn restore_protocol_mode_from_env() -> RestoreProtocolModeSnapshot {
@@ -1755,6 +1815,12 @@ fn apply_host_checkpoint(
         host.mirror_restored_shim_clock_state(restored_now, restored_now);
     }
 
+    // Reinstall the serialized queue and host-global counters before rebuilding
+    // process-local objects. Descriptor restore can schedule fresh local tasks
+    // (for example timerfd expirations), and those tasks must be appended to the
+    // restored queue rather than discarded by a later replace_event_queue call.
+    restore_host_globals(host, checkpoint);
+
     {
         let mut processes = host.processes_borrow_mut();
         for process_cp in &checkpoint.processes {
@@ -1772,20 +1838,6 @@ fn apply_host_checkpoint(
             processes.insert(process_id, process);
         }
     }
-    let queue = rebuild_event_queue(&checkpoint.event_queue, host);
-    let last_popped = EmulatedTime::SIMULATION_START
-        + SimulationTime::from_nanos(checkpoint.last_popped_event_time_ns);
-    host.replace_event_queue(queue, last_popped);
-    host.set_next_event_id_counter(checkpoint.next_event_id);
-    host.set_next_thread_id_counter(checkpoint.next_thread_id);
-    host.set_next_packet_id_counter(checkpoint.next_packet_id);
-    host.set_determinism_sequence_counter(checkpoint.determinism_sequence_counter);
-    host.set_packet_priority_counter(checkpoint.packet_priority_counter);
-    host.set_random_state(restore_rng(&checkpoint.random_state));
-    host.cpu_borrow_mut().restore_times(
-        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns),
-        EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_available_ns),
-    );
     let restored_now =
         EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
     // Kick restored runnable processes once after replay. The serialized event
@@ -2336,6 +2388,12 @@ fn apply_host_checkpoint(
             let proc = proc_rc.borrow(host.root());
             let restored_desc = proc.descriptor_count_hint(host);
             let restored_entries = proc.snapshot_descriptor_entries(host);
+            log_descriptor_census(
+                "restore",
+                host.name(),
+                process_cp.process_id,
+                &restored_entries,
+            );
             let restored_by_fd: std::collections::HashMap<u32, _> =
                 restored_entries.iter().map(|d| (d.fd, d)).collect();
             let cp_socket_fds = process_cp

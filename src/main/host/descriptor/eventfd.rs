@@ -5,6 +5,7 @@ use linux_api::ioctls::IoctlRequest;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
 use crate::cshadow as c;
+use crate::core::checkpoint::snapshot_types::EventFdSnapshot;
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::{FileMode, FileSignals, FileState, FileStatus};
 use crate::host::memory_manager::MemoryManager;
@@ -58,6 +59,23 @@ impl EventFd {
 
     pub fn set_has_open_file(&mut self, val: bool) {
         self.has_open_file = val;
+    }
+
+    pub fn snapshot(&self) -> EventFdSnapshot {
+        EventFdSnapshot {
+            counter: self.counter,
+            is_semaphore_mode: self.is_semaphore_mode,
+        }
+    }
+
+    pub fn restore_from_snapshot(
+        &mut self,
+        snapshot: &EventFdSnapshot,
+        cb_queue: &mut CallbackQueue,
+    ) {
+        self.counter = snapshot.counter;
+        self.is_semaphore_mode = snapshot.is_semaphore_mode;
+        self.refresh_state(FileSignals::empty(), cb_queue);
     }
 
     pub fn close(&mut self, cb_queue: &mut CallbackQueue) -> Result<(), SyscallError> {

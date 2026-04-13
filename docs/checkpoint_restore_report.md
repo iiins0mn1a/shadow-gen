@@ -1,209 +1,332 @@
-# Checkpoint/Restore in Shadow: Current Architecture, Challenges, and Solutions
+# Checkpoint/Restore in Shadow: Architecture, Workflow, Challenges, and Current Status
 
 ## Abstract
 
-This report documents the current checkpoint/restore implementation in Shadow after the recent refactoring and network-recovery work. The system is intentionally hybrid. Native process state is recovered with CRIU, while Shadow-specific simulation state is serialized into a Rust-defined checkpoint schema and replayed during restore. The recent work extends this baseline with explicit restore-protocol metadata, descriptor-level runtime snapshots, and an object-rebinding strategy for network-facing state. The resulting design is sufficient to recover the current multihost checkpoint tests, the TCP strict-time test, and an Ethereum-like mesh proof of concept.
+This report summarizes the current checkpoint/restore design in Shadow after the recent network-recovery refactoring. The implementation remains hybrid: CRIU restores native process images, while Shadow serializes and replays simulation-owned state such as event queues, clocks, descriptor graphs, and blocked-syscall metadata. Recent work extended the restore path in three directions. First, restore behavior is now described by explicit protocol metadata instead of relying solely on post-restore heuristics. Second, descriptor replay has been restructured around object recreation followed by explicit rebinding. Third, the system now restores epoll-, eventfd-, and timerfd-based event loops, including multi-process-per-host workloads that better approximate an Ethereum deployment. The result is a materially stronger foundation for checkpoint/restore of complex networked applications.
 
 ## 1. System Model
 
-Shadow’s checkpoint/restore design is based on a separation of concerns between three state domains:
+Shadow checkpoint/restore spans three distinct state domains:
 
-1. Native managed-process state, including registers, memory, and the host-kernel view of threads and file descriptors.
-2. Shadow-internal simulation state, including host event queues, CPU clocks, deterministic counters, RNG state, process/thread runtime metadata, and Shadow-managed descriptor state.
-3. Shared-memory backing state, particularly `/dev/shm` objects that must exist before restored processes remap them.
+1. Native process state.
+   This includes registers, address spaces, thread stacks, and the kernel-visible process tree. Shadow delegates this part to CRIU.
+2. Simulation state.
+   This includes host clocks, event queues, deterministic counters, RNG state, process/thread runtime metadata, descriptor tables, socket runtime, and blocked-syscall bookkeeping. Shadow serializes and restores this state itself.
+3. Shared-memory backing state.
+   Shadow-managed shared-memory objects must exist before restored native processes can remap them.
 
-The implementation therefore does not use a single monolithic checkpoint mechanism. Instead, it combines:
-
-- CRIU for native process images.
-- A JSON-serializable simulation checkpoint for Shadow-owned state.
-- A shared-memory backup/restore phase for Shadow-managed shmem files.
-
-This decomposition remains the central architectural choice of the current implementation.
+The implementation is therefore intentionally not monolithic. It is a coordinated recovery protocol across CRIU, Shadow-owned checkpoint metadata, and shared-memory backing files.
 
 ## 2. Checkpoint Pipeline
 
-At a scheduling-window boundary, Shadow performs checkpointing in four ordered stages.
+Checkpoint is taken at a simulation-consistent cut point and proceeds in ordered stages.
 
 ### 2.1 Shared-memory backup
 
-Shadow first enumerates the `/dev/shm` objects relevant to the simulation and copies them into the checkpoint directory. This step is necessary because CRIU restore expects the backing files to exist before native process reconstruction.
+Shadow first copies relevant shared-memory backing files into the checkpoint directory. This ensures that CRIU restore will later find the files required by the restored process images.
 
 ### 2.2 Simulation snapshot
 
-Shadow then walks every host and serializes the simulation state into `HostCheckpoint` and `ProcessCheckpoint` objects. The serialized state includes:
+Shadow then serializes host and process state into Rust-defined checkpoint structures. The snapshot includes:
 
-- Event queues and event-ordering metadata.
-- CPU time and availability.
-- Deterministic counters and RNG state.
-- Process and thread metadata.
-- Descriptor-table snapshots.
-- Socket runtime snapshots.
-- Blocked-syscall metadata.
-
-This stage is implemented in Rust and is independent of CRIU.
+- host event queues and scheduling metadata
+- CPU clock state and deterministic counters
+- RNG state
+- process and thread metadata
+- descriptor-table snapshots
+- socket runtime snapshots
+- blocked-syscall runtime metadata
+- restore-protocol metadata
 
 ### 2.3 Native process dump
 
-For every running managed process, Shadow invokes CRIU with `leave_running=true`. The resulting image directory is recorded in the simulation checkpoint so that the JSON checkpoint and CRIU artifacts remain linked.
+Shadow invokes CRIU for each running managed process and records the corresponding image directory in the simulation checkpoint. This step captures the native process image, but not Shadow’s internal object graph.
 
-### 2.4 Checkpoint assembly
+### 2.4 Descriptor census and protocol metadata
 
-Finally, Shadow assembles `SimulationCheckpoint`, which now includes explicit restore-protocol metadata:
+To support more realistic workloads, the checkpoint now records richer fd-level state:
+
+- stable `canonical_handle` identifiers
+- epoll watch registrations
+- eventfd state
+- timerfd state
+
+The checkpoint also stores explicit restore-protocol metadata:
 
 - `restore_protocol.mode`
 - `restore_protocol.restore_epoch`
 - `restore_protocol.connections`
 - `restore_protocol.blocked_syscalls`
 
-This protocol layer is not a complete DMTCP-style runtime, but it makes restore intent explicit and reduces reliance on purely heuristic post-restore patching.
+This protocol metadata is not yet a full DMTCP-style distributed protocol, but it makes restore semantics explicit and makes later replay decisions auditable.
 
 ## 3. Restore Pipeline
 
-Restore is likewise staged.
+Restore is also staged, but the ordering is critical.
 
-### 3.1 Metadata and shmem restoration
+### 3.1 Metadata loading and shmem restoration
 
-Shadow first loads the serialized checkpoint metadata and restores the shared-memory files into place.
+Shadow loads checkpoint metadata and restores shared-memory backing files into place.
 
 ### 3.2 Native process restoration
 
-CRIU then reconstructs the native process trees. At this point, the native process images exist again, but Shadow-specific object graphs and runtime contracts have not yet been replayed.
+CRIU restores native processes, threads, and address spaces. At this stage, native processes exist again, but Shadow’s own runtime objects have not yet been reconstructed.
 
-### 3.3 Host replay
+### 3.3 Host-global replay
 
-Once Worker TLS and host-local execution context are ready, Shadow replays each `HostCheckpoint`. This stage reconstructs:
+Shadow reattaches restored host shmem and restores host-global state:
 
-- Restored `HostShmem` attachment.
-- Host CPU clock and runahead state.
-- Process objects.
-- Thread objects.
-- Event queues.
-- Descriptor tables.
-- Blocked-syscall rearming tasks.
-- Post-restore resume scheduling.
+- serialized event queue
+- host event/time counters
+- deterministic counters
+- RNG state
+- CPU timing state
 
-The core routine is `apply_host_checkpoint(...)`, which is responsible for translating serialized runtime metadata back into live simulation objects.
+This ordering is important. The restored queue and host-global timing context must exist before per-process descriptor restore can safely schedule new local events.
 
-## 4. Descriptor Recovery and Object Rebinding
+### 3.4 Process and descriptor replay
 
-### 4.1 Motivation
+Each process is then reconstructed from checkpoint metadata. Descriptor replay proceeds in two phases:
 
-The most important recent failure mode was not transport failure per se, but descriptor-graph inconsistency. In the Ethereum-like mesh proof of concept, each process owned a real `epoll` descriptor via Python’s `selectors.DefaultSelector`. Earlier restore code recreated sockets but not epoll descriptors, which caused restored applications to fail with `EBADF` as soon as their event loops resumed.
+1. recreate restore-capable objects
+2. rebind relationships among those recreated objects
 
-### 4.2 Current solution
+This is the key restore pattern of the current implementation.
 
-The current design addresses this using an object-rebinding strategy.
+### 3.5 Blocked-syscall rearming and resume scheduling
 
-During checkpoint, Shadow records:
+After object replay, Shadow reestablishes blocked-syscall conditions, timeout completions, and compatibility resume tasks. This includes the current protocol-aware handling of restored blocked syscalls and legacy compatibility nudges when required.
 
-- File-descriptor kind.
-- Stable `canonical_handle` identifiers for restore-time correspondence.
-- Socket runtime metadata.
-- Epoll watch registrations, including watched file descriptor, watched canonical handle, interest bits, and callback data.
+## 4. Descriptor Recovery as Object Recreation Plus Rebinding
 
-During restore, Shadow performs descriptor replay in two phases:
+### 4.1 Why rebinding is necessary
 
-1. Recreate descriptor objects themselves, including sockets and epoll instances.
-2. Rebind higher-level relationships between those recreated objects using the preserved canonical handles.
+Checkpoint/restore does not preserve Rust object identity. After restore, a descriptor graph must be reconstructed from new live objects. It is therefore incorrect to assume that a restored epoll instance can simply resume watching “the same” fd object it watched before checkpoint.
 
-This design is implemented through a dedicated descriptor-restore context in `Process::replay_descriptor_entries(...)`. The context maintains the mapping from old canonical handles to newly created `OpenFile` objects, and then uses that mapping to rebuild epoll watch relationships.
+### 4.2 Current descriptor strategy
 
-This is a substantial conceptual improvement over ad hoc replay because the restore logic no longer assumes that object identity survives checkpoint/restore. Instead, it reconstructs object identity explicitly.
+During checkpoint, each descriptor entry records:
 
-## 5. Restore-Protocol Metadata
+- descriptor kind
+- file status and descriptor flags
+- `canonical_handle`
+- transport/runtime metadata for sockets
+- epoll watch registrations
+- eventfd state
+- timerfd state
 
-The current checkpoint format contains explicit restore-protocol metadata. This layer records:
+During restore, Shadow:
 
-- A protocol mode (`LegacyHeuristic` or `ProtocolV1`).
-- A restore epoch.
-- Connection-level metadata for sockets.
-- Blocked-syscall metadata, including instance IDs, phases, timeout semantics, and poll-watch sets.
+1. recreates the underlying descriptor objects
+2. records a mapping from old `canonical_handle` to new `OpenFile`
+3. uses that mapping to rebind epoll registrations and other cross-object references
 
-This information does not yet constitute a full distributed recovery protocol in the DMTCP sense. However, it serves three important purposes:
+This strategy is implemented through an explicit descriptor-restore context in process replay. The result is significantly easier to reason about than earlier ad hoc fixups.
 
-1. It makes the expected restore semantics explicit.
-2. It allows the restore path to distinguish between legacy heuristic recovery and protocol-oriented replay.
-3. It provides stable identifiers for blocked syscalls and network-facing descriptors.
+## 5. Restore-Protocol Layer
 
-The protocol layer is therefore best understood as a structured intermediate stage between heuristic replay and a more fully protocol-driven design.
+The explicit restore-protocol layer should be understood as an intermediate step between heuristic replay and a fully protocol-driven design.
 
-## 6. Major Challenges and Implemented Solutions
+The current checkpoint records:
 
-### 6.1 Challenge: Divergence between restored native state and restored simulation state
+- protocol mode
+- restore epoch
+- connection metadata
+- blocked-syscall instance metadata
+- poll-watch information
+- restore actions such as `RearmCondition`, `RearmTimeout`, or `ResumeImmediately`
 
-Because CRIU restores native processes independently of Shadow’s Rust object graph, the two sides can drift unless their interfaces are explicitly re-synchronized.
+This layer serves three purposes:
 
-#### Implemented solution
+1. it encodes restore intent explicitly
+2. it provides stable identifiers for blocked syscalls and network-visible objects
+3. it narrows the scope of heuristic compatibility paths
 
-Shadow restores its own object graph from `SimulationCheckpoint` and reattaches restored host/process/thread shared-memory state. The design is therefore intentionally bifurcated, but the replay phase reconstructs the simulation-side contracts needed by the restored native threads.
+The current design therefore remains hybrid, but it is no longer purely heuristic.
 
-### 6.2 Challenge: Post-restore time semantics were broken
+## 6. Overall Engineering Workflow
 
-Earlier testing showed that TCP data could continue to flow after restore even while application-visible `monotonic_ns` values remained frozen. This indicated a mismatch between the active Shadow host clock and the restored shim-visible host shmem clock.
+The recent work followed a repeated workflow that proved effective.
 
-#### Implemented solution
+### 6.1 Start from a failing restore symptom
 
-Shadow now mirrors time updates into the restored host-shmem view that restored native processes still observe. As a result, the application-visible time source advances correctly after restore, and the TCP strict-time regression now passes.
+The initial failures were not treated as generic “network restore is broken”. Instead, each failure was narrowed to a concrete post-restore behavioral gap:
 
-### 6.3 Challenge: Epoll-based event loops failed after restore
+- TCP data plane moved, but application-visible monotonic time did not
+- UDP recovery failed in the mixed network test
+- epoll-based applications failed with missing descriptors
+- multi-process-per-host event loops restored, but produced no post-restore events
 
-The Ethereum-like mesh proof of concept revealed that restoring sockets alone was insufficient. Applications using epoll retained a dependency on a descriptor object that had not been reconstructed.
+### 6.2 Build a sharper reproducer
 
-#### Implemented solution
+Synthetic tests were introduced to isolate each missing capability:
 
-Shadow now checkpoints epoll watch registrations and restores epoll descriptors explicitly. The restore logic then rebinds watches to newly created target objects using canonical-handle correspondence.
+- `checkpoint-network-multihost` for mixed TCP/UDP traffic
+- strict TCP time checks to detect frozen application clocks
+- `checkpoint-network-eth-poc` for epoll-based multi-socket event loops
+- `checkpoint-network-eth-multiproc` for multi-process-per-host workloads with loopback RPC, cross-host traffic, epoll, eventfd, and timerfd
 
-### 6.4 Challenge: Blocked-syscall replay required more structure than a one-shot signal-style heuristic
+These tests were intentionally capability-driven rather than protocol-faithful reimplementations of Ethereum clients.
 
-The earlier restore path relied heavily on heuristics such as one-shot EINTR injection and socket fixups. These mechanisms were useful for early experimentation but were difficult to reason about and difficult to generalize.
+### 6.3 Make hidden state explicit
 
-#### Implemented solution
+Once the failing capability was isolated, the next step was to expose the restore-relevant state:
 
-The current implementation introduces blocked-syscall instance IDs, phases, and restore actions. While heuristic compatibility paths still exist, the checkpoint format now preserves the information needed to drive replay more explicitly.
+- stable descriptor identity via `canonical_handle`
+- epoll interest sets
+- eventfd state
+- timerfd remaining time and periodic interval
+- blocked-syscall metadata
+- descriptor census diagnostics
 
-## 7. Refactoring Outcomes
+This repeated pattern was essential. In nearly every failure, the blocker was not that Shadow lacked a generic “restore call”, but that restore-relevant state was still implicit in live runtime objects.
 
-The recent refactoring focused on maintainability rather than semantic expansion.
+### 6.4 Reconstruct objects first, then rebind semantics
 
-### 7.1 Descriptor replay readability
+The design rule that emerged from the debugging work is:
 
-Descriptor replay in `process.rs` is now organized around an explicit restore context rather than manually threading temporary state through multiple loops and helper calls. This reduces local redundancy and makes the two-phase replay strategy easier to follow.
+> restore containers and naming context first, then recreate objects, then rebind relationships.
 
-### 7.2 Checkpoint flow readability
+This rule now governs descriptor replay and, more recently, host event-queue replay.
 
-The checkpoint path in `manager.rs` now uses named helper routines for shmem-path collection and CRIU image generation. This preserves behavior while making the high-level checkpoint sequence easier to read and audit.
+### 6.5 Regress continuously
 
-### 7.3 Restore policy readability
+Every change was validated against the previously working tests before being accepted. This prevented the network-focused work from regressing basic multihost or TCP restore behavior.
 
-Environment-driven compatibility behavior is now concentrated into small helper routines instead of being re-parsed inline at each decision site. This reduces noise in the core restore logic.
+## 7. Major Challenges and Implemented Solutions
 
-## 8. Validation Status
+### 7.1 Challenge: Native state and simulation state can diverge
 
-After the current refactoring and network-recovery work, the following checkpoints pass:
+CRIU restores native processes independently of Shadow’s Rust object graph. Without explicit replay, restored native processes can observe a runtime that no longer matches Shadow’s internal state.
+
+#### Solution
+
+Shadow restores its own object graph from `SimulationCheckpoint`, reattaches restored shmem, and reconstructs process/thread/descriptor state explicitly.
+
+### 7.2 Challenge: Post-restore time semantics were initially incorrect
+
+Earlier runs showed that TCP could continue after restore while `monotonic_ns` remained effectively frozen in the restored application.
+
+#### Solution
+
+Shadow now mirrors time into the restored host-shmem view that restored native processes still consult. This fixed the strict TCP time regression and restored application-visible progress after checkpoint/restore.
+
+### 7.3 Challenge: Epoll event loops required more than socket replay
+
+The first Ethereum-like proof of concept used `epoll` through Python’s selector interface. Earlier restore code recreated sockets but not epoll descriptors or their registration state, leading to immediate `EBADF` failures.
+
+#### Solution
+
+Shadow now checkpoints epoll descriptors and their watch registrations, recreates epoll objects during restore, and rebinds each watch to the newly recreated target object using canonical-handle identity.
+
+### 7.4 Challenge: Async runtimes rely on more than sockets
+
+More realistic workloads use descriptor classes such as `eventfd` and `timerfd` as wakeup and scheduling sources. These descriptors were initially outside the restore-capable set.
+
+#### Solution
+
+The checkpoint schema and descriptor replay path were extended to include:
+
+- `EventFdSnapshot`
+- `TimerFdSnapshot`
+- descriptor recreation for eventfd and timerfd
+- epoll rebinding to eventfd/timerfd targets
+
+This was necessary for multi-process event-loop workloads.
+
+### 7.5 Challenge: Restored multi-process event loops produced no post-restore activity
+
+The multiprocess Ethereum-like test revealed a subtler failure. The restore path succeeded, but all `restored.*` outputs remained empty. Investigation showed that all affected threads were blocked in `epoll_wait`, and no wakeup source fired after restore.
+
+The root cause was restore ordering. During descriptor replay, `timerfd` restoration correctly scheduled fresh timer-expiration events, but those events were then discarded because `apply_host_checkpoint()` later replaced the host event queue with the serialized checkpoint queue.
+
+#### Solution
+
+Host-global state is now restored before process reconstruction. Concretely:
+
+1. restore host shmem alias
+2. restore serialized event queue and host-global counters
+3. reconstruct processes and descriptors
+
+This change preserved newly scheduled timerfd events and restored the self-activation path of post-restore epoll loops.
+
+This fix is a strong example of the current design principle: restore the container first, then restore the objects that will attach new behavior to it.
+
+## 8. Refactoring Outcomes
+
+The code changes were not limited to feature growth; several refactorings improved readability and reduced redundancy.
+
+### 8.1 Descriptor replay structure
+
+Descriptor replay is now centralized in an explicit restore context. The context owns:
+
+- the target descriptor table
+- the checkpoint descriptor list
+- the canonical-handle-to-open-file map
+- the set of already rebound epoll instances
+
+This structure makes the replay process legible and localizes restore bookkeeping.
+
+### 8.2 Shared helper paths for descriptor recreation
+
+Socket, epoll, eventfd, and timerfd restore paths now share common helper routines for:
+
+- reusing already recreated open files
+- registering recreated open files into the descriptor table
+
+This reduced repetition and made the rebinding pattern consistent across descriptor kinds.
+
+### 8.3 Host-global restore helper
+
+Host-global restore is now factored into a dedicated helper that restores:
+
+- event queue
+- timing counters
+- deterministic counters
+- RNG state
+- CPU state
+
+This makes `apply_host_checkpoint(...)` read more clearly as a sequence of phases rather than as a single large procedure.
+
+## 9. Validation Status
+
+At the current stage, the following regression tests pass:
 
 - `tests/checkpoint-multihost`
 - `tests/checkpoint-network-multihost`
 - `tests/checkpoint-network-multihost --mode tcp --strict-tcp-time`
 - `tests/checkpoint-network-eth-poc`
+- `tests/checkpoint-network-eth-multiproc`
 
-This does not imply that checkpoint/restore is fully general for all future workloads. It does imply that the current implementation can recover:
+These tests collectively validate:
 
-- Basic multihost process state.
-- TCP and UDP communication across restore.
-- Application-visible post-restore time progression.
-- Single-process multi-socket event loops based on epoll.
+- multihost process restore
+- TCP and UDP post-restore communication
+- application-visible monotonic time progression
+- epoll-based event loops
+- eventfd/timerfd-based async wakeups
+- multiple processes per host
+- loopback TCP RPC plus cross-host TCP/UDP traffic
 
-## 9. Remaining Limitations
+This does not imply full generality for arbitrary workloads, but it does establish that Shadow now supports a significantly broader and more realistic class of networked restore scenarios than before.
 
-Several limitations remain visible.
+## 10. Remaining Limitations
 
-1. Descriptor replay is still incomplete for some non-socket descriptor classes, such as `pipe`, `eventfd`, and `timerfd`.
-2. The restore protocol remains only partially protocol-driven; some compatibility heuristics are still retained.
-3. The system does not yet implement a DMTCP-style globally coordinated network cut with transport draining and restart-time peer rewiring across all protocol classes.
-4. Epoll recovery currently restores registrations, but not every internal intermediate state that may matter for more pathological edge-triggered or one-shot corner cases.
+Several limitations remain.
 
-## 10. Conclusion
+1. The restore-protocol layer is still only partially protocol-driven. Legacy compatibility paths still exist.
+2. Shadow still does not implement a full DMTCP-style globally coordinated network cut with transport draining and restart-time peer rewiring for every protocol class.
+3. Descriptor replay is not yet complete for all descriptor kinds that may appear in real Ethereum clients, especially `pipe` and any client-specific auxiliary fds not yet covered by the synthetic tests.
+4. Epoll restore currently focuses on registrations and restore-time readiness reconstruction, but highly pathological edge-triggered or one-shot corner cases may still need further validation.
+5. The current synthetic Ethereum-like tests model the topology and async structure of client workloads, but they are not yet full geth/prysm integration tests.
 
-The current Shadow checkpoint/restore system is a hybrid architecture in which CRIU restores native process images and Shadow replays simulation-specific semantics from a structured checkpoint format. The principal technical challenge is not merely serialization, but re-establishing the semantic bindings between restored native objects and restored simulation objects.
+## 11. Conclusion
 
-The recent work shows that explicit protocol metadata, descriptor-level snapshots, and object rebinding can substantially improve restore correctness without abandoning the existing architecture. The implementation now supports a materially broader class of network workloads than the original heuristic design, while remaining testable and incrementally refactorable.
+The current Shadow checkpoint/restore design remains hybrid, but it is now substantially more structured than the original heuristic implementation. The key technical lesson of this work is that correct restore depends less on replaying isolated objects than on restoring the surrounding semantic context in the correct order.
+
+Two principles emerged repeatedly:
+
+1. Make restore-relevant state explicit at checkpoint time.
+2. Restore containers first, then recreate objects, then rebind relationships.
+
+These principles guided the recovery of time semantics, epoll state, eventfd/timerfd-driven wakeups, and multi-process-per-host event loops. They also provide a concrete foundation for the next stage: moving from synthetic Ethereum-like workloads toward real geth and prysm checkpoint/restore experiments.

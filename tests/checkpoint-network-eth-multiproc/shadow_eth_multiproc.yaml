@@ -1,0 +1,84 @@
+# Ethereum-like multi-process-per-host checkpoint/restore test.
+# __APP_PATH__ is rendered by orchestrator_verify.py.
+
+general:
+  stop_time: 240s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: 1_gbit_switch
+
+hosts:
+  node-0:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          ROLE: execution-0
+          NODE_NAME: node-0
+          INTERVAL_SEC: "1"
+          EXEC_RPC_PORT: "8200"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: beacon-0
+          NODE_NAME: node-0
+          INTERVAL_SEC: "1"
+          EXEC_RPC_PORT: "8200"
+          BEACON_RPC_PORT: "4000"
+          P2P_PORT: "13000"
+          DISCOVERY_PORT: "12000"
+          P2P_PEERS: "beacon-1@node-1:13001"
+          UDP_PEERS: "beacon-1@node-1:12001"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 3s
+        expected_final_state: running
+        environment:
+          ROLE: validator-0
+          NODE_NAME: node-0
+          INTERVAL_SEC: "1"
+          BEACON_RPC_PORT: "4000"
+
+  node-1:
+    network_node_id: 0
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          ROLE: execution-1
+          NODE_NAME: node-1
+          INTERVAL_SEC: "1"
+          EXEC_RPC_PORT: "8201"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 2s
+        expected_final_state: running
+        environment:
+          ROLE: beacon-1
+          NODE_NAME: node-1
+          INTERVAL_SEC: "1"
+          EXEC_RPC_PORT: "8201"
+          BEACON_RPC_PORT: "4001"
+          P2P_PORT: "13001"
+          DISCOVERY_PORT: "12001"
+          P2P_PEERS: "beacon-0@node-0:13000"
+          UDP_PEERS: "beacon-0@node-0:12000"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 3s
+        expected_final_state: running
+        environment:
+          ROLE: validator-1
+          NODE_NAME: node-1
+          INTERVAL_SEC: "1"
+          BEACON_RPC_PORT: "4001"

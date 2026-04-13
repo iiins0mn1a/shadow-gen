@@ -37,7 +37,7 @@ pub struct SimulationCheckpoint {
 }
 
 impl SimulationCheckpoint {
-    pub const CURRENT_VERSION: u32 = 13;
+    pub const CURRENT_VERSION: u32 = 14;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -334,6 +334,10 @@ pub struct DescriptorEntrySnapshot {
     #[serde(default)]
     pub socket_runtime: Option<SocketRuntimeSnapshot>,
     #[serde(default)]
+    pub eventfd: Option<EventFdSnapshot>,
+    #[serde(default)]
+    pub timerfd: Option<TimerFdSnapshot>,
+    #[serde(default)]
     pub epoll_watches: Vec<EpollWatchSnapshot>,
 }
 
@@ -351,6 +355,22 @@ pub struct EpollWatchSnapshot {
     pub watched_canonical_handle: Option<u64>,
     pub interest_bits: u32,
     pub data: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventFdSnapshot {
+    pub counter: u64,
+    pub is_semaphore_mode: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimerFdSnapshot {
+    #[serde(default)]
+    pub remaining_ns: Option<u64>,
+    #[serde(default)]
+    pub interval_ns: Option<u64>,
+    #[serde(default)]
+    pub expiration_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

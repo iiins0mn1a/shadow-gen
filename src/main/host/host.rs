@@ -407,6 +407,28 @@ impl Host {
         restored_lock.max_runahead_time = max_runahead_time;
     }
 
+    pub fn restore_time_hint(&self) -> EmulatedTime {
+        let current = self
+            .shim_shmem()
+            .sim_time
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if current >= EmulatedTime::SIMULATION_START {
+            return current;
+        }
+
+        let restored = self.restored_shim_shmem.borrow();
+        if let Some(restored) = restored.as_ref() {
+            let restored_time = restored
+                .sim_time
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if restored_time >= EmulatedTime::SIMULATION_START {
+                return restored_time;
+            }
+        }
+
+        EmulatedTime::SIMULATION_START
+    }
+
     pub fn add_application(
         &self,
         start_time: SimulationTime,

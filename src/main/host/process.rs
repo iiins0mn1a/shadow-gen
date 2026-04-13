@@ -977,6 +977,25 @@ impl<'a> DescriptorRestoreContext<'a> {
                     &mut self.restored_open_files,
                 );
             }
+            DescriptorFileKind::EventFd => {
+                Process::recreate_eventfd_descriptor(
+                    self.table,
+                    self.checkpoint,
+                    descriptor,
+                    fd,
+                    &mut self.restored_open_files,
+                );
+            }
+            DescriptorFileKind::TimerFd => {
+                Process::recreate_timerfd_descriptor(
+                    self.host,
+                    self.table,
+                    self.checkpoint,
+                    descriptor,
+                    fd,
+                    &mut self.restored_open_files,
+                );
+            }
             _ => self.restore_existing_descriptor_or_stdio(descriptor, fd),
         }
     }
@@ -1839,6 +1858,8 @@ impl Process {
                     socket_peer_port,
                     socket_is_listening,
                     socket_runtime,
+                    eventfd,
+                    timerfd,
                     epoll_watches,
                 ) = match desc.file() {
                     crate::host::descriptor::CompatFile::Legacy(_) => {
@@ -1854,13 +1875,19 @@ impl Process {
                             None,
                             false,
                             None,
+                            None,
+                            None,
                             Vec::new(),
                         )
                     }
                     crate::host::descriptor::CompatFile::New(open_file) => {
-                        let file_ref = open_file.inner_file().borrow();
-                        let (
-                            socket_transport,
+                    let file_ref = open_file.inner_file().borrow();
+                    let descriptor_snapshot_time = host
+                        .shim_shmem()
+                        .sim_time
+                        .load(Ordering::Relaxed);
+                    let (
+                        socket_transport,
                             socket_implementation,
                             socket_local_ip,
                             socket_local_port,
@@ -1868,6 +1895,8 @@ impl Process {
                             socket_peer_port,
                             socket_is_listening,
                             socket_runtime,
+                            eventfd,
+                            timerfd,
                             epoll_watches,
                         ) =
                             match open_file.inner_file() {
@@ -1960,9 +1989,37 @@ impl Process {
                                             )),
                                             _ => None,
                                         },
+                                        None,
+                                        None,
                                         Vec::new(),
                                     )
                                 }
+                                crate::host::descriptor::File::EventFd(eventfd) => (
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                    None,
+                                    Some(eventfd.borrow().snapshot()),
+                                    None,
+                                    Vec::new(),
+                                ),
+                                crate::host::descriptor::File::TimerFd(timerfd) => (
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                    None,
+                                    None,
+                                    Some(timerfd.borrow().snapshot_at(descriptor_snapshot_time)),
+                                    Vec::new(),
+                                ),
                                 crate::host::descriptor::File::Epoll(epoll) => (
                                     None,
                                     None,
@@ -1971,6 +2028,8 @@ impl Process {
                                     None,
                                     None,
                                     false,
+                                    None,
+                                    None,
                                     None,
                                     epoll
                                         .borrow()
@@ -1989,7 +2048,19 @@ impl Process {
                                         })
                                         .collect(),
                                 ),
-                                _ => (None, None, None, None, None, None, false, None, Vec::new()),
+                                _ => (
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                    None,
+                                    None,
+                                    None,
+                                    Vec::new(),
+                                ),
                             };
                         let kind = match open_file.inner_file() {
                             crate::host::descriptor::File::Pipe(_) => DescriptorFileKind::Pipe,
@@ -2014,6 +2085,8 @@ impl Process {
                             socket_peer_port,
                             socket_is_listening,
                             socket_runtime,
+                            eventfd,
+                            timerfd,
                             epoll_watches,
                         )
                     }
@@ -2038,6 +2111,8 @@ impl Process {
                     socket_peer_port,
                     socket_is_listening,
                     socket_runtime,
+                    eventfd,
+                    timerfd,
                     epoll_watches,
                 }
             })
@@ -2053,6 +2128,58 @@ impl Process {
         restore_ctx.replay_all();
     }
 
+    fn restore_reused_open_file(
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &HashMap<u64, crate::host::descriptor::OpenFile>,
+        kind_name: &str,
+    ) -> bool {
+        let Some(canonical_handle) = d.canonical_handle else {
+            return false;
+        };
+        let Some(open_file) = restored_open_files.get(&canonical_handle).cloned() else {
+            return false;
+        };
+
+        let mut desc =
+            crate::host::descriptor::Descriptor::new(crate::host::descriptor::CompatFile::New(
+                open_file,
+            ));
+        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+            d.descriptor_flags_bits,
+        ));
+        let _ = table.register_descriptor_with_fd(desc, fd);
+        log::debug!(
+            "restore: reused restored {} open-file pid={} fd={} canonical_handle={}",
+            kind_name,
+            checkpoint.process_id,
+            d.fd,
+            canonical_handle
+        );
+        true
+    }
+
+    fn register_restored_open_file(
+        table: &mut DescriptorTable,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        open_file: crate::host::descriptor::OpenFile,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        if let Some(canonical_handle) = d.canonical_handle {
+            restored_open_files.insert(canonical_handle, open_file.clone());
+        }
+        let mut desc = crate::host::descriptor::Descriptor::new(
+            crate::host::descriptor::CompatFile::New(open_file),
+        );
+        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+            d.descriptor_flags_bits,
+        ));
+        let _ = table.register_descriptor_with_fd(desc, fd);
+    }
+
     fn recreate_socket_descriptor(
         host: &Host,
         table: &mut DescriptorTable,
@@ -2065,22 +2192,14 @@ impl Process {
         use crate::host::descriptor::socket::inet::{
             InetSocket, legacy_tcp::LegacyTcpSocket, tcp::TcpSocket, udp::UdpSocket,
         };
-        if let Some(canonical_handle) = d.canonical_handle
-            && let Some(open_file) = restored_open_files.get(&canonical_handle).cloned()
-        {
-            let mut desc = crate::host::descriptor::Descriptor::new(
-                crate::host::descriptor::CompatFile::New(open_file),
-            );
-            desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
-                d.descriptor_flags_bits,
-            ));
-            let _ = table.register_descriptor_with_fd(desc, fd);
-            log::debug!(
-                "restore: reused restored socket open-file pid={} fd={} canonical_handle={}",
-                checkpoint.process_id,
-                d.fd,
-                canonical_handle
-            );
+        if Self::restore_reused_open_file(
+            table,
+            checkpoint,
+            d,
+            fd,
+            restored_open_files,
+            "socket",
+        ) {
             return;
         }
         let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
@@ -2113,16 +2232,7 @@ impl Process {
         let open_file = crate::host::descriptor::OpenFile::new(
             crate::host::descriptor::File::Socket(socket.clone()),
         );
-        if let Some(canonical_handle) = d.canonical_handle {
-            restored_open_files.insert(canonical_handle, open_file.clone());
-        }
-        let mut desc = crate::host::descriptor::Descriptor::new(
-            crate::host::descriptor::CompatFile::New(open_file),
-        );
-        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
-            d.descriptor_flags_bits,
-        ));
-        let _ = table.register_descriptor_with_fd(desc, fd);
+        Self::register_restored_open_file(table, d, fd, open_file, restored_open_files);
 
         let local_addr = d
             .socket_local_ip
@@ -2278,6 +2388,86 @@ impl Process {
         );
     }
 
+    fn recreate_eventfd_descriptor(
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        use crate::host::descriptor::{File, OpenFile, eventfd::EventFd};
+
+        if Self::restore_reused_open_file(
+            table,
+            checkpoint,
+            d,
+            fd,
+            restored_open_files,
+            "eventfd",
+        ) {
+            return;
+        }
+
+        let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
+        let snapshot = d.eventfd.as_ref().cloned().unwrap_or_default();
+        let file = Arc::new(atomic_refcell::AtomicRefCell::new(EventFd::new(
+            snapshot.counter,
+            snapshot.is_semaphore_mode,
+            status,
+        )));
+        CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+            file.borrow_mut().restore_from_snapshot(&snapshot, cb_queue);
+        });
+        let open_file = OpenFile::new(File::EventFd(file));
+        Self::register_restored_open_file(table, d, fd, open_file, restored_open_files);
+        log::debug!(
+            "restore: recreated eventfd descriptor pid={} fd={} counter={} semaphore={}",
+            checkpoint.process_id,
+            d.fd,
+            snapshot.counter,
+            snapshot.is_semaphore_mode
+        );
+    }
+
+    fn recreate_timerfd_descriptor(
+        host: &Host,
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        use crate::host::descriptor::{File, OpenFile, timerfd::TimerFd};
+
+        if Self::restore_reused_open_file(
+            table,
+            checkpoint,
+            d,
+            fd,
+            restored_open_files,
+            "timerfd",
+        ) {
+            return;
+        }
+
+        let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
+        let snapshot = d.timerfd.as_ref().cloned().unwrap_or_default();
+        let file = TimerFd::new(status);
+        CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+            file.borrow_mut().restore_from_snapshot(host, &snapshot, cb_queue);
+        });
+        let open_file = OpenFile::new(File::TimerFd(file));
+        Self::register_restored_open_file(table, d, fd, open_file, restored_open_files);
+        log::debug!(
+            "restore: recreated timerfd descriptor pid={} fd={} remaining_ns={:?} interval_ns={:?} expiration_count={}",
+            checkpoint.process_id,
+            d.fd,
+            snapshot.remaining_ns,
+            snapshot.interval_ns,
+            snapshot.expiration_count
+        );
+    }
+
     fn recreate_epoll_descriptor(
         table: &mut DescriptorTable,
         checkpoint: &ProcessCheckpoint,
@@ -2285,22 +2475,16 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::{CompatFile, File, OpenFile};
+        use crate::host::descriptor::{File, OpenFile};
 
-        if let Some(canonical_handle) = d.canonical_handle
-            && let Some(open_file) = restored_open_files.get(&canonical_handle).cloned()
-        {
-            let mut desc = Descriptor::new(CompatFile::New(open_file));
-            desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
-                d.descriptor_flags_bits,
-            ));
-            let _ = table.register_descriptor_with_fd(desc, fd);
-            log::debug!(
-                "restore: reused restored epoll open-file pid={} fd={} canonical_handle={}",
-                checkpoint.process_id,
-                d.fd,
-                canonical_handle
-            );
+        if Self::restore_reused_open_file(
+            table,
+            checkpoint,
+            d,
+            fd,
+            restored_open_files,
+            "epoll",
+        ) {
             return;
         }
 
@@ -2308,14 +2492,7 @@ impl Process {
         open_file.inner_file().borrow_mut().set_status(
             crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits),
         );
-        let mut desc = Descriptor::new(CompatFile::New(open_file.clone()));
-        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
-            d.descriptor_flags_bits,
-        ));
-        let _ = table.register_descriptor_with_fd(desc, fd);
-        if let Some(canonical_handle) = d.canonical_handle {
-            restored_open_files.insert(canonical_handle, open_file.clone());
-        }
+        Self::register_restored_open_file(table, d, fd, open_file.clone(), restored_open_files);
         log::debug!(
             "restore: recreated epoll descriptor pid={} fd={} watches={}",
             checkpoint.process_id,
