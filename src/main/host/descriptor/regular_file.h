@@ -76,6 +76,9 @@ int regularfile_getShadowFlags(RegularFile* file);
 /* Get the type of file. */
 FileType regularfile_getType(RegularFile* file);
 
+/* Returns the absolute path recorded when the file was opened, if any. */
+const char* regularfile_getAbsPathAtOpen(RegularFile* file);
+
 /* Returns the linux-backed fd that shadow uses to perform the file operations.  */
 int regularfile_getOSBackedFD(RegularFile* file);
 

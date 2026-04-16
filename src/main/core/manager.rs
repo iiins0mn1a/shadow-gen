@@ -388,28 +388,34 @@ impl<'a> Manager<'a> {
         assert_eq!(cpus.len(), parallelism);
 
         // set the simulation's global state
-        worker::WORKER_SHARED
-            .borrow_mut()
-            .replace(worker::WorkerShared {
-                ip_assignment: manager_config.ip_assignment,
-                routing_info: manager_config.routing_info,
-                host_bandwidths: manager_config.host_bandwidths,
-                dns,
-                num_plugin_errors: AtomicU32::new(0),
-                status_logger_state: status_logger_state.map(Arc::clone),
-                runahead: Runahead::new(
-                    self.config.experimental.use_dynamic_runahead.unwrap(),
-                    smallest_latency,
-                    min_runahead_config,
-                ),
-                child_pid_watcher: ChildPidWatcher::new(),
-                event_queues: hosts
-                    .iter()
-                    .map(|x| (x.id(), x.event_queue().clone()))
-                    .collect(),
-                bootstrap_end_time,
-                sim_end_time: self.end_time,
-            });
+        let old_worker_shared = worker::WORKER_SHARED.borrow_mut().replace(worker::WorkerShared {
+            ip_assignment: manager_config.ip_assignment,
+            routing_info: manager_config.routing_info,
+            host_bandwidths: manager_config.host_bandwidths,
+            dns,
+            num_plugin_errors: AtomicU32::new(0),
+            status_logger_state: status_logger_state.map(Arc::clone),
+            runahead: Runahead::new(
+                self.config.experimental.use_dynamic_runahead.unwrap(),
+                smallest_latency,
+                min_runahead_config,
+            ),
+            child_pid_watcher: ChildPidWatcher::new(),
+            event_queues: hosts
+                .iter()
+                .map(|x| (x.id(), x.event_queue().clone()))
+                .collect(),
+            bootstrap_end_time,
+            sim_end_time: self.end_time,
+        });
+        if old_worker_shared.is_some() {
+            // In restart/restore flows, the previous simulation's global queues may still hold
+            // host-bound tasks whose Drop paths access HostTreePointer-backed state. They are
+            // dropped here on the main thread before any host is active.
+            worker::RESTART_TEARDOWN.store(true, Ordering::Relaxed);
+            drop(old_worker_shared);
+            worker::RESTART_TEARDOWN.store(false, Ordering::Relaxed);
+        }
 
         let mut restart_request: Option<(
             Option<u64>,
@@ -455,12 +461,15 @@ impl<'a> Manager<'a> {
                         .collect(),
                 );
                 let restore_protocol_mode = sim_checkpoint.restore_protocol.mode;
+                let checkpoint_time = EmulatedTime::SIMULATION_START
+                    + SimulationTime::from_nanos(sim_checkpoint.sim_time_ns);
                 let replay_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
                 scheduler.scope(|s| {
                     let checkpoints = Arc::clone(&checkpoints);
                     let replay_err = Arc::clone(&replay_err);
                     let restore_protocol_mode = restore_protocol_mode;
+                    let checkpoint_time = checkpoint_time;
                     s.run_with_hosts(move |_, hosts| {
                         for_each_host(hosts, |host| {
                             if replay_err.lock().unwrap().is_some() {
@@ -475,8 +484,12 @@ impl<'a> Manager<'a> {
                             };
 
                             host.lock_shmem();
-                            let apply_res =
-                                apply_host_checkpoint(host, checkpoint, restore_protocol_mode);
+                            let apply_res = apply_host_checkpoint(
+                                host,
+                                checkpoint,
+                                restore_protocol_mode,
+                                checkpoint_time,
+                            );
                             host.unlock_shmem();
 
                             if let Err(e) = apply_res {
@@ -491,6 +504,22 @@ impl<'a> Manager<'a> {
 
                 if let Some(err) = replay_err.lock().unwrap().take() {
                     anyhow::bail!("{err}");
+                }
+
+                for process_cp in sim_checkpoint
+                    .hosts
+                    .iter()
+                    .flat_map(|host| host.processes.iter())
+                    .filter(|process| process.is_running && process.native_pid > 1)
+                {
+                    let rc = unsafe { libc::kill(process_cp.native_pid, libc::SIGCONT) };
+                    if rc != 0 {
+                        anyhow::bail!(
+                            "failed to resume restored process pid {} with SIGCONT: {}",
+                            process_cp.native_pid,
+                            std::io::Error::last_os_error()
+                        );
+                    }
                 }
             }
 
@@ -756,6 +785,10 @@ impl<'a> Manager<'a> {
                     }
                     ControlDecision::RestoreCheckpoint { label } => {
                         log::info!("Restore requested: label={}", label);
+                        // The existing scheduler and its Hosts are about to be dropped on the
+                        // main thread while returning from `run()`. Allow HostTreePointer-backed
+                        // objects in the old simulation graph to tear down without an active host.
+                        worker::RESTART_TEARDOWN.store(true, Ordering::Relaxed);
                         return Ok(SimulationRunResult::RestoreRequested { label });
                     }
                 }
@@ -1122,9 +1155,25 @@ impl<'a> Manager<'a> {
         let checkpoint_base = self.data_path.join("checkpoints").join(label);
         let shmem_backup_dir = checkpoint_base.join("shmem");
         let criu_base_dir = checkpoint_base.join("criu");
+        let checkpoint_time =
+            EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(current_sim_time_ns);
 
         std::fs::create_dir_all(&checkpoint_base)
             .context("Failed to create checkpoint directory")?;
+
+        // Freeze the app-visible shim clock to the checkpoint cut before
+        // copying the /dev/shm files. Otherwise restore may resurrect a stale
+        // timestamp from an older execution slice.
+        scheduler.scope(|s| {
+            s.run_with_hosts(move |_, hosts| {
+                for_each_host(hosts, |host| {
+                    host.lock_shmem();
+                    let max_runahead_time = worker::Worker::max_event_runahead_time(host);
+                    host.set_shim_clock_state(checkpoint_time, max_runahead_time);
+                    host.unlock_shmem();
+                });
+            });
+        });
 
         // (1) SHMEM: copy MAP_SHARED backing files Shadow maps from /dev/shm into this checkpoint.
         // CRIU restore expects those files to exist; primary list from /proc/self/maps, else scan /dev/shm.
@@ -1386,6 +1435,16 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
                     runtime.pending_result = thread
                         .syscallhandler_borrow(host)
                         .pending_result_snapshot();
+                    if runtime.pending_result.is_none()
+                        && runtime.blocked_trigger_kind
+                            == Some(crate::core::checkpoint::snapshot_types::BlockedTriggerKindSnapshot::Futex)
+                    {
+                        runtime.pending_result = Some(
+                            crate::core::checkpoint::snapshot_types::PendingSyscallResultSnapshot::Done {
+                                retval_raw: 0,
+                            },
+                        );
+                    }
                     runtime.blocked_restore_action =
                         blocked_restore_action_for_runtime(&runtime);
                     ThreadCheckpoint {
@@ -1774,6 +1833,7 @@ fn apply_host_checkpoint(
     host: &Host,
     checkpoint: &HostCheckpoint,
     restore_protocol_mode: RestoreProtocolModeSnapshot,
+    checkpoint_time: EmulatedTime,
 ) -> anyhow::Result<()> {
     fn schedule_resume_process_task(
         host: &Host,
@@ -1810,10 +1870,8 @@ fn apply_host_checkpoint(
             )
         };
         host.attach_restored_shim_shmem(restored_shim_shmem);
-        let restored_now =
-            EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
-        host.mirror_restored_shim_clock_state(restored_now, restored_now);
     }
+    host.set_shim_clock_state(checkpoint_time, checkpoint_time);
 
     // Reinstall the serialized queue and host-global counters before rebuilding
     // process-local objects. Descriptor restore can schedule fresh local tasks
@@ -1877,6 +1935,14 @@ fn apply_host_checkpoint(
             let active_file_fd = runtime.blocked_active_file_fd;
             let poll_watches = runtime.poll_watches.clone();
             let blocked_restore_action = runtime.blocked_restore_action;
+            let blocked_trigger_kind = runtime.blocked_trigger_kind;
+            let epoll_triggered_rearm = trigger_fd.is_some_and(|trigger_fd| {
+                process_cp.descriptors.iter().any(|descriptor| {
+                    descriptor.fd == trigger_fd
+                        && descriptor.file_kind
+                            == crate::core::checkpoint::snapshot_types::DescriptorFileKind::Epoll
+                })
+            });
             if blocked_restore_action == BlockedSyscallRestoreActionSnapshot::None {
                 continue;
             }
@@ -1892,6 +1958,18 @@ fn apply_host_checkpoint(
                     tid,
                     replay_time + SimulationTime::NANOSECOND,
                 );
+                if blocked_trigger_kind
+                    == Some(crate::core::checkpoint::snapshot_types::BlockedTriggerKindSnapshot::Futex)
+                {
+                    for nudge_i in 0u64..5 {
+                        schedule_resume_process_task(
+                            host,
+                            process_id,
+                            tid,
+                            replay_time + SimulationTime::from_millis(1 + (25 * nudge_i)),
+                        );
+                    }
+                }
                 continue;
             }
             if !poll_watches.is_empty()
@@ -2011,6 +2089,19 @@ fn apply_host_checkpoint(
                 },
             );
             host.schedule_task_at_emulated_time(task, replay_time + SimulationTime::NANOSECOND);
+            if blocked_restore_action == BlockedSyscallRestoreActionSnapshot::RearmCondition
+                && epoll_triggered_rearm
+            {
+                for nudge_i in 0u64..5 {
+                    schedule_resume_process_task(
+                        host,
+                        process_id,
+                        tid,
+                        replay_time
+                            + SimulationTime::from_millis(1 + (25 * nudge_i)),
+                    );
+                }
+            }
         }
     }
     let strict_runtime_restore = env_flag("SHADOW_STRICT_RUNTIME_RESTORE");
@@ -2850,6 +2941,7 @@ mod tests {
             &restored,
             &snapshot,
             RestoreProtocolModeSnapshot::LegacyHeuristic,
+            EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(snapshot.cpu_now_ns),
         )
         .unwrap();
         let restored_snapshot = snapshot_host(&restored);
@@ -2891,6 +2983,7 @@ mod tests {
             &restored,
             &snapshot,
             RestoreProtocolModeSnapshot::LegacyHeuristic,
+            EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(snapshot.cpu_now_ns),
         )
         .unwrap();
 

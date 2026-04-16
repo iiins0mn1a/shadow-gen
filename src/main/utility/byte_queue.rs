@@ -300,6 +300,25 @@ impl ByteQueue {
         Some((bytes.into(), chunk_type))
     }
 
+    pub fn snapshot_chunks(&self) -> Vec<(Vec<u8>, ChunkType)> {
+        self.bytes
+            .iter()
+            .map(|chunk| (chunk.data.as_ref().to_vec(), chunk.chunk_type))
+            .collect()
+    }
+
+    pub fn replace_with_chunks(
+        &mut self,
+        chunks: impl IntoIterator<Item = (Vec<u8>, ChunkType)>,
+    ) {
+        self.bytes.clear();
+        self.unused_buffer = None;
+        self.length = 0;
+        for (data, chunk_type) in chunks {
+            self.push_chunk(Bytes::from(data), chunk_type);
+        }
+    }
+
     /// Peek data from the queue. Only a single type of data will be peeked per invocation.
     /// Zero-length packets may be returned. If packet data is returned but `dst` did not have
     /// enough space, the packet written to `dst` will be truncated. Returns a tuple containing the

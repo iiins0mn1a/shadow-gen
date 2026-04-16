@@ -37,7 +37,7 @@ pub struct SimulationCheckpoint {
 }
 
 impl SimulationCheckpoint {
-    pub const CURRENT_VERSION: u32 = 14;
+    pub const CURRENT_VERSION: u32 = 16;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -338,6 +338,12 @@ pub struct DescriptorEntrySnapshot {
     #[serde(default)]
     pub timerfd: Option<TimerFdSnapshot>,
     #[serde(default)]
+    pub pipe: Option<PipeSnapshot>,
+    #[serde(default)]
+    pub unix_socket: Option<UnixSocketSnapshot>,
+    #[serde(default)]
+    pub legacy_regular_file: Option<LegacyRegularFileSnapshot>,
+    #[serde(default)]
     pub epoll_watches: Vec<EpollWatchSnapshot>,
 }
 
@@ -371,6 +377,89 @@ pub struct TimerFdSnapshot {
     pub interval_ns: Option<u64>,
     #[serde(default)]
     pub expiration_count: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipeSnapshot {
+    #[serde(default)]
+    pub shared_buffer_handle: Option<u64>,
+    #[serde(default)]
+    pub shared_buffer: Option<SharedBufSnapshot>,
+    #[serde(default)]
+    pub write_mode: PipeWriteModeSnapshot,
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PipeWriteModeSnapshot {
+    #[default]
+    Stream,
+    Packet,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnixSocketSnapshot {
+    #[serde(default)]
+    pub socket_handle: u64,
+    #[serde(default)]
+    pub peer_handle: Option<u64>,
+    #[serde(default)]
+    pub socket_type: UnixSocketTypeSnapshot,
+    #[serde(default)]
+    pub restore_kind: UnixSocketRestoreKindSnapshot,
+    #[serde(default)]
+    pub send_limit: u64,
+    #[serde(default)]
+    pub sent_len: u64,
+    #[serde(default)]
+    pub recv_buffer: Option<SharedBufSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyRegularFileSnapshot {
+    #[serde(default)]
+    pub abs_path: Option<String>,
+    #[serde(default)]
+    pub flags_at_open: i32,
+    #[serde(default)]
+    pub mode_at_open: u32,
+    #[serde(default)]
+    pub shadow_flags: i32,
+    #[serde(default)]
+    pub file_offset: Option<i64>,
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnixSocketTypeSnapshot {
+    #[default]
+    Stream,
+    Dgram,
+    SeqPacket,
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnixSocketRestoreKindSnapshot {
+    #[default]
+    Unsupported,
+    ConnectedUnnamedPair,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedBufSnapshot {
+    pub max_len: usize,
+    #[serde(default)]
+    pub chunks: Vec<SharedBufChunkSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedBufChunkSnapshot {
+    pub chunk_type: SharedBufChunkTypeSnapshot,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SharedBufChunkTypeSnapshot {
+    Stream,
+    Packet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

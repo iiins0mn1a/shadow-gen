@@ -3,7 +3,11 @@
 
 use linux_api::errno::Errno;
 
+use crate::core::checkpoint::snapshot_types::{
+    SharedBufChunkSnapshot, SharedBufChunkTypeSnapshot, SharedBufSnapshot,
+};
 use crate::utility::byte_queue::ByteQueue;
+use crate::utility::byte_queue::ChunkType;
 use crate::utility::callback_queue::{CallbackQueue, EventSource, Handle};
 
 pub struct SharedBuf {
@@ -34,6 +38,46 @@ impl SharedBuf {
 
     pub fn max_len(&self) -> usize {
         self.max_len
+    }
+
+    pub fn snapshot(&self) -> SharedBufSnapshot {
+        SharedBufSnapshot {
+            max_len: self.max_len,
+            chunks: self
+                .queue
+                .snapshot_chunks()
+                .into_iter()
+                .map(|(data, chunk_type)| SharedBufChunkSnapshot {
+                    chunk_type: match chunk_type {
+                        ChunkType::Stream => SharedBufChunkTypeSnapshot::Stream,
+                        ChunkType::Packet => SharedBufChunkTypeSnapshot::Packet,
+                    },
+                    data,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &SharedBufSnapshot) -> Self {
+        let mut buffer = Self::new(std::cmp::max(snapshot.max_len, 1));
+        buffer.restore_from_snapshot(snapshot, &mut CallbackQueue::new());
+        buffer
+    }
+
+    pub fn restore_from_snapshot(
+        &mut self,
+        snapshot: &SharedBufSnapshot,
+        cb_queue: &mut CallbackQueue,
+    ) {
+        self.max_len = std::cmp::max(snapshot.max_len, 1);
+        self.queue.replace_with_chunks(snapshot.chunks.iter().map(|chunk| {
+            let chunk_type = match chunk.chunk_type {
+                SharedBufChunkTypeSnapshot::Stream => ChunkType::Stream,
+                SharedBufChunkTypeSnapshot::Packet => ChunkType::Packet,
+            };
+            (chunk.data.clone(), chunk_type)
+        }));
+        self.refresh_state(BufferSignals::empty(), cb_queue);
     }
 
     pub fn space_available(&self) -> usize {

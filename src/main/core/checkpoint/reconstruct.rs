@@ -192,11 +192,24 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
         TaskDescriptor::Opaque { description } => {
             let description = description.clone();
             Some(TaskRef::new_with_descriptor(
-                move |_host| {
+                move |host| {
                     log::warn!(
-                        "Replayed opaque task as no-op during restore: {}",
+                        "Replayed opaque task via compatibility wakeup during restore: {}",
                         description
                     );
+                    let to_resume: Vec<_> = host
+                        .processes_borrow()
+                        .iter()
+                        .filter_map(|(pid, process_rc)| {
+                            let process = process_rc.borrow(host.root());
+                            process
+                                .is_running()
+                                .then_some((*pid, process.thread_group_leader_id()))
+                        })
+                        .collect();
+                    for (pid, tid) in to_resume {
+                        host.resume(pid, tid);
+                    }
                 },
                 desc.clone(),
             ))

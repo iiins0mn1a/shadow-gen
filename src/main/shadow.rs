@@ -284,6 +284,11 @@ pub fn run_shadow(args: Vec<&OsStr>) -> anyhow::Result<()> {
                 continue;
             }
             SimulationRunResult::RestoreRequested { label } => {
+                // `Manager::run()` enables restart-teardown mode before returning so the old
+                // scheduler graph can be dropped without an active host. Reset it before loading
+                // the restored checkpoint and starting the next simulation instance.
+                crate::core::worker::RESTART_TEARDOWN
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 log::info!("Restore from checkpoint '{}' requested", label);
 
                 let data_dir = shadow_config.general.data_directory.as_ref().unwrap();

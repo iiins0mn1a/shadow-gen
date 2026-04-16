@@ -27,4 +27,5 @@ const ShimShmemManager* shim_managerSharedMem();
 void _shim_parent_init_preload();
 void _shim_child_thread_init_preload();
 void _shim_child_process_init_preload();
+void _shim_repatch_vdso();
 #endif // SHD_SHIM_SHIM_H_

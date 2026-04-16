@@ -1,0 +1,249 @@
+# High-fidelity Ethereum-like checkpoint/restore test derived from shadow-ethereum/shadow.yaml.
+# __APP_PATH__ and __SHARED_DIR__ are rendered by orchestrator_verify.py.
+
+general:
+  stop_time: 240s
+  data_directory: ./shadow.data
+  log_level: info
+
+network:
+  graph:
+    type: gml
+    inline: |
+      graph [
+        directed 0
+        node [
+          id 0
+          host_bandwidth_up "1000 Gbit"
+          host_bandwidth_down "1000 Gbit"
+        ]
+        edge [
+          source 0
+          target 0
+          latency "100 ms"
+          packet_loss 0.0
+        ]
+      ]
+
+hosts:
+  geth-node:
+    network_node_id: 0
+    ip_addr: 11.0.2.10
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 1s
+        expected_final_state: running
+        environment:
+          ROLE: geth-node
+          HOST_IP: 11.0.2.10
+          INTERVAL_SEC: "1"
+          AUTHRPC_PORT: "8200"
+          HTTP_PORT: "8000"
+          WS_PORT: "8100"
+          METRICS_PORT: "8300"
+          P2P_PORT: "8400"
+
+  prysm-beacon-1:
+    network_node_id: 0
+    ip_addr: 11.0.0.0
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 5s
+        expected_final_state: running
+        environment:
+          ROLE: beacon-1
+          HOST_IP: 11.0.0.0
+          INTERVAL_SEC: "1"
+          EXEC_HOST_IP: 11.0.2.10
+          EXEC_AUTHRPC_PORT: "8200"
+          RPC_PORT: "4000"
+          GRPC_PORT: "4100"
+          P2P_TCP_PORT: "4200"
+          P2P_UDP_PORT: "4300"
+          MON_PORT: "4400"
+          MAX_PEER_FANOUT: "3"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-1.addr"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 6s
+        expected_final_state: running
+        environment:
+          ROLE: recorder-1
+          HOST_IP: 11.0.0.0
+          INTERVAL_SEC: "1"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-1.addr"
+
+  prysm-validator-1:
+    network_node_id: 0
+    ip_addr: 11.0.1.0
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 7s
+        expected_final_state: running
+        environment:
+          ROLE: validator-1
+          HOST_IP: 11.0.1.0
+          BEACON_HOST_IP: 11.0.0.0
+          BEACON_RPC_PORT: "4000"
+          INTERVAL_SEC: "1"
+          RPC_PORT: "7000"
+          GRPC_PORT: "7100"
+          MON_PORT: "7200"
+
+  prysm-beacon-2:
+    network_node_id: 0
+    ip_addr: 11.0.0.1
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 8s
+        expected_final_state: running
+        environment:
+          ROLE: beacon-2
+          HOST_IP: 11.0.0.1
+          INTERVAL_SEC: "1"
+          EXEC_HOST_IP: 11.0.2.10
+          EXEC_AUTHRPC_PORT: "8200"
+          RPC_PORT: "4001"
+          GRPC_PORT: "4101"
+          P2P_TCP_PORT: "4201"
+          P2P_UDP_PORT: "4301"
+          MON_PORT: "4401"
+          MAX_PEER_FANOUT: "3"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-2.addr"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 9s
+        expected_final_state: running
+        environment:
+          ROLE: recorder-2
+          HOST_IP: 11.0.0.1
+          INTERVAL_SEC: "1"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-2.addr"
+
+  prysm-validator-2:
+    network_node_id: 0
+    ip_addr: 11.0.1.1
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 10s
+        expected_final_state: running
+        environment:
+          ROLE: validator-2
+          HOST_IP: 11.0.1.1
+          BEACON_HOST_IP: 11.0.0.1
+          BEACON_RPC_PORT: "4001"
+          INTERVAL_SEC: "1"
+          RPC_PORT: "7000"
+          GRPC_PORT: "7100"
+          MON_PORT: "7200"
+
+  prysm-beacon-3:
+    network_node_id: 0
+    ip_addr: 11.0.0.2
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 11s
+        expected_final_state: running
+        environment:
+          ROLE: beacon-3
+          HOST_IP: 11.0.0.2
+          INTERVAL_SEC: "1"
+          EXEC_HOST_IP: 11.0.2.10
+          EXEC_AUTHRPC_PORT: "8200"
+          RPC_PORT: "4002"
+          GRPC_PORT: "4102"
+          P2P_TCP_PORT: "4202"
+          P2P_UDP_PORT: "4302"
+          MON_PORT: "4402"
+          MAX_PEER_FANOUT: "3"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-3.addr"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 12s
+        expected_final_state: running
+        environment:
+          ROLE: recorder-3
+          HOST_IP: 11.0.0.2
+          INTERVAL_SEC: "1"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-3.addr"
+
+  prysm-validator-3:
+    network_node_id: 0
+    ip_addr: 11.0.1.2
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 13s
+        expected_final_state: running
+        environment:
+          ROLE: validator-3
+          HOST_IP: 11.0.1.2
+          BEACON_HOST_IP: 11.0.0.2
+          BEACON_RPC_PORT: "4002"
+          INTERVAL_SEC: "1"
+          RPC_PORT: "7000"
+          GRPC_PORT: "7100"
+          MON_PORT: "7200"
+
+  prysm-beacon-4:
+    network_node_id: 0
+    ip_addr: 11.0.0.3
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 14s
+        expected_final_state: running
+        environment:
+          ROLE: beacon-4
+          HOST_IP: 11.0.0.3
+          INTERVAL_SEC: "1"
+          EXEC_HOST_IP: 11.0.2.10
+          EXEC_AUTHRPC_PORT: "8200"
+          RPC_PORT: "4003"
+          GRPC_PORT: "4103"
+          P2P_TCP_PORT: "4203"
+          P2P_UDP_PORT: "4303"
+          MON_PORT: "4403"
+          MAX_PEER_FANOUT: "3"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-4.addr"
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 15s
+        expected_final_state: running
+        environment:
+          ROLE: recorder-4
+          HOST_IP: 11.0.0.3
+          INTERVAL_SEC: "1"
+          COMMON_PEER_FILE: "__SHARED_DIR__/beacon_peers.txt"
+          PUBLISH_PEER_FILE: "__SHARED_DIR__/published/beacon-4.addr"
+
+  prysm-validator-4:
+    network_node_id: 0
+    ip_addr: 11.0.1.3
+    processes:
+      - path: /usr/bin/python3
+        args: __APP_PATH__
+        start_time: 16s
+        expected_final_state: running
+        environment:
+          ROLE: validator-4
+          HOST_IP: 11.0.1.3
+          BEACON_HOST_IP: 11.0.0.3
+          BEACON_RPC_PORT: "4003"
+          INTERVAL_SEC: "1"
+          RPC_PORT: "7000"
+          GRPC_PORT: "7100"
+          MON_PORT: "7200"

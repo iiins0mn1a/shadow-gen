@@ -11,6 +11,9 @@ use nix::sys::socket::MsgFlags;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
 use crate::cshadow as c;
+use crate::core::checkpoint::snapshot_types::{
+    UnixSocketRestoreKindSnapshot, UnixSocketSnapshot, UnixSocketTypeSnapshot,
+};
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::shared_buf::{
     BufferHandle, BufferSignals, BufferState, ReaderHandle, SharedBuf, WriterHandle,
@@ -454,6 +457,41 @@ impl UnixSocket {
         }
 
         (socket_1, socket_2)
+    }
+
+    pub fn snapshot(&self) -> Option<UnixSocketSnapshot> {
+        let ProtocolState::ConnOrientedConnected(Some(state)) = &self.protocol_state else {
+            return None;
+        };
+        Some(UnixSocketSnapshot {
+            socket_handle: self as *const Self as usize as u64,
+            peer_handle: Some(Arc::as_ptr(&state.peer) as usize as u64),
+            socket_type: match self.common.socket_type {
+                UnixSocketType::Stream => UnixSocketTypeSnapshot::Stream,
+                UnixSocketType::Dgram => UnixSocketTypeSnapshot::Dgram,
+                UnixSocketType::SeqPacket => UnixSocketTypeSnapshot::SeqPacket,
+            },
+            restore_kind: UnixSocketRestoreKindSnapshot::ConnectedUnnamedPair,
+            send_limit: self.common.send_limit,
+            sent_len: self.common.sent_len,
+            recv_buffer: Some(self.common.recv_buffer.borrow().snapshot()),
+        })
+    }
+
+    pub fn restore_connected_unnamed_snapshot(
+        &mut self,
+        snapshot: &UnixSocketSnapshot,
+        cb_queue: &mut CallbackQueue,
+    ) {
+        self.common.send_limit = snapshot.send_limit;
+        self.common.sent_len = snapshot.sent_len;
+        if let Some(recv_buffer) = snapshot.recv_buffer.as_ref() {
+            self.common
+                .recv_buffer
+                .borrow_mut()
+                .restore_from_snapshot(recv_buffer, cb_queue);
+        }
+        self.refresh_file_state(FileSignals::empty(), cb_queue);
     }
 
     pub fn add_listener(

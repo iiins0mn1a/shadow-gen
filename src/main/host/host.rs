@@ -383,6 +383,21 @@ impl Host {
         *self.restored_shim_shmem.borrow_mut() = Some(shim_shmem);
     }
 
+    pub fn set_shim_clock_state(
+        &self,
+        sim_time: EmulatedTime,
+        max_runahead_time: EmulatedTime,
+    ) {
+        self.shim_shmem()
+            .sim_time
+            .store(sim_time, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mut host_lock) = self.shim_shmem_lock_borrow_mut() {
+            host_lock.max_runahead_time = max_runahead_time;
+        }
+
+        self.mirror_restored_shim_clock_state(sim_time, max_runahead_time);
+    }
+
     pub fn mirror_restored_shim_clock_state(
         &self,
         sim_time: EmulatedTime,

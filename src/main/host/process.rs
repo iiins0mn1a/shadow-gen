@@ -49,7 +49,7 @@ use super::timer::Timer;
 use crate::core::checkpoint::ipc_rebuild;
 use crate::core::checkpoint::snapshot_types::{
     DescriptorEntrySnapshot, DescriptorFileKind, DescriptorSocketTransport, EpollWatchSnapshot,
-    ProcessCheckpoint, SocketRuntimeSnapshot, TaskDescriptor,
+    LegacyRegularFileSnapshot, ProcessCheckpoint, SocketRuntimeSnapshot, TaskDescriptor,
 };
 use crate::core::configuration::{ProcessFinalState, RunningVal};
 use crate::core::work::task::TaskRef;
@@ -928,6 +928,10 @@ struct DescriptorRestoreContext<'a> {
     table: &'a mut DescriptorTable,
     checkpoint: &'a ProcessCheckpoint,
     restored_open_files: HashMap<u64, crate::host::descriptor::OpenFile>,
+    restored_pipe_buffers:
+        HashMap<u64, Arc<atomic_refcell::AtomicRefCell<crate::host::descriptor::shared_buf::SharedBuf>>>,
+    unix_snapshots_by_handle: HashMap<u64, &'a DescriptorEntrySnapshot>,
+    restored_unix_socket_files: HashMap<u64, crate::host::descriptor::OpenFile>,
     rebound_epolls: HashSet<u64>,
 }
 
@@ -937,11 +941,22 @@ impl<'a> DescriptorRestoreContext<'a> {
         table: &'a mut DescriptorTable,
         checkpoint: &'a ProcessCheckpoint,
     ) -> Self {
+        let unix_snapshots_by_handle = checkpoint
+            .descriptors
+            .iter()
+            .filter_map(|descriptor| {
+                let snapshot = descriptor.unix_socket.as_ref()?;
+                (snapshot.socket_handle != 0).then_some((snapshot.socket_handle, descriptor))
+            })
+            .collect();
         Self {
             host,
             table,
             checkpoint,
             restored_open_files: HashMap::new(),
+            restored_pipe_buffers: HashMap::new(),
+            unix_snapshots_by_handle,
+            restored_unix_socket_files: HashMap::new(),
             rebound_epolls: HashSet::new(),
         }
     }
@@ -958,15 +973,43 @@ impl<'a> DescriptorRestoreContext<'a> {
             return;
         };
         match descriptor.file_kind {
+            DescriptorFileKind::Legacy => {
+                if descriptor.fd <= 2 {
+                    self.restore_existing_descriptor_or_stdio(descriptor, fd);
+                } else {
+                    Process::recreate_legacy_descriptor(
+                        self.table,
+                        self.checkpoint,
+                        descriptor,
+                        fd,
+                    );
+                }
+            }
             DescriptorFileKind::Socket => {
-                Process::recreate_socket_descriptor(
-                    self.host,
-                    self.table,
-                    self.checkpoint,
-                    descriptor,
-                    fd,
-                    &mut self.restored_open_files,
-                );
+                if matches!(
+                    descriptor.socket_transport,
+                    Some(DescriptorSocketTransport::Unix)
+                ) {
+                    Process::recreate_unix_socket_descriptor(
+                        self.host,
+                        self.table,
+                        self.checkpoint,
+                        descriptor,
+                        fd,
+                        &mut self.restored_open_files,
+                        &self.unix_snapshots_by_handle,
+                        &mut self.restored_unix_socket_files,
+                    );
+                } else {
+                    Process::recreate_socket_descriptor(
+                        self.host,
+                        self.table,
+                        self.checkpoint,
+                        descriptor,
+                        fd,
+                        &mut self.restored_open_files,
+                    );
+                }
             }
             DescriptorFileKind::Epoll => {
                 Process::recreate_epoll_descriptor(
@@ -996,7 +1039,17 @@ impl<'a> DescriptorRestoreContext<'a> {
                     &mut self.restored_open_files,
                 );
             }
-            _ => self.restore_existing_descriptor_or_stdio(descriptor, fd),
+            DescriptorFileKind::Pipe => {
+                Process::recreate_pipe_descriptor(
+                    self.table,
+                    self.checkpoint,
+                    descriptor,
+                    fd,
+                    &mut self.restored_open_files,
+                    &mut self.restored_pipe_buffers,
+                );
+            }
+            DescriptorFileKind::Unknown => self.restore_existing_descriptor_or_stdio(descriptor, fd),
         }
     }
 
@@ -1717,6 +1770,45 @@ impl Process {
         );
     }
 
+    fn snapshot_legacy_regular_file(
+        legacy_file: *mut cshadow::LegacyFile,
+    ) -> Option<LegacyRegularFileSnapshot> {
+        if legacy_file.is_null() {
+            return None;
+        }
+        if unsafe { cshadow::legacyfile_getType(legacy_file) } != cshadow::_LegacyFileType_DT_FILE {
+            return None;
+        }
+
+        let regular_file = legacy_file.cast::<cshadow::RegularFile>();
+        let abs_path = unsafe { cshadow::regularfile_getAbsPathAtOpen(regular_file) };
+        if abs_path.is_null() {
+            return None;
+        }
+        let abs_path = unsafe { CStr::from_ptr(abs_path) }
+            .to_str()
+            .ok()
+            .map(str::to_owned)?;
+
+        let flags_at_open = unsafe { cshadow::regularfile_getFlagsAtOpen(regular_file) };
+        let shadow_flags = unsafe { cshadow::regularfile_getShadowFlags(regular_file) };
+        let mode_at_open = unsafe { cshadow::regularfile_getModeAtOpen(regular_file) } as u32;
+        let os_fd = unsafe { cshadow::regularfile_getOSBackedFD(regular_file) };
+        let file_offset = (os_fd >= 0).then(|| unsafe { libc::lseek(os_fd, 0, libc::SEEK_CUR) });
+        let file_offset = match file_offset {
+            Some(offset) if offset >= 0 => Some(offset),
+            _ => None,
+        };
+
+        Some(LegacyRegularFileSnapshot {
+            abs_path: Some(abs_path),
+            flags_at_open,
+            mode_at_open,
+            shadow_flags,
+            file_offset,
+        })
+    }
+
     // Needed during early init, before `Self` is created.
     fn static_output_file_name(file_basename: &Path, extension: &str) -> PathBuf {
         let mut path = file_basename.to_owned().into_os_string();
@@ -1850,6 +1942,7 @@ impl Process {
                     kind,
                     status_bits,
                     mode_bits,
+                    legacy_regular_file,
                     socket_transport,
                     socket_implementation,
                     socket_local_ip,
@@ -1860,13 +1953,17 @@ impl Process {
                     socket_runtime,
                     eventfd,
                     timerfd,
+                    pipe,
+                    unix_socket,
                     epoll_watches,
                 ) = match desc.file() {
-                    crate::host::descriptor::CompatFile::Legacy(_) => {
+                    crate::host::descriptor::CompatFile::Legacy(file) => {
+                        let legacy_regular_file = Self::snapshot_legacy_regular_file(file.ptr());
                         (
                             DescriptorFileKind::Legacy,
                             0,
                             0,
+                            legacy_regular_file,
                             None,
                             None,
                             None,
@@ -1874,6 +1971,8 @@ impl Process {
                             None,
                             None,
                             false,
+                            None,
+                            None,
                             None,
                             None,
                             None,
@@ -1897,6 +1996,8 @@ impl Process {
                             socket_runtime,
                             eventfd,
                             timerfd,
+                            pipe,
+                            unix_socket,
                             epoll_watches,
                         ) =
                             match open_file.inner_file() {
@@ -1991,9 +2092,31 @@ impl Process {
                                         },
                                         None,
                                         None,
+                                        None,
+                                        match socket {
+                                            crate::host::descriptor::socket::Socket::Unix(unix_socket) => {
+                                                unix_socket.borrow().snapshot()
+                                            }
+                                            _ => None,
+                                        },
                                         Vec::new(),
                                     )
                                 }
+                                crate::host::descriptor::File::Pipe(pipe) => (
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                    None,
+                                    None,
+                                    None,
+                                    Some(pipe.borrow().snapshot()),
+                                    None,
+                                    Vec::new(),
+                                ),
                                 crate::host::descriptor::File::EventFd(eventfd) => (
                                     None,
                                     None,
@@ -2004,6 +2127,8 @@ impl Process {
                                     false,
                                     None,
                                     Some(eventfd.borrow().snapshot()),
+                                    None,
+                                    None,
                                     None,
                                     Vec::new(),
                                 ),
@@ -2018,6 +2143,8 @@ impl Process {
                                     None,
                                     None,
                                     Some(timerfd.borrow().snapshot_at(descriptor_snapshot_time)),
+                                    None,
+                                    None,
                                     Vec::new(),
                                 ),
                                 crate::host::descriptor::File::Epoll(epoll) => (
@@ -2028,6 +2155,8 @@ impl Process {
                                     None,
                                     None,
                                     false,
+                                    None,
+                                    None,
                                     None,
                                     None,
                                     None,
@@ -2059,6 +2188,8 @@ impl Process {
                                     None,
                                     None,
                                     None,
+                                    None,
+                                    None,
                                     Vec::new(),
                                 ),
                             };
@@ -2077,6 +2208,7 @@ impl Process {
                             kind,
                             file_ref.status().bits(),
                             file_ref.mode().bits(),
+                            None,
                             socket_transport,
                             socket_implementation,
                             socket_local_ip,
@@ -2087,6 +2219,8 @@ impl Process {
                             socket_runtime,
                             eventfd,
                             timerfd,
+                            pipe,
+                            unix_socket,
                             epoll_watches,
                         )
                     }
@@ -2113,6 +2247,9 @@ impl Process {
                     socket_runtime,
                     eventfd,
                     timerfd,
+                    pipe,
+                    unix_socket,
+                    legacy_regular_file,
                     epoll_watches,
                 }
             })
@@ -2178,6 +2315,291 @@ impl Process {
             d.descriptor_flags_bits,
         ));
         let _ = table.register_descriptor_with_fd(desc, fd);
+    }
+
+    fn recreate_legacy_descriptor(
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+    ) {
+        let Some(snapshot) = d.legacy_regular_file.as_ref() else {
+            return;
+        };
+        let Some(abs_path) = snapshot.abs_path.as_ref() else {
+            return;
+        };
+        let cwd = match rustix::process::getcwd(Vec::new()) {
+            Ok(cwd) => cwd,
+            Err(err) => {
+                log::warn!(
+                    "restore: failed to get cwd for legacy regular file pid={} fd={} err={}",
+                    checkpoint.process_id,
+                    d.fd,
+                    err
+                );
+                return;
+            }
+        };
+        let path = match CString::new(abs_path.as_str()) {
+            Ok(path) => path,
+            Err(_) => {
+                log::warn!(
+                    "restore: legacy regular file path contains interior NUL pid={} fd={} path={:?}",
+                    checkpoint.process_id,
+                    d.fd,
+                    abs_path
+                );
+                return;
+            }
+        };
+
+        let regular_file = unsafe { cshadow::regularfile_new() };
+        let reopen_unsafe_flags = libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC;
+        let open_flags = (snapshot.flags_at_open & !reopen_unsafe_flags) | snapshot.shadow_flags;
+        let open_result = unsafe {
+            cshadow::regularfile_open(
+                regular_file,
+                path.as_ptr(),
+                open_flags,
+                snapshot.mode_at_open as libc::mode_t,
+                cwd.as_ptr(),
+            )
+        };
+        if open_result != 0 {
+            log::warn!(
+                "restore: failed to reopen legacy regular file pid={} fd={} path='{}' err={}",
+                checkpoint.process_id,
+                d.fd,
+                abs_path,
+                -open_result
+            );
+            unsafe { cshadow::legacyfile_unref(regular_file.cast::<c_void>()) };
+            return;
+        }
+
+        if let Some(offset) = snapshot.file_offset {
+            let os_fd = unsafe { cshadow::regularfile_getOSBackedFD(regular_file) };
+            if os_fd >= 0 {
+                let seek_rv = unsafe { libc::lseek(os_fd, offset as libc::off_t, libc::SEEK_SET) };
+                if seek_rv < 0 {
+                    let errno = std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EINVAL);
+                    log::warn!(
+                        "restore: failed to seek legacy regular file pid={} fd={} path='{}' offset={} errno={}",
+                        checkpoint.process_id,
+                        d.fd,
+                        abs_path,
+                        offset,
+                        errno
+                    );
+                }
+            }
+        }
+
+        let mut desc = unsafe {
+            Descriptor::from_legacy_file(
+                regular_file as *mut cshadow::LegacyFile,
+                linux_api::fcntl::OFlag::empty(),
+            )
+        };
+        desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
+            d.descriptor_flags_bits,
+        ));
+        let _ = table.register_descriptor_with_fd(desc, fd);
+        log::debug!(
+            "restore: recreated legacy regular file pid={} fd={} path='{}' offset={:?}",
+            checkpoint.process_id,
+            d.fd,
+            abs_path,
+            snapshot.file_offset
+        );
+    }
+
+    fn recreate_pipe_descriptor(
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+        restored_pipe_buffers: &mut HashMap<
+            u64,
+            Arc<atomic_refcell::AtomicRefCell<crate::host::descriptor::shared_buf::SharedBuf>>,
+        >,
+    ) {
+        use crate::host::descriptor::pipe::Pipe;
+        use crate::host::descriptor::shared_buf::SharedBuf;
+        use crate::host::descriptor::{File, FileMode, OpenFile};
+
+        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "pipe") {
+            return;
+        }
+
+        let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
+        let mode = FileMode::from_bits_truncate(d.file_mode_bits);
+        let snapshot = d.pipe.as_ref().cloned().unwrap_or_default();
+        let buffer = snapshot
+            .shared_buffer_handle
+            .and_then(|handle| restored_pipe_buffers.get(&handle).cloned())
+            .unwrap_or_else(|| {
+                let buf_snapshot = snapshot.shared_buffer.clone().unwrap_or_default();
+                let max_len = std::cmp::max(buf_snapshot.max_len, cshadow::CONFIG_PIPE_BUFFER_SIZE as usize);
+                let buffer = Arc::new(atomic_refcell::AtomicRefCell::new(SharedBuf::from_snapshot(
+                    &crate::core::checkpoint::snapshot_types::SharedBufSnapshot {
+                        max_len,
+                        ..buf_snapshot
+                    },
+                )));
+                if let Some(handle) = snapshot.shared_buffer_handle {
+                    restored_pipe_buffers.insert(handle, Arc::clone(&buffer));
+                }
+                buffer
+            });
+
+        let pipe = Arc::new(atomic_refcell::AtomicRefCell::new(Pipe::new(mode, status)));
+        CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+            Pipe::connect_to_buffer(&pipe, Arc::clone(&buffer), cb_queue);
+            pipe.borrow_mut().restore_write_mode(&snapshot);
+        });
+
+        let open_file = OpenFile::new(File::Pipe(pipe));
+        Self::register_restored_open_file(table, d, fd, open_file, restored_open_files);
+        log::debug!(
+            "restore: recreated pipe descriptor pid={} fd={} buffer_handle={:?}",
+            checkpoint.process_id,
+            d.fd,
+            snapshot.shared_buffer_handle
+        );
+    }
+
+    fn recreate_unix_socket_descriptor(
+        host: &Host,
+        table: &mut DescriptorTable,
+        checkpoint: &ProcessCheckpoint,
+        d: &DescriptorEntrySnapshot,
+        fd: DescriptorHandle,
+        restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+        unix_snapshots_by_handle: &HashMap<u64, &DescriptorEntrySnapshot>,
+        restored_unix_socket_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
+    ) {
+        use crate::core::checkpoint::snapshot_types::{
+            UnixSocketRestoreKindSnapshot, UnixSocketTypeSnapshot,
+        };
+        use crate::host::descriptor::socket::unix::{UnixSocket, UnixSocketType};
+        use crate::host::descriptor::socket::Socket;
+        use crate::host::descriptor::{File, OpenFile};
+
+        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "unix-socket")
+        {
+            return;
+        }
+
+        let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
+        let Some(snapshot) = d.unix_socket.as_ref() else {
+            let (socket_a, socket_b) = CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+                UnixSocket::pair(
+                    status,
+                    UnixSocketType::Stream,
+                    &host.abstract_unix_namespace(),
+                    cb_queue,
+                )
+            });
+            let open_file_a = OpenFile::new(File::Socket(Socket::Unix(socket_a)));
+            let open_file_b = OpenFile::new(File::Socket(Socket::Unix(socket_b)));
+            if let Some(canonical_handle) = d.canonical_handle {
+                restored_open_files.insert(canonical_handle, open_file_a.clone());
+            }
+            Self::register_restored_open_file(table, d, fd, open_file_a, restored_open_files);
+            log::warn!(
+                "restore: recreated placeholder unix socket pid={} fd={} without checkpoint snapshot",
+                checkpoint.process_id,
+                d.fd
+            );
+            let placeholder_peer_handle = open_file_b.inner_file().canonical_handle() as u64;
+            restored_unix_socket_files.insert(placeholder_peer_handle, open_file_b);
+            return;
+        };
+
+        if let Some(existing) = restored_unix_socket_files.get(&snapshot.socket_handle).cloned() {
+            Self::register_restored_open_file(table, d, fd, existing, restored_open_files);
+            return;
+        }
+
+        if snapshot.restore_kind != UnixSocketRestoreKindSnapshot::ConnectedUnnamedPair {
+            log::warn!(
+                "restore: unsupported unix socket restore kind pid={} fd={} kind={:?}",
+                checkpoint.process_id,
+                d.fd,
+                snapshot.restore_kind
+            );
+            return;
+        }
+
+        let Some(peer_handle) = snapshot.peer_handle else {
+            log::warn!(
+                "restore: unix socket missing peer handle pid={} fd={}",
+                checkpoint.process_id,
+                d.fd
+            );
+            return;
+        };
+        let socket_type = match snapshot.socket_type {
+            UnixSocketTypeSnapshot::Stream => UnixSocketType::Stream,
+            UnixSocketTypeSnapshot::Dgram => UnixSocketType::Dgram,
+            UnixSocketTypeSnapshot::SeqPacket => UnixSocketType::SeqPacket,
+        };
+        let peer_descriptor = unix_snapshots_by_handle.get(&peer_handle).copied();
+        let peer_snapshot = peer_descriptor.and_then(|descriptor| descriptor.unix_socket.as_ref());
+        let peer_status = peer_descriptor
+            .map(|descriptor| {
+                crate::host::descriptor::FileStatus::from_bits_truncate(descriptor.file_status_bits)
+            })
+            .unwrap_or(status);
+        let (socket_a, socket_b) = CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+            let (socket_a, socket_b) = UnixSocket::pair(
+                status,
+                socket_type,
+                &host.abstract_unix_namespace(),
+                cb_queue,
+            );
+            {
+                let mut socket_a_ref = socket_a.borrow_mut();
+                socket_a_ref.set_status(status);
+                socket_a_ref.restore_connected_unnamed_snapshot(snapshot, cb_queue);
+            }
+            {
+                let mut socket_b_ref = socket_b.borrow_mut();
+                socket_b_ref.set_status(peer_status);
+                if let Some(peer_snapshot) = peer_snapshot {
+                    socket_b_ref.restore_connected_unnamed_snapshot(peer_snapshot, cb_queue);
+                }
+            }
+            (socket_a, socket_b)
+        });
+
+        let open_file_a = OpenFile::new(File::Socket(Socket::Unix(socket_a)));
+        let open_file_b = OpenFile::new(File::Socket(Socket::Unix(socket_b)));
+        restored_unix_socket_files.insert(snapshot.socket_handle, open_file_a.clone());
+        restored_unix_socket_files.insert(peer_handle, open_file_b.clone());
+        if let Some(canonical_handle) = d.canonical_handle {
+            restored_open_files.insert(canonical_handle, open_file_a.clone());
+        }
+        if let Some(peer_descriptor) = peer_descriptor
+            && let Some(canonical_handle) = peer_descriptor.canonical_handle
+        {
+            restored_open_files.insert(canonical_handle, open_file_b.clone());
+        }
+        Self::register_restored_open_file(table, d, fd, open_file_a, restored_open_files);
+        log::debug!(
+            "restore: recreated unix socket descriptor pid={} fd={} peer_fd={:?} socket_handle={} peer_handle={} peer_snapshot={}",
+            checkpoint.process_id,
+            d.fd,
+            peer_descriptor.map(|descriptor| descriptor.fd),
+            snapshot.socket_handle,
+            peer_handle,
+            peer_snapshot.is_some()
+        );
     }
 
     fn recreate_socket_descriptor(
@@ -2769,15 +3191,9 @@ impl Process {
     /// FIXME: still needed? Time is now updated more granularly in the Thread code
     /// when xferring control to/from shim.
     fn set_shared_time(host: &Host) {
-        let mut host_shmem = host.shim_shmem_lock_borrow_mut().unwrap();
         let max_runahead_time = Worker::max_event_runahead_time(host);
-        host_shmem.max_runahead_time = max_runahead_time;
         let sim_time = Worker::current_time().unwrap();
-        host.shim_shmem()
-            .sim_time
-            .store(sim_time, Ordering::Relaxed);
-        drop(host_shmem);
-        host.mirror_restored_shim_clock_state(sim_time, max_runahead_time);
+        host.set_shim_clock_state(sim_time, max_runahead_time);
     }
 
     /// Deprecated wrapper for `RunnableProcess::shmem`

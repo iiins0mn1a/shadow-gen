@@ -155,4 +155,6 @@ void _shim_child_process_init_preload() {
     _shim_init_death_signal();
 }
 
+void _shim_repatch_vdso() { patch_vdso((void*)getauxval(AT_SYSINFO_EHDR)); }
+
 void shim_ensure_init() { _shim_load(); }

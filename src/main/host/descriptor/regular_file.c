@@ -115,6 +115,14 @@ FileType regularfile_getType(RegularFile* file) {
     return file->type;
 }
 
+const char* regularfile_getAbsPathAtOpen(RegularFile* file) {
+    MAGIC_ASSERT(file);
+    if (file->type == FILE_TYPE_IN_MEMORY) {
+        return NULL;
+    }
+    return file->osfile.absPathAtOpen;
+}
+
 static inline RegularFile* _regularfile_legacyFileToRegularFile(LegacyFile* desc) {
     utility_debugAssert(legacyfile_getType(desc) == DT_FILE);
     RegularFile* file = (RegularFile*)desc;

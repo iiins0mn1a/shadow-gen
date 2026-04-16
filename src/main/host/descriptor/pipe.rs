@@ -7,6 +7,7 @@ use linux_api::stat::SFlag;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
 use crate::cshadow as c;
+use crate::core::checkpoint::snapshot_types::{PipeSnapshot, PipeWriteModeSnapshot};
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::shared_buf::{
     BufferHandle, BufferSignals, BufferState, ReaderHandle, SharedBuf, WriterHandle,
@@ -77,6 +78,27 @@ impl Pipe {
 
     pub fn max_size(&self) -> usize {
         self.buffer.as_ref().unwrap().borrow().max_len()
+    }
+
+    pub fn snapshot(&self) -> PipeSnapshot {
+        PipeSnapshot {
+            shared_buffer_handle: self
+                .buffer
+                .as_ref()
+                .map(|buffer| Arc::as_ptr(buffer) as usize as u64),
+            shared_buffer: self.buffer.as_ref().map(|buffer| buffer.borrow().snapshot()),
+            write_mode: match self.write_mode {
+                WriteMode::Stream => PipeWriteModeSnapshot::Stream,
+                WriteMode::Packet => PipeWriteModeSnapshot::Packet,
+            },
+        }
+    }
+
+    pub fn restore_write_mode(&mut self, snapshot: &PipeSnapshot) {
+        self.write_mode = match snapshot.write_mode {
+            PipeWriteModeSnapshot::Stream => WriteMode::Stream,
+            PipeWriteModeSnapshot::Packet => WriteMode::Packet,
+        };
     }
 
     pub fn close(&mut self, cb_queue: &mut CallbackQueue) -> Result<(), SyscallError> {

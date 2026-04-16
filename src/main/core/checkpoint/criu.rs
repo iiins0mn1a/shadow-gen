@@ -172,6 +172,7 @@ pub fn restore_process(images_dir: &Path, pidfile: Option<&Path>) -> anyhow::Res
     cmd.arg("restore")
         .arg("--unprivileged")
         .arg("--tcp-established")
+        .arg("--leave-stopped")
         .arg("--restore-detached")
         .arg("--restore-sibling")
         .arg("--images-dir")

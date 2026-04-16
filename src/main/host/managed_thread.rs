@@ -75,6 +75,9 @@ pub struct ManagedThread {
     // If true, force one synthetic EINTR completion for the first restored syscall.
     // This de-stales blocked syscall handshakes after checkpoint/restore.
     force_syscall_eintr_once: Cell<bool>,
+    // If true, send a one-way shim refresh event before returning the first
+    // post-restore syscall result to the application.
+    needs_post_restore_refresh: Cell<bool>,
 }
 
 enum IpcShmem {
@@ -334,6 +337,7 @@ impl ManagedThread {
             native_tid,
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(false),
+            needs_post_restore_refresh: Cell::new(false),
         })
     }
 
@@ -655,6 +659,7 @@ impl ManagedThread {
             // TODO: can we assume it's inherited from the current thread affinity?
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(false),
+            needs_post_restore_refresh: Cell::new(false),
         })
     }
 
@@ -662,16 +667,34 @@ impl ManagedThread {
     fn continue_plugin(&self, host: &Host, event: &ShimEventToShim) -> ShimEventToShadow {
         // Update shared state before transferring control.
         let max_runahead_time = Worker::max_event_runahead_time(host);
-        host.shim_shmem_lock_borrow_mut().unwrap().max_runahead_time = max_runahead_time;
         let sim_time = Worker::current_time().unwrap();
-        host.shim_shmem()
-            .sim_time
-            .store(sim_time, atomic::Ordering::Relaxed);
-        host.mirror_restored_shim_clock_state(sim_time, max_runahead_time);
+        host.set_shim_clock_state(sim_time, max_runahead_time);
 
         // Release lock so that plugin can take it. Reacquired in `wait_for_next_event`.
         host.unlock_shmem();
 
+        let supports_post_restore_refresh = matches!(
+            event,
+            ShimEventToShim::Syscall(_)
+                | ShimEventToShim::SyscallComplete(_)
+                | ShimEventToShim::SyscallDoNative
+        );
+        if supports_post_restore_refresh && self.needs_post_restore_refresh.replace(false) {
+            self.ipc_shmem.to_plugin().send(ShimEventToShim::StartRes(ShimEventStartRes {
+                auxvec_random: [0u8; 16],
+            }));
+            let refresh_ack = match self.ipc_shmem.from_plugin().receive() {
+                Ok(e) => e,
+                Err(SelfContainedChannelError::WriterIsClosed) => ShimEventToShadow::ProcessDeath,
+            };
+            match refresh_ack {
+                ShimEventToShadow::SyscallComplete(ShimEventSyscallComplete {
+                    retval,
+                    restartable: false,
+                }) if i64::from(retval) == 0 => {}
+                other => panic!("Unexpected post-restore refresh ack: {other:?}"),
+            }
+        }
         self.ipc_shmem.to_plugin().send(*event);
 
         let event = match self.ipc_shmem.from_plugin().receive() {
@@ -1045,6 +1068,7 @@ impl ManagedThread {
             native_tid,
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(force_syscall_eintr_once),
+            needs_post_restore_refresh: Cell::new(true),
         }
     }
 }

@@ -117,7 +117,6 @@ pub(crate) unsafe fn emulated_syscall_event(
             }
             ShimEventToShim::SyscallDoNative => {
                 // "Emulate" the syscall by executing it natively.
-
                 let rv = unsafe { native_syscall(&syscall_event.syscall_args) };
 
                 if let FfiOption::Some(strace_fd) =
@@ -172,8 +171,17 @@ pub(crate) unsafe fn emulated_syscall_event(
                         }))
                 })
             }
-            e @ ShimEventToShim::StartRes(_) => {
-                panic!("Unexpected event: {e:?}");
+            ShimEventToShim::StartRes(_) => {
+                unsafe { bindings::_shim_repatch_vdso() };
+                tls_ipc::with(|ipc| {
+                    ipc.to_shadow().send(ShimEventToShadow::SyscallComplete(
+                        ShimEventSyscallComplete {
+                            retval: 0.into(),
+                            restartable: false,
+                        },
+                    ))
+                });
+                continue;
             }
         }
     }

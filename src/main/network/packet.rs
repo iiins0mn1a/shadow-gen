@@ -343,8 +343,9 @@ impl Packet {
         };
 
         let tcp_hdr = match &self.data {
-            // The legacy TCP header is obtained with `packet_getTCPHeader()` in the legacy C API.
-            Data::LegacyTcp(_) => unimplemented!(),
+            // Legacy TCP packets store the same transport header shape, but mutate it through the C
+            // compatibility layer before it is snapshotted.
+            Data::LegacyTcp(tcp) => tcp.borrow().header.clone(),
             Data::Tcp(tcp) => tcp.header.clone(),
             Data::Udp(_) => return None,
         };
@@ -1179,35 +1180,27 @@ mod export {
     #[unsafe(no_mangle)]
     pub extern "C-unwind" fn packet_getTCPHeader(packet_ptr: *const Packet) -> c::PacketTCPHeader {
         let packet = PacketRc::borrow_raw(packet_ptr);
-
-        let IpAddr::V4(src_ip) = packet.header.src else {
-            unimplemented!()
-        };
-        let IpAddr::V4(dst_ip) = packet.header.dst else {
-            unimplemented!()
-        };
-        let Data::LegacyTcp(tcp_rc) = &packet.data else {
-            unimplemented!()
-        };
-        let tcp = tcp_rc.borrow();
+        let tcp = packet.ipv4_tcp_header().unwrap();
+        let src_ip = tcp.ip.src;
+        let dst_ip = tcp.ip.dst;
 
         let mut c_hdr: c::PacketTCPHeader = unsafe { MaybeUninit::zeroed().assume_init() };
 
-        c_hdr.flags = tcp_flags_to_legacy_flags(tcp.header.flags);
+        c_hdr.flags = tcp_flags_to_legacy_flags(tcp.flags);
         c_hdr.sourceIP = u32::from(src_ip).to_be();
-        c_hdr.sourcePort = tcp.header.src_port.to_be();
+        c_hdr.sourcePort = tcp.src_port.to_be();
         c_hdr.destinationIP = u32::from(dst_ip).to_be();
-        c_hdr.destinationPort = tcp.header.dst_port.to_be();
-        c_hdr.sequence = tcp.header.sequence;
-        c_hdr.acknowledgment = tcp.header.acknowledgement;
-        c_hdr.selectiveACKs = to_legacy_sel_acks(tcp.header.selective_acks);
-        c_hdr.window = u32::from(tcp.header.window_size);
-        if let Some(scale) = tcp.header.window_scale {
+        c_hdr.destinationPort = tcp.dst_port.to_be();
+        c_hdr.sequence = tcp.seq;
+        c_hdr.acknowledgment = tcp.ack;
+        c_hdr.selectiveACKs = to_legacy_sel_acks(tcp.selective_acks.map(Into::into));
+        c_hdr.window = u32::from(tcp.window_size);
+        if let Some(scale) = tcp.window_scale {
             c_hdr.windowScale = scale;
             c_hdr.windowScaleSet = true;
         }
-        c_hdr.timestampValue = to_legacy_timestamp(tcp.header.timestamp);
-        c_hdr.timestampEcho = to_legacy_timestamp(tcp.header.timestamp_echo);
+        c_hdr.timestampValue = to_legacy_timestamp(tcp.timestamp);
+        c_hdr.timestampEcho = to_legacy_timestamp(tcp.timestamp_echo);
 
         c_hdr
     }
@@ -1222,10 +1215,6 @@ mod export {
         // Read data from the managed process into the packet's payload buffer.
         let packet = PacketRc::borrow_raw_mut(packet_ptr);
         let mem = unsafe { mem.as_ref() }.unwrap();
-
-        let Data::LegacyTcp(tcp) = &packet.data else {
-            unimplemented!()
-        };
 
         let len = usize::try_from(src_len).unwrap();
         let src = ForeignArrayPtr::new(src.cast::<MaybeUninit<u8>>(), len);
@@ -1257,6 +1246,10 @@ mod export {
             dst.len()
         );
 
+        let Data::LegacyTcp(tcp) = &packet.data else {
+            unimplemented!()
+        };
+
         // Move the payload into the packet. Use Bytes (not BytesMut) to avoid copying the payload.
         tcp.borrow_mut().payload.push(Bytes::from(dst));
     }
@@ -1272,10 +1265,7 @@ mod export {
         // Write the payload data from the packet into the managed process memory.
         let packet = PacketRc::borrow_raw(packet_ptr);
         let mem = unsafe { mem.as_mut() }.unwrap();
-
-        let Data::LegacyTcp(tcp) = &packet.data else {
-            unimplemented!()
-        };
+        let payload = packet.payload();
 
         if dst_len == 0 {
             return 0;
@@ -1294,7 +1284,7 @@ mod export {
         let mut dst_space = dst_len;
         let mut src_offset = usize::try_from(payload_offset).unwrap_or(usize::MAX);
 
-        for bytes in &tcp.borrow().payload {
+        for bytes in &payload {
             // This also skips over empty Bytes objects.
             if src_offset >= bytes.len() {
                 src_offset = src_offset.saturating_sub(bytes.len());
@@ -1407,10 +1397,7 @@ mod export {
     }
 
     fn get_sequence_number(packet: &PacketRc) -> u32 {
-        let Data::LegacyTcp(tcp_ref) = &packet.data else {
-            unimplemented!()
-        };
-        tcp_ref.borrow().header.sequence
+        packet.ipv4_tcp_header().unwrap().seq
     }
 
     fn legacy_flags_to_tcp_flags(legacy_flags: c::ProtocolTCPFlags) -> tcp::TcpFlags {
