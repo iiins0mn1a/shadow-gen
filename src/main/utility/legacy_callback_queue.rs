@@ -68,6 +68,29 @@ mod export {
     use crate::host::descriptor::socket::inet::InetSocket;
     use crate::host::host::Host;
 
+    fn restore_notify_trace_enabled(host: &Host) -> bool {
+        let Some(raw) = std::env::var_os("SHADOW_RESTORE_NOTIFY_TRACE") else {
+            return false;
+        };
+        let raw = raw.to_string_lossy();
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "0" {
+            return false;
+        }
+        if raw == "1" || raw == "all" {
+            return true;
+        }
+        for part in raw.split(',') {
+            let token = part.trim();
+            if let Some(value) = token.strip_prefix("host=") {
+                if value == host.name() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Notify listeners using the global callback queue. If the queue hasn't been set using
     /// [`with_global_cb_queue`], the listeners will be notified here before returning.
     #[unsafe(no_mangle)]
@@ -114,10 +137,35 @@ mod export {
                 // must not be `None` since it will be set to `Some` by `with_global_cb_queue`
                 let cb_queue = cb_queue.deref_mut().as_mut().unwrap();
 
+                if restore_notify_trace_enabled(host) {
+                    log::info!(
+                        "restore-notify-trace host={} sim_time_ns={} action=enqueue_notify socket_ptr={:p} ip={}",
+                        host.name(),
+                        worker::Worker::current_time()
+                            .unwrap()
+                            .to_abs_simtime()
+                            .as_nanos(),
+                        socket,
+                        ip
+                    );
+                }
+
                 cb_queue.add(move |_cb_queue| {
                     worker::Worker::with_active_host(|host| {
                         assert_eq!(host.id(), host_id);
                         let socket = unsafe { Box::from_raw(socket) };
+                        if restore_notify_trace_enabled(host) {
+                            log::info!(
+                                "restore-notify-trace host={} sim_time_ns={} action=run_notify socket_ptr={:p} ip={}",
+                                host.name(),
+                                worker::Worker::current_time()
+                                    .unwrap()
+                                    .to_abs_simtime()
+                                    .as_nanos(),
+                                &*socket,
+                                ip
+                            );
+                        }
                         host.notify_socket_has_packets(ip, &socket);
                     })
                     .unwrap();

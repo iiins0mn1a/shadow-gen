@@ -30,6 +30,33 @@ static inline const struct TCPCongHooks_ *slow_start_hooks_();
 static inline const struct TCPCongHooks_ *fast_recovery_hooks_();
 static inline const struct TCPCongHooks_ *cong_avoid_hooks_();
 
+static LegacyTcpCongestionState tcp_cong_reno_state_(const CAReno *reno) {
+    if (reno->state_hooks == slow_start_hooks_()) {
+        return TCP_CONG_STATE_SLOW_START;
+    } else if (reno->state_hooks == cong_avoid_hooks_()) {
+        return TCP_CONG_STATE_CONG_AVOID;
+    } else if (reno->state_hooks == fast_recovery_hooks_()) {
+        return TCP_CONG_STATE_FAST_RECOVERY;
+    } else {
+        return TCP_CONG_STATE_UNKNOWN;
+    }
+}
+
+static const struct TCPCongHooks_* tcp_cong_reno_hooks_for_state_(
+    LegacyTcpCongestionState state) {
+    switch (state) {
+        case TCP_CONG_STATE_SLOW_START:
+            return slow_start_hooks_();
+        case TCP_CONG_STATE_CONG_AVOID:
+            return cong_avoid_hooks_();
+        case TCP_CONG_STATE_FAST_RECOVERY:
+            return fast_recovery_hooks_();
+        case TCP_CONG_STATE_UNKNOWN:
+        default:
+            return slow_start_hooks_();
+    }
+}
+
 /* HELPERS *******************************************************/
 
 static inline void ssthresh_halve(TCP *tcp, CAReno *reno) {
@@ -188,6 +215,37 @@ void tcp_cong_reno_init(TCP *tcp) {
     tcp_cong(tcp)->cwnd = 1;
     tcp_cong(tcp)->hooks = (TCPCongHooks*)&reno_hooks_;
     tcp_cong(tcp)->ca = reno;
+}
+
+guint32 tcp_cong_reno_get_ssthresh(TCP *tcp) {
+    CAReno *reno = tcp_cong(tcp)->ca;
+    return reno->ssthresh;
+}
+
+gsize tcp_cong_reno_get_duplicate_ack_count(TCP *tcp) {
+    CAReno *reno = tcp_cong(tcp)->ca;
+    return reno->duplicate_ack_n;
+}
+
+guint32 tcp_cong_reno_get_cong_avoid_nacked(TCP *tcp) {
+    CAReno *reno = tcp_cong(tcp)->ca;
+    return reno->cong_avoid_nacked;
+}
+
+LegacyTcpCongestionState tcp_cong_reno_get_state(TCP *tcp) {
+    CAReno *reno = tcp_cong(tcp)->ca;
+    return tcp_cong_reno_state_(reno);
+}
+
+void tcp_cong_reno_restore_state(TCP *tcp, guint32 cwnd, guint32 ssthresh,
+                                 gsize duplicate_ack_n, guint32 cong_avoid_nacked,
+                                 LegacyTcpCongestionState state) {
+    CAReno *reno = tcp_cong(tcp)->ca;
+    tcp_cong(tcp)->cwnd = cwnd;
+    reno->ssthresh = ssthresh;
+    reno->duplicate_ack_n = duplicate_ack_n;
+    reno->cong_avoid_nacked = cong_avoid_nacked;
+    reno->state_hooks = tcp_cong_reno_hooks_for_state_(state);
 }
 
 static const struct TCPCongHooks_ slow_start_hooks__ = {

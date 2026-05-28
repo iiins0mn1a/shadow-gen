@@ -61,5 +61,7 @@ void statuslistener_setMonitorStatus(StatusListener* listener, FileState status,
  * was created before the listener in ptr_1, and 0 if the listener and their
  * pointer values are equal.  */
 int status_listener_compare(const void* ptr_1, const void* ptr_2);
+uint64_t statuslistener_getDeterministicSequenceValue(StatusListener* listener);
+void statuslistener_setDeterministicSequenceValue(StatusListener* listener, uint64_t value);
 
 #endif /* SRC_MAIN_HOST_STATUS_LISTENER_H_ */

@@ -37,7 +37,7 @@ pub struct SimulationCheckpoint {
 }
 
 impl SimulationCheckpoint {
-    pub const CURRENT_VERSION: u32 = 16;
+    pub const CURRENT_VERSION: u32 = 23;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -45,6 +45,7 @@ pub enum RestoreProtocolModeSnapshot {
     #[default]
     LegacyHeuristic,
     ProtocolV1,
+    DeterministicV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -117,6 +118,7 @@ pub enum BlockedSyscallRestoreActionSnapshot {
     ResumeImmediately,
     RearmTimeout,
     RearmCondition,
+    RearmFutex,
     RearmPoll,
 }
 
@@ -202,6 +204,24 @@ pub enum TaskDescriptor {
     ShutdownProcess { process_id: u32, signal: i32 },
     /// Relay packet forwarding (intra-host).
     RelayForward { relay_id: u64 },
+    /// Resume a thread whose syscall condition has already been triggered.
+    SyscallConditionWake { process_id: u32, thread_id: u32 },
+    /// Deferred completion preparation for a restored poll-family timeout.
+    PreparePollTimeoutCompletion {
+        process_id: u32,
+        thread_id: u32,
+        syscall_nr: i64,
+    },
+    /// Recreate a blocked syscall condition for a restored thread.
+    RestoreBlockedSyscallCondition {
+        process_id: u32,
+        thread_id: u32,
+    },
+    /// Exact replay of a deferred legacy TCP callback.
+    LegacyTcpDeferredAction {
+        canonical_handle: u64,
+        action: LegacyTcpDeferredActionSnapshot,
+    },
     /// Timer expiry callback.
     TimerExpire { timer_id: u64, expire_id: u64 },
     /// Continuation after execve replaces a process image.
@@ -210,6 +230,14 @@ pub enum TaskDescriptor {
     /// variant exists as a fallback; checkpointing will skip events
     /// containing opaque tasks and log a warning.
     Opaque { description: String },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LegacyTcpDeferredActionSnapshot {
+    CloseTimerExpired,
+    RetransmitTimerExpired,
+    SendAck,
+    SendWindowUpdate,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +307,27 @@ pub struct HostCheckpoint {
     pub processes: Vec<ProcessCheckpoint>,
     /// Serialized handle for HostShmem (`ShMemBlockSerialized.to_string()`).
     pub host_shmem_handle: String,
+    #[serde(default)]
+    pub localhost_send_queue: InterfaceSendQueueCheckpoint,
+    #[serde(default)]
+    pub internet_send_queue: InterfaceSendQueueCheckpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InterfaceSendQueueCheckpoint {
+    #[serde(default)]
+    pub next_push_order: u64,
+    #[serde(default)]
+    pub entries: Vec<InterfaceSendQueueEntryCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InterfaceSendQueueEntryCheckpoint {
+    pub canonical_handle: u64,
+    #[serde(default)]
+    pub priority: Option<u64>,
+    #[serde(default)]
+    pub push_order: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +543,83 @@ pub struct LegacyTcpSocketRuntimeSnapshot {
     pub send_last_ack: u32,
     pub send_last_window: u32,
     pub send_highest_seq: u32,
+    #[serde(default)]
+    pub throttled_output: Vec<PacketSnapshot>,
+    #[serde(default)]
+    pub output_buffer: Vec<PacketSnapshot>,
+    #[serde(default)]
+    pub output_control_buffer: Vec<PacketSnapshot>,
+    #[serde(default)]
+    pub input_buffer: Vec<PacketSnapshot>,
+    #[serde(default)]
+    pub unordered_input: Vec<PacketSnapshot>,
+    #[serde(default)]
+    pub partial_user_data_packet: Option<PacketSnapshot>,
+    #[serde(default)]
+    pub partial_offset: u32,
+    #[serde(default)]
+    pub retransmit_queue: Vec<PacketSnapshot>,
+    #[serde(default)]
+    pub retransmit_timeout_ms: i32,
+    #[serde(default)]
+    pub retransmit_desired_expiration_ns: Option<u64>,
+    #[serde(default)]
+    pub retransmit_scheduled_expirations_ns: Vec<u64>,
+    #[serde(default)]
+    pub retransmit_backoff_count: u32,
+    #[serde(default)]
+    pub delayed_ack_is_scheduled: bool,
+    #[serde(default)]
+    pub delayed_ack_counter: u32,
+    #[serde(default)]
+    pub num_quick_acks_sent: u32,
+    #[serde(default)]
+    pub window_update_pending: bool,
+    #[serde(default)]
+    pub timing_rtt_smoothed_ms: i32,
+    #[serde(default)]
+    pub timing_rtt_variance_ms: i32,
+    #[serde(default)]
+    pub congestion_cwnd: u32,
+    #[serde(default)]
+    pub congestion_ssthresh: u32,
+    #[serde(default)]
+    pub congestion_duplicate_ack_n: u64,
+    #[serde(default)]
+    pub congestion_avoid_nacked: u32,
+    #[serde(default)]
+    pub congestion_state: LegacyTcpCongestionStateSnapshot,
+    #[serde(default)]
+    pub retransmit_tally: RetransmitTallySnapshot,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LegacyTcpCongestionStateSnapshot {
+    #[default]
+    Unknown,
+    SlowStart,
+    CongestionAvoidance,
+    FastRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RetransmitTallySnapshot {
+    #[serde(default)]
+    pub last_ack: i64,
+    #[serde(default)]
+    pub num_dup_acks: u64,
+    #[serde(default)]
+    pub marked_lost: Vec<SeqRangeSnapshot>,
+    #[serde(default)]
+    pub sacked: Vec<SeqRangeSnapshot>,
+    #[serde(default)]
+    pub retransmitted: Vec<SeqRangeSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SeqRangeSnapshot {
+    pub begin: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,6 +765,10 @@ pub struct ThreadRuntimeSnapshot {
     #[serde(default)]
     pub blocked_trigger_kind: Option<BlockedTriggerKindSnapshot>,
     #[serde(default)]
+    pub blocked_futex_word: Option<u64>,
+    #[serde(default)]
+    pub blocked_listener_sequence_value: Option<u64>,
+    #[serde(default)]
     pub poll_watches: Vec<PollWatchSnapshot>,
     #[serde(default)]
     pub pending_result: Option<PendingSyscallResultSnapshot>,
@@ -650,6 +780,7 @@ pub enum ThreadRestorePolicySnapshot {
     #[default]
     LegacyHeuristic,
     ProtocolV1,
+    DeterministicV2,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]

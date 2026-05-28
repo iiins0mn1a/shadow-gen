@@ -43,6 +43,19 @@ void retransmit_tally_mark_retransmitted(void *p, uint32_t begin, uint32_t end);
 void retransmit_tally_clear_retransmitted(void *p);
 size_t retransmit_tally_num_lost_ranges(const void *p);
 void retransmit_tally_populate_lost_ranges(const void *p, uint32_t *lost);
+int64_t retransmit_tally_get_last_ack(const void *p);
+size_t retransmit_tally_get_num_dupl_ack(const void *p);
+size_t retransmit_tally_num_marked_lost_ranges(const void *p);
+void retransmit_tally_populate_marked_lost_ranges(const void *p, uint32_t *ranges);
+size_t retransmit_tally_num_sacked_ranges(const void *p);
+void retransmit_tally_populate_sacked_ranges(const void *p, uint32_t *ranges);
+size_t retransmit_tally_num_retransmitted_ranges(const void *p);
+void retransmit_tally_populate_retransmitted_ranges(const void *p, uint32_t *ranges);
+void retransmit_tally_reset(void *p, int64_t last_ack, size_t num_dupl_ack);
+void retransmit_tally_add_marked_lost_range(void *p, uint32_t begin, uint32_t end);
+void retransmit_tally_add_sacked_range(void *p, uint32_t begin, uint32_t end);
+void retransmit_tally_add_retransmitted_range(void *p, uint32_t begin, uint32_t end);
+void retransmit_tally_finalize_restore(void *p);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -10,10 +10,11 @@ pub struct WindowBoundaryContext {
     pub window_end: EmulatedTime,
 }
 
-/// Callback for printing host/PID info about the upcoming window.
+/// Callback for formatting host/PID info about the upcoming window.
 /// The controller receives this so interactive implementations can show
-/// diagnostic information on demand while paused.
-pub type PrintNextWindowInfoFn<'a> = &'a mut dyn FnMut();
+/// diagnostic information on demand while paused, or return it through an
+/// external control channel.
+pub type PrintNextWindowInfoFn<'a> = &'a mut dyn FnMut() -> String;
 
 /// The trait that any time-control implementation must satisfy.
 ///

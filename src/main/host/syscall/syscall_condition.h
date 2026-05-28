@@ -92,6 +92,8 @@ CEmulatedTime syscallcondition_getTimeout(SysCallCondition* cond);
 TriggerType syscallcondition_getTriggerType(SysCallCondition* cond);
 FileState syscallcondition_getTriggerState(SysCallCondition* cond);
 const File* syscallcondition_getTriggerFile(SysCallCondition* cond);
+uint64_t syscallcondition_getTriggerListenerSequenceValue(SysCallCondition* cond);
+void syscallcondition_setTriggerListenerSequenceValue(SysCallCondition* cond, uint64_t value);
 
 /* Get the active file for the condition, or NULL if there isn't one. */
 OpenFile* syscallcondition_getActiveFile(SysCallCondition* cond);

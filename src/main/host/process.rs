@@ -966,6 +966,12 @@ impl<'a> DescriptorRestoreContext<'a> {
             self.replay_descriptor(descriptor);
         }
         self.rebind_epolls();
+        for (old_handle, open_file) in &self.restored_open_files {
+            self.host.register_restored_canonical_handle_alias(
+                *old_handle,
+                open_file.inner_file().canonical_handle() as u64,
+            );
+        }
     }
 
     fn replay_descriptor(&mut self, descriptor: &DescriptorEntrySnapshot) {
@@ -1592,6 +1598,19 @@ impl Process {
     /// Should only be called from `Host::resume`.
     pub fn resume(&self, host: &Host, tid: ThreadId) {
         trace!("Continuing thread {} in process {}", tid, self.id());
+        if host.matches_restore_thread_trace_host_phase() {
+            let sim_time_ns = crate::core::worker::Worker::current_time()
+                .map(|t| t.to_abs_simtime().as_nanos())
+                .unwrap_or_default();
+            log::info!(
+                "restore-thread-trace host={} sim_time_ns={} stage=process_resume pid={} tid={} process_name={}",
+                host.name(),
+                sim_time_ns,
+                u32::from(self.id()),
+                libc::pid_t::from(tid),
+                &*self.name(),
+            );
+        }
 
         let threadrc = {
             let Some(runnable) = self.as_runnable() else {
@@ -2980,7 +2999,7 @@ impl Process {
             }
             let target_file = target_open_file.inner_file().clone();
             let events = EpollEvents::from_bits_truncate(watch.interest_bits);
-            let result = CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
+            let result = CallbackQueue::queue_and_run_with_legacy(|_cb_queue| {
                 epoll.borrow_mut().ctl(
                     EpollCtlOp::EPOLL_CTL_ADD,
                     watched_fd,
@@ -2988,7 +3007,7 @@ impl Process {
                     events,
                     watch.data,
                     Arc::downgrade(epoll),
-                    cb_queue,
+                    _cb_queue,
                 )
             });
             if let Err(err) = result {

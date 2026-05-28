@@ -6,7 +6,9 @@
 #include "main/host/syscall/syscall_condition.h"
 
 #include <stdbool.h>
+#include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "lib/logger/logger.h"
 #include "main/bindings/c/bindings.h"
@@ -43,6 +45,46 @@ struct _SysCallCondition {
     gint referenceCount;
     MAGIC_DECLARE;
 };
+
+static bool _syscallcondition_trace_enabled(const Host* host) {
+    const char* raw = getenv("SHADOW_RESTORE_FUTEX_TRACE");
+    if (raw == NULL || raw[0] == '\0' || strcmp(raw, "0") == 0) {
+        return false;
+    }
+
+    const char* host_key = strstr(raw, "host=");
+    if (host_key == NULL) {
+        return true;
+    }
+
+    host_key += strlen("host=");
+    const char* host_end = strchr(host_key, ',');
+    size_t host_len = host_end ? (size_t)(host_end - host_key) : strlen(host_key);
+    if (host_len == 0) {
+        return true;
+    }
+
+    const char* host_name = host_getName(host);
+    return strncmp(host_key, host_name, host_len) == 0 && host_name[host_len] == '\0';
+}
+
+static void _syscallcondition_trace(const Host* host, const SysCallCondition* cond,
+                                    const char* action) {
+    if (!_syscallcondition_trace_enabled(host) || cond->trigger.type != TRIGGER_FUTEX) {
+        return;
+    }
+
+    uint64_t listener_seq = 0;
+    if (cond->triggerListener != NULL) {
+        listener_seq = statuslistener_getDeterministicSequenceValue(cond->triggerListener);
+    }
+
+    info("restore-futex-trace host=%s action=%s pid=%d tid=%d futex=%" PRIuPTR
+         " timeout_exp=%" PRIi64 " wakeup_scheduled=%d listener_seq=%" PRIu64,
+         host_getName(host), action, cond->proc, cond->threadId,
+         (uintptr_t)futex_getAddress(cond->trigger.object.as_futex).val,
+         (int64_t)cond->timeoutExpiration, cond->wakeupScheduled, listener_seq);
+}
 
 static void _syscallcondition_unrefcb(void* cond_ptr);
 static void _syscallcondition_wrapper_free(void** cond_ptr_ptr);
@@ -399,6 +441,8 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     _syscallcondition_logListeningState(*cond_wrapper, proc, "wakeup while");
 #endif
 
+    _syscallcondition_trace(host, *cond_wrapper, "trigger_enter");
+
     // Always deliver the wakeup if the timeout expired.
     // Otherwise, only deliver the wakeup if the desc status is still valid.
     if (!_syscallcondition_satisfied(*cond_wrapper, host, thread)) {
@@ -418,6 +462,8 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     pid_t pid = (*cond_wrapper)->proc;
     pid_t tid = (*cond_wrapper)->threadId;
 
+    _syscallcondition_trace(host, *cond_wrapper, "trigger_continue");
+
     // We need to unref the `SysCallCondition` before we wake up the thread.
     syscallcondition_unref(*cond_wrapper);
     *cond_wrapper = NULL;
@@ -432,6 +478,7 @@ static void _syscallcondition_scheduleWakeupTask(SysCallCondition* cond, const H
     if (cond->wakeupScheduled) {
         // Deliver one wakeup even if condition is triggered multiple times or
         // ways.
+        _syscallcondition_trace(host, cond, "schedule_skip_already_scheduled");
         return;
     }
 
@@ -446,14 +493,16 @@ static void _syscallcondition_scheduleWakeupTask(SysCallCondition* cond, const H
     /* Since we're passing a `SysCallCondition**`, we need to cast to `void*` and
      * `TaskObjectFreeFunc` to satisfy the signature of `taskref_new_bound`. */
     TaskRef* wakeupTask =
-        taskref_new_bound(cond->hostId, _syscallcondition_trigger, (void*)cond_wrapper, NULL,
-                          (TaskObjectFreeFunc)_syscallcondition_wrapper_free, NULL);
+        taskref_new_bound_syscallcondition_wakeup(
+            cond->hostId, cond->proc, cond->threadId, _syscallcondition_trigger,
+            (void*)cond_wrapper, NULL, (TaskObjectFreeFunc)_syscallcondition_wrapper_free, NULL);
     host_scheduleTaskWithDelay(host, wakeupTask, 0); // Call without moving time forward
 
     syscallcondition_ref(cond);
     taskref_drop(wakeupTask);
 
     cond->wakeupScheduled = true;
+    _syscallcondition_trace(host, cond, "schedule_wakeup");
 }
 
 static void _syscallcondition_notifyStatusChanged(void* obj, void* arg) {
@@ -560,9 +609,11 @@ void syscallcondition_waitNonblock(SysCallCondition* cond, const Host* host, con
             default: {
                 warning("Unhandled enumerator %d", cond->trigger.type);
                 break;
-            }
         }
     }
+
+    _syscallcondition_trace(host, cond, "wait_nonblock");
+}
 
 #ifdef DEBUG
     _syscallcondition_logListeningState(cond, proc, "started");
@@ -611,6 +662,22 @@ const File* syscallcondition_getTriggerFile(SysCallCondition* cond) {
         return NULL;
     }
     return cond->trigger.object.as_file;
+}
+
+uint64_t syscallcondition_getTriggerListenerSequenceValue(SysCallCondition* cond) {
+    MAGIC_ASSERT(cond);
+    if (cond->triggerListener == NULL) {
+        return 0;
+    }
+    return statuslistener_getDeterministicSequenceValue(cond->triggerListener);
+}
+
+void syscallcondition_setTriggerListenerSequenceValue(SysCallCondition* cond, uint64_t value) {
+    MAGIC_ASSERT(cond);
+    if (cond->triggerListener == NULL || value == 0) {
+        return;
+    }
+    statuslistener_setDeterministicSequenceValue(cond->triggerListener, value);
 }
 
 OpenFile* syscallcondition_getActiveFile(SysCallCondition* cond) { return cond->activeFile; }

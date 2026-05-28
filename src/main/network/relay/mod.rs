@@ -144,6 +144,10 @@ impl Relay {
         Self::run_forward_task(&Arc::downgrade(self), host);
     }
 
+    pub fn pending_packet_count(&self) -> usize {
+        usize::from(self.internal.borrow().next_packet.is_some())
+    }
+
     /// Schedule an event to trigger us to run the forwarding loop later, and
     /// changes our state to `RelayState::Pending`. This allows us to run the
     /// forwarding loop after unwinding the current stack, and allows socket

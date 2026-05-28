@@ -81,6 +81,12 @@ impl SyscallConditionRef<'_> {
         Some(unsafe { file_ptr.as_ref() }.unwrap().canonical_handle())
     }
 
+    pub fn trigger_listener_sequence_value(&self) -> Option<u64> {
+        let value =
+            unsafe { cshadow::syscallcondition_getTriggerListenerSequenceValue(self.c_ptr.ptr()) };
+        (value != 0).then_some(value)
+    }
+
     pub fn active_file_canonical_handle(&self) -> Option<usize> {
         let file_ptr = unsafe { cshadow::syscallcondition_getActiveFile(self.c_ptr.ptr()) };
         if file_ptr.is_null() {
@@ -135,6 +141,17 @@ impl SyscallConditionRefMut<'_> {
     pub fn set_timeout(&mut self, timeout: Option<EmulatedTime>) {
         let timeout = EmulatedTime::to_c_emutime(timeout);
         unsafe { cshadow::syscallcondition_setTimeout(self.c_ptr.ptr(), timeout) };
+    }
+
+    pub fn set_trigger_listener_sequence_value(&mut self, value: Option<u64>) {
+        if let Some(value) = value {
+            unsafe {
+                cshadow::syscallcondition_setTriggerListenerSequenceValue(
+                    self.condition.c_ptr.ptr(),
+                    value,
+                )
+            };
+        }
     }
 }
 

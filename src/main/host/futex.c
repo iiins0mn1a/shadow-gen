@@ -5,9 +5,11 @@
 
 #include "main/host/futex.h"
 
+#include <inttypes.h>
 #include <errno.h>
 #include <glib.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "lib/logger/logger.h"
 #include "main/bindings/c/bindings-opaque.h"
@@ -26,6 +28,28 @@ struct _Futex {
     int referenceCount;
     MAGIC_DECLARE;
 };
+
+static bool _futex_trace_enabled(const Host* host) {
+    const char* raw = getenv("SHADOW_RESTORE_FUTEX_TRACE");
+    if (raw == NULL || raw[0] == '\0' || strcmp(raw, "0") == 0) {
+        return false;
+    }
+
+    const char* host_key = strstr(raw, "host=");
+    if (host_key == NULL) {
+        return true;
+    }
+
+    host_key += strlen("host=");
+    const char* host_end = strchr(host_key, ',');
+    size_t host_len = host_end ? (size_t)(host_end - host_key) : strlen(host_key);
+    if (host_len == 0) {
+        return true;
+    }
+
+    const char* host_name = host_getName(host);
+    return strncmp(host_key, host_name, host_len) == 0 && host_name[host_len] == '\0';
+}
 
 Futex* futex_new(ManagedPhysicalMemoryAddr word) {
     Futex* futex = malloc(sizeof(*futex));
@@ -72,6 +96,7 @@ ManagedPhysicalMemoryAddr futex_getAddress(Futex* futex) {
 
 unsigned int futex_wake(Futex* futex, unsigned int numWakeups) {
     MAGIC_ASSERT(futex);
+    const Host* host = worker_getCurrentHost();
 
     // We cannot use an iterator here, in case the hash table is modified
     // in the status changed callback.
@@ -89,7 +114,24 @@ unsigned int futex_wake(Futex* futex, unsigned int numWakeups) {
         item = g_list_first(listenerList);
     }
 
+    if (_futex_trace_enabled(host)) {
+        GString* seqs = g_string_new("");
+        for (GList* iter = item; iter != NULL; iter = g_list_next(iter)) {
+            StatusListener* listener = iter->data;
+            if (seqs->len > 0) {
+                g_string_append(seqs, ",");
+            }
+            g_string_append_printf(
+                seqs, "%" PRIu64, statuslistener_getDeterministicSequenceValue(listener));
+        }
+        info("restore-futex-trace host=%s action=futex_wake_enter futex=%" PRIuPTR
+             " requested=%u listener_seqs=[%s]",
+             host_getName(host), (uintptr_t)futex->word.val, numWakeups, seqs->str);
+        g_string_free(seqs, true);
+    }
+
     unsigned int numWoken = 0;
+    GString* wokenSeqs = _futex_trace_enabled(host) ? g_string_new("") : NULL;
 
     while (item && (numWoken < numWakeups)) {
         StatusListener* listener = item->data;
@@ -109,6 +151,13 @@ unsigned int futex_wake(Futex* futex, unsigned int numWakeups) {
 
                 // Count the wake-up
                 numWoken++;
+                if (wokenSeqs) {
+                    if (wokenSeqs->len > 0) {
+                        g_string_append(wokenSeqs, ",");
+                    }
+                    g_string_append_printf(
+                        wokenSeqs, "%" PRIu64, statuslistener_getDeterministicSequenceValue(listener));
+                }
             }
         }
 
@@ -117,6 +166,12 @@ unsigned int futex_wake(Futex* futex, unsigned int numWakeups) {
 
     if(listenerList != NULL) {
         g_list_free(listenerList);
+    }
+    if (wokenSeqs) {
+        info("restore-futex-trace host=%s action=futex_wake_exit futex=%" PRIuPTR
+             " woken=%u woken_seqs=[%s]",
+             host_getName(host), (uintptr_t)futex->word.val, numWoken, wokenSeqs->str);
+        g_string_free(wokenSeqs, true);
     }
     return numWoken;
 }

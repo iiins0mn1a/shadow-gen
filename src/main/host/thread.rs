@@ -27,6 +27,7 @@ use crate::core::checkpoint::snapshot_types::{
     PollWatchSnapshot, ThreadCheckpoint, ThreadRestorePolicySnapshot,
 };
 use crate::cshadow as c;
+use crate::host::futex_table::FutexRef;
 use crate::host::syscall::Trigger;
 use crate::host::syscall::condition::{
     SyscallCondition, SyscallConditionRef, SyscallConditionRefMut,
@@ -322,12 +323,52 @@ impl Thread {
         }
     }
 
+    pub fn restore_futex_blocked_syscall_condition(
+        &self,
+        host: &Host,
+        process: &Process,
+        futex_word: u64,
+        abs_timeout: Option<shadow_shim_helper_rs::emulated_time::EmulatedTime>,
+        blocked_listener_sequence_value: Option<u64>,
+    ) {
+        self.cleanup_syscall_condition();
+
+        let futex_addr = process.physical_address(ForeignPtr::<()>::from(
+            usize::try_from(futex_word).unwrap(),
+        ));
+        let futex = {
+            let mut table = host.futextable_borrow_mut();
+            if let Some(futex) = table.get(futex_addr) {
+                futex.clone()
+            } else {
+                let futex = unsafe { c::futex_new(futex_addr) };
+                assert!(!futex.is_null());
+                let futex = unsafe { FutexRef::new(futex) };
+                table
+                    .add(futex.clone())
+                    .expect("new futex is already in table");
+                futex
+            }
+        };
+
+        let mut cond = SyscallCondition::new(Trigger::from_futex(futex));
+        cond.set_timeout(abs_timeout);
+        let cond = cond.into_inner();
+        self.cond.set(unsafe { SendPointer::new(cond) });
+        if let Some(cond) = unsafe { cond.as_mut() } {
+            unsafe { c::syscallcondition_waitNonblock(cond, host, process, self) }
+            let mut cond = unsafe { SyscallConditionRefMut::borrow_from_c(cond) };
+            cond.set_trigger_listener_sequence_value(blocked_listener_sequence_value);
+        }
+    }
+
     pub fn restore_poll_blocked_syscall_condition(
         &self,
         host: &Host,
         process: &Process,
         poll_watches: &[PollWatchSnapshot],
         abs_timeout: Option<shadow_shim_helper_rs::emulated_time::EmulatedTime>,
+        blocked_listener_sequence_value: Option<u64>,
     ) {
         self.cleanup_syscall_condition();
 
@@ -386,6 +427,8 @@ impl Thread {
             self.cond.set(unsafe { SendPointer::new(cond) });
             if let Some(cond) = unsafe { cond.as_mut() } {
                 unsafe { c::syscallcondition_waitNonblock(cond, host, process, self) }
+                let mut cond = unsafe { SyscallConditionRefMut::borrow_from_c(cond) };
+                cond.set_trigger_listener_sequence_value(blocked_listener_sequence_value);
             }
         }
     }
@@ -634,6 +677,18 @@ impl Thread {
     }
 
     pub fn resume(&self, ctx: &ProcessContext) -> ResumeResult {
+        if ctx.host.matches_restore_thread_trace_host_phase() {
+            let sim_time_ns = crate::core::worker::Worker::current_time()
+                .map(|t| t.to_abs_simtime().as_nanos())
+                .unwrap_or_default();
+            log::info!(
+                "restore-thread-trace host={} sim_time_ns={} stage=thread_resume_enter pid={} tid={}",
+                ctx.host.name(),
+                sim_time_ns,
+                u32::from(ctx.process.id()),
+                libc::pid_t::from(self.id()),
+            );
+        }
         // Ensure the condition isn't triggered again, but don't clear it yet.
         // Syscall handler can still access.
         if let Some(c) = unsafe { self.cond.get().ptr().as_mut() } {
@@ -659,6 +714,18 @@ impl Thread {
 
         match res {
             managed_thread::ResumeResult::Blocked(cond) => {
+                if ctx.host.matches_restore_thread_trace_host_phase() {
+                    let sim_time_ns = crate::core::worker::Worker::current_time()
+                        .map(|t| t.to_abs_simtime().as_nanos())
+                        .unwrap_or_default();
+                    log::info!(
+                        "restore-thread-trace host={} sim_time_ns={} stage=thread_resume_result pid={} tid={} result=blocked",
+                        ctx.host.name(),
+                        sim_time_ns,
+                        u32::from(ctx.process.id()),
+                        libc::pid_t::from(self.id()),
+                    );
+                }
                 // Wait on new condition.
                 let cond = cond.into_inner();
                 self.cond.set(unsafe { SendPointer::new(cond) });
@@ -667,8 +734,37 @@ impl Thread {
                 }
                 ResumeResult::Blocked
             }
-            managed_thread::ResumeResult::ExitedThread(c) => ResumeResult::ExitedThread(c),
-            managed_thread::ResumeResult::ExitedProcess => ResumeResult::ExitedProcess,
+            managed_thread::ResumeResult::ExitedThread(c) => {
+                if ctx.host.matches_restore_thread_trace_host_phase() {
+                    let sim_time_ns = crate::core::worker::Worker::current_time()
+                        .map(|t| t.to_abs_simtime().as_nanos())
+                        .unwrap_or_default();
+                    log::info!(
+                        "restore-thread-trace host={} sim_time_ns={} stage=thread_resume_result pid={} tid={} result=exited_thread code={}",
+                        ctx.host.name(),
+                        sim_time_ns,
+                        u32::from(ctx.process.id()),
+                        libc::pid_t::from(self.id()),
+                        c,
+                    );
+                }
+                ResumeResult::ExitedThread(c)
+            }
+            managed_thread::ResumeResult::ExitedProcess => {
+                if ctx.host.matches_restore_thread_trace_host_phase() {
+                    let sim_time_ns = crate::core::worker::Worker::current_time()
+                        .map(|t| t.to_abs_simtime().as_nanos())
+                        .unwrap_or_default();
+                    log::info!(
+                        "restore-thread-trace host={} sim_time_ns={} stage=thread_resume_result pid={} tid={} result=exited_process",
+                        ctx.host.name(),
+                        sim_time_ns,
+                        u32::from(ctx.process.id()),
+                        libc::pid_t::from(self.id()),
+                    );
+                }
+                ResumeResult::ExitedProcess
+            }
         }
     }
 

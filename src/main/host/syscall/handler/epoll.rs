@@ -349,19 +349,75 @@ impl SyscallHandler {
             // After we collect the events here, failing to write them out to the events_ptr
             // ForeignPointer below will leave our event state inconsistent with the managed
             // process's understanding of the available events.
+            let trace_ready = ctx.objs.host.matches_restore_order_trace_host_phase()
+                && crate::host::host::Host::restore_order_trace_config()
+                    .and_then(|cfg| cfg.epfd)
+                    .is_none_or(|trace_epfd| trace_epfd == epfd);
+            let mut ready_trace = trace_ready.then(Vec::new);
             let ready = CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
-                epoll
-                    .borrow_mut()
-                    .collect_ready_events(cb_queue, max_events)
+                if let Some(trace_records) = ready_trace.as_mut() {
+                    epoll.borrow_mut()
+                        .collect_ready_events_with_trace(cb_queue, max_events, Some(trace_records))
+                } else {
+                    epoll.borrow_mut().collect_ready_events(cb_queue, max_events)
+                }
             });
             let n_ready = ready.len();
             if n_ready > max_events as usize {
                 panic!("Epoll should not return more than {max_events} events");
             }
 
+            if let Some(ready_trace) = ready_trace.as_ref() {
+                let sim_time_ns = Worker::current_time()
+                    .map(|t| t.to_abs_simtime().as_nanos())
+                    .unwrap_or_default();
+                for (idx, record) in ready_trace.iter().enumerate() {
+                    log::info!(
+                        "restore-order-trace ready host={} sim_time_ns={} epfd={} ready_idx={} watched_fd={} canonical_handle={} file_kind={} local={} peer={} interest_bits=0x{:x} ready_bits=0x{:x} data={}",
+                        ctx.objs.host.name(),
+                        sim_time_ns,
+                        epfd,
+                        idx,
+                        record.watched_fd,
+                        record.watched_canonical_handle,
+                        record.file_kind,
+                        record.local_addr.as_deref().unwrap_or("-"),
+                        record.peer_addr.as_deref().unwrap_or("-"),
+                        record.interest_bits,
+                        record.ready_event_bits,
+                        record.data,
+                    );
+                }
+            }
+
             // Write the events out to the managed process memory.
             let mut mem = ctx.objs.process.memory_borrow_mut();
             write_events_to_ptr(&mut mem, ready, events_ptr)?;
+
+            if let Some(ready_trace) = ready_trace.as_ref() {
+                let sim_time_ns = Worker::current_time()
+                    .map(|t| t.to_abs_simtime().as_nanos())
+                    .unwrap_or_default();
+                let ready_fds = ready_trace
+                    .iter()
+                    .map(|record| record.watched_fd.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let ready_peers = ready_trace
+                    .iter()
+                    .map(|record| record.peer_addr.as_deref().unwrap_or("-").to_owned())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                log::info!(
+                    "restore-order-trace return host={} sim_time_ns={} epfd={} n_ready={} ready_fds=[{}] ready_peers=[{}]",
+                    ctx.objs.host.name(),
+                    sim_time_ns,
+                    epfd,
+                    n_ready,
+                    ready_fds,
+                    ready_peers,
+                );
+            }
 
             // Return the number of events we are reporting.
             log::trace!("Epoll {epfd} returning {n_ready} events");

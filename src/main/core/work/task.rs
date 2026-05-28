@@ -130,6 +130,28 @@ pub mod export {
         }
     }
 
+    fn new_bound_task_with_descriptor(
+        host_id: HostId,
+        callback: TaskCallbackFunc,
+        object: *mut libc::c_void,
+        argument: *mut libc::c_void,
+        object_free: TaskObjectFreeFunc,
+        argument_free: TaskArgumentFreeFunc,
+        descriptor: TaskDescriptor,
+    ) -> *mut TaskRef {
+        let objs = unsafe {
+            CTaskHostTreePtrs::new(
+                callback,
+                HostTreePointer::new_for_host(host_id, object),
+                HostTreePointer::new_for_host(host_id, argument),
+                object_free,
+                argument_free,
+            )
+        };
+        let task = TaskRef::new_with_descriptor(move |host: &Host| objs.execute(host), descriptor);
+        Box::into_raw(Box::new(task))
+    }
+
     impl Drop for CTaskHostTreePtrs {
         fn drop(&mut self) {
             if let Some(object_free) = self.object_free {
@@ -240,6 +262,127 @@ pub mod export {
         // internal dynamic Trait object, making the resulting pointer non-ABI
         // safe.
         Box::into_raw(Box::new(task))
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn taskref_new_bound_syscallcondition_wakeup(
+        host_id: HostId,
+        process_id: libc::pid_t,
+        thread_id: libc::pid_t,
+        callback: TaskCallbackFunc,
+        object: *mut libc::c_void,
+        argument: *mut libc::c_void,
+        object_free: TaskObjectFreeFunc,
+        argument_free: TaskArgumentFreeFunc,
+    ) -> *mut TaskRef {
+        new_bound_task_with_descriptor(
+            host_id,
+            callback,
+            object,
+            argument,
+            object_free,
+            argument_free,
+            TaskDescriptor::SyscallConditionWake {
+                process_id: process_id.try_into().unwrap_or_default(),
+                thread_id: thread_id.try_into().unwrap_or_default(),
+            },
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn taskref_new_bound_legacy_tcp_close_timer_expired(
+        host_id: HostId,
+        canonical_handle: libc::uintptr_t,
+        callback: TaskCallbackFunc,
+        object: *mut libc::c_void,
+        argument: *mut libc::c_void,
+        object_free: TaskObjectFreeFunc,
+        argument_free: TaskArgumentFreeFunc,
+    ) -> *mut TaskRef {
+        new_bound_task_with_descriptor(
+            host_id,
+            callback,
+            object,
+            argument,
+            object_free,
+            argument_free,
+            TaskDescriptor::LegacyTcpDeferredAction {
+                canonical_handle: canonical_handle as u64,
+                action: crate::core::checkpoint::snapshot_types::LegacyTcpDeferredActionSnapshot::CloseTimerExpired,
+            },
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn taskref_new_bound_legacy_tcp_retransmit_timer_expired(
+        host_id: HostId,
+        canonical_handle: libc::uintptr_t,
+        callback: TaskCallbackFunc,
+        object: *mut libc::c_void,
+        argument: *mut libc::c_void,
+        object_free: TaskObjectFreeFunc,
+        argument_free: TaskArgumentFreeFunc,
+    ) -> *mut TaskRef {
+        new_bound_task_with_descriptor(
+            host_id,
+            callback,
+            object,
+            argument,
+            object_free,
+            argument_free,
+            TaskDescriptor::LegacyTcpDeferredAction {
+                canonical_handle: canonical_handle as u64,
+                action: crate::core::checkpoint::snapshot_types::LegacyTcpDeferredActionSnapshot::RetransmitTimerExpired,
+            },
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn taskref_new_bound_legacy_tcp_send_ack(
+        host_id: HostId,
+        canonical_handle: libc::uintptr_t,
+        callback: TaskCallbackFunc,
+        object: *mut libc::c_void,
+        argument: *mut libc::c_void,
+        object_free: TaskObjectFreeFunc,
+        argument_free: TaskArgumentFreeFunc,
+    ) -> *mut TaskRef {
+        new_bound_task_with_descriptor(
+            host_id,
+            callback,
+            object,
+            argument,
+            object_free,
+            argument_free,
+            TaskDescriptor::LegacyTcpDeferredAction {
+                canonical_handle: canonical_handle as u64,
+                action: crate::core::checkpoint::snapshot_types::LegacyTcpDeferredActionSnapshot::SendAck,
+            },
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn taskref_new_bound_legacy_tcp_send_window_update(
+        host_id: HostId,
+        canonical_handle: libc::uintptr_t,
+        callback: TaskCallbackFunc,
+        object: *mut libc::c_void,
+        argument: *mut libc::c_void,
+        object_free: TaskObjectFreeFunc,
+        argument_free: TaskArgumentFreeFunc,
+    ) -> *mut TaskRef {
+        new_bound_task_with_descriptor(
+            host_id,
+            callback,
+            object,
+            argument,
+            object_free,
+            argument_free,
+            TaskDescriptor::LegacyTcpDeferredAction {
+                canonical_handle: canonical_handle as u64,
+                action: crate::core::checkpoint::snapshot_types::LegacyTcpDeferredActionSnapshot::SendWindowUpdate,
+            },
+        )
     }
 
     /// Create a new reference-counted task that may be executed on any Host.

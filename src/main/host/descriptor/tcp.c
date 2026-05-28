@@ -8,6 +8,7 @@
 #include "main/host/descriptor/tcp.h"
 
 #include <errno.h>
+#include <arpa/inet.h>
 #include <math.h>
 #include <netinet/tcp.h>
 #include <stdarg.h>
@@ -263,6 +264,295 @@ static guint _ipPortHash(in_addr_t ip, in_port_t port) {
     guint hash_value = g_str_hash(buffer->str);
     g_string_free(buffer, TRUE);
     return hash_value;
+}
+
+static gboolean _tcp_restore_trace_enabled(const Host* host, in_port_t local_port,
+                                           in_port_t peer_port) {
+    const char* raw = getenv("SHADOW_RESTORE_TCP_TRACE");
+    if (raw == NULL || raw[0] == '\0' || strcmp(raw, "0") == 0) {
+        return FALSE;
+    }
+
+    const char* host_name = host_getName(host);
+    if (host_name == NULL) {
+        host_name = "";
+    }
+
+    guint16 local_port_host = ntohs(local_port);
+    guint16 peer_port_host = ntohs(peer_port);
+    bool matched = false;
+    bool host_ok = false;
+    bool port_ok = false;
+
+    gchar** parts = g_strsplit(raw, ",", -1);
+    for (gsize i = 0; parts[i] != NULL; i++) {
+        gchar* token = g_strstrip(parts[i]);
+        if (token[0] == '\0') {
+            continue;
+        }
+        if (strcmp(token, "1") == 0 || strcmp(token, "all") == 0) {
+            matched = true;
+            host_ok = true;
+            port_ok = true;
+            continue;
+        }
+        if (g_str_has_prefix(token, "host=")) {
+            matched = true;
+            if (strcmp(token + strlen("host="), host_name) == 0) {
+                host_ok = true;
+            }
+            continue;
+        }
+        if (g_str_has_prefix(token, "port=")) {
+            matched = true;
+            guint64 port = g_ascii_strtoull(token + strlen("port="), NULL, 10);
+            if (port > 0 && port <= G_MAXUINT16 &&
+                (((guint16)port == local_port_host) || ((guint16)port == peer_port_host))) {
+                port_ok = true;
+            }
+            continue;
+        }
+    }
+    g_strfreev(parts);
+
+    if (!matched) {
+        return FALSE;
+    }
+    if (strstr(raw, "host=") != NULL && !host_ok) {
+        return FALSE;
+    }
+    if (strstr(raw, "port=") != NULL && !port_ok) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void _tcp_restore_trace(const Host* host, TCP* tcp, const char* action,
+                               Packet* packet_or_null) {
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(&tcp->super, &local_ip, &local_port);
+    legacysocket_getPeerName(&tcp->super, &peer_ip, &peer_port);
+
+    if (!_tcp_restore_trace_enabled(host, local_port, peer_port)) {
+        return;
+    }
+
+    guint seq = 0;
+    guint ack = tcp->receive.next;
+    guint payload = 0;
+    guint64 priority = 0;
+    guint flags = 0;
+    if (packet_or_null != NULL) {
+        PacketTCPHeader header = packet_getTCPHeader(packet_or_null);
+        seq = header.sequence;
+        ack = header.acknowledgment;
+        payload = packet_getPayloadSize(packet_or_null);
+        priority = packet_getPriority(packet_or_null);
+        flags = header.flags;
+    }
+
+    char local_ip_buf[INET_ADDRSTRLEN] = {0};
+    char peer_ip_buf[INET_ADDRSTRLEN] = {0};
+    const char* local_ip_str = inet_ntop(AF_INET, &local_ip, local_ip_buf, sizeof(local_ip_buf));
+    const char* peer_ip_str = inet_ntop(AF_INET, &peer_ip, peer_ip_buf, sizeof(peer_ip_buf));
+    if (local_ip_str == NULL) {
+        local_ip_str = "?";
+    }
+    if (peer_ip_str == NULL) {
+        peer_ip_str = "?";
+    }
+    gchar* local = g_strdup_printf("%s:%u", local_ip_str, ntohs(local_port));
+    gchar* peer = g_strdup_printf("%s:%u", peer_ip_str, ntohs(peer_port));
+    info("restore-tcp-trace host=%s sim_time_ns=%" G_GUINT64_FORMAT
+         " action=%s local=%s peer=%s seq=%u ack=%u flags=0x%x payload=%u priority=%" G_GUINT64_FORMAT
+         " rto_timeout_ms=%d desired_rto_ns=%" G_GUINT64_FORMAT
+         " scheduled_rto_count=%" G_GSIZE_FORMAT " backoff=%u delayed_ack=%d delayed_ack_counter=%u"
+         " window_update=%d dupacks=%" G_GSIZE_FORMAT " unacked=%u next=%u highest=%u",
+         host_getName(host), worker_getCurrentSimulationTime(), action, local, peer, seq, ack, flags,
+         payload, priority, tcp->retransmit.timeout, tcp->retransmit.desiredTimerExpiration,
+         priorityqueue_getLength(tcp->retransmit.scheduledTimerExpirations),
+         tcp->retransmit.backoffCount, tcp->send.delayedACKIsScheduled,
+         tcp->send.delayedACKCounter, tcp->receive.windowUpdatePending,
+         retransmit_tally_get_num_dupl_ack(tcp->retransmit.tally), tcp->send.unacked,
+         tcp->send.next, tcp->send.highestSequence);
+    g_free(local);
+    g_free(peer);
+}
+
+static void _tcp_restore_trace_flush_state(const Host* host, TCP* tcp, const char* action,
+                                           Packet* packet_or_null) {
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(&tcp->super, &local_ip, &local_port);
+    legacysocket_getPeerName(&tcp->super, &peer_ip, &peer_port);
+
+    if (!_tcp_restore_trace_enabled(host, local_port, peer_port)) {
+        return;
+    }
+
+    guint seq = 0;
+    guint ack = tcp->receive.next;
+    guint payload = 0;
+    guint64 priority = 0;
+    guint flags = 0;
+    if (packet_or_null != NULL) {
+        PacketTCPHeader header = packet_getTCPHeader(packet_or_null);
+        seq = header.sequence;
+        ack = header.acknowledgment;
+        payload = packet_getPayloadSize(packet_or_null);
+        priority = packet_getPriority(packet_or_null);
+        flags = header.flags;
+    }
+
+    char local_ip_buf[INET_ADDRSTRLEN] = {0};
+    char peer_ip_buf[INET_ADDRSTRLEN] = {0};
+    const char* local_ip_str = inet_ntop(AF_INET, &local_ip, local_ip_buf, sizeof(local_ip_buf));
+    const char* peer_ip_str = inet_ntop(AF_INET, &peer_ip, peer_ip_buf, sizeof(peer_ip_buf));
+    if (local_ip_str == NULL) {
+        local_ip_str = "?";
+    }
+    if (peer_ip_str == NULL) {
+        peer_ip_str = "?";
+    }
+
+    info("restore-tcp-flush-trace host=%s sim_time_ns=%" G_GUINT64_FORMAT
+         " action=%s local=%s:%u peer=%s:%u seq=%u ack=%u flags=0x%x payload=%u priority=%" G_GUINT64_FORMAT
+         " throttled_count=%" G_GSIZE_FORMAT " throttled_len=%" G_GSIZE_FORMAT
+         " output_ctl_count=%" G_GSIZE_FORMAT " output_count=%" G_GSIZE_FORMAT
+         " output_len=%" G_GSIZE_FORMAT " send_buffer_space=%" G_GSIZE_FORMAT
+         " send_window=%u unacked=%u next=%u highest=%u",
+         host_getName(host), worker_getCurrentSimulationTime(), action, local_ip_str,
+         ntohs(local_port), peer_ip_str, ntohs(peer_port), seq, ack, flags, payload, priority,
+         priorityqueue_getLength(tcp->throttledOutput), tcp->throttledOutputLength,
+         (gsize)g_queue_get_length(tcp->super.outputControlBuffer),
+         (gsize)g_queue_get_length(tcp->super.outputBuffer), tcp->super.outputBufferLength,
+         legacysocket_getOutputBufferSpace(&(tcp->super)), tcp->send.window, tcp->send.unacked,
+         tcp->send.next, tcp->send.highestSequence);
+}
+
+static void _tcp_restore_trace_create_packet(const Host* host, TCP* tcp, ProtocolTCPFlags flags,
+                                             const char* reason, gboolean isEmpty, guint sequence, guint64 packet_id,
+                                             guint64 priority, guint64 packet_id_counter_before,
+                                             guint64 packet_id_counter_after,
+                                             guint64 priority_counter_before,
+                                             guint64 priority_counter_after) {
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(&tcp->super, &local_ip, &local_port);
+    legacysocket_getPeerName(&tcp->super, &peer_ip, &peer_port);
+
+    if (!_tcp_restore_trace_enabled(host, local_port, peer_port)) {
+        return;
+    }
+
+    char local_ip_buf[INET_ADDRSTRLEN] = {0};
+    char peer_ip_buf[INET_ADDRSTRLEN] = {0};
+    const char* local_ip_str = inet_ntop(AF_INET, &local_ip, local_ip_buf, sizeof(local_ip_buf));
+    const char* peer_ip_str = inet_ntop(AF_INET, &peer_ip, peer_ip_buf, sizeof(peer_ip_buf));
+    if (local_ip_str == NULL) {
+        local_ip_str = "?";
+    }
+    if (peer_ip_str == NULL) {
+        peer_ip_str = "?";
+    }
+
+    info("restore-tcp-create-trace host=%s sim_time_ns=%" G_GUINT64_FORMAT
+         " local=%s:%u peer=%s:%u flags=0x%x is_empty=%d sequence=%u packet_id=%" G_GUINT64_FORMAT
+         " reason=%s"
+         " priority=%" G_GUINT64_FORMAT
+         " packet_id_counter_before=%" G_GUINT64_FORMAT
+         " packet_id_counter_after=%" G_GUINT64_FORMAT
+         " priority_counter_before=%" G_GUINT64_FORMAT
+         " priority_counter_after=%" G_GUINT64_FORMAT,
+         host_getName(host), worker_getCurrentSimulationTime(), local_ip_str, ntohs(local_port),
+         peer_ip_str, ntohs(peer_port), flags, isEmpty, sequence, packet_id,
+         reason ? reason : "unknown", priority,
+         packet_id_counter_before, packet_id_counter_after, priority_counter_before,
+         priority_counter_after);
+}
+
+static void _tcp_restore_trace_schedule_task(const Host* host, TCP* tcp, const char* action,
+                                             CSimulationTime delay, guint64 event_id_before,
+                                             guint64 event_id_after) {
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(&tcp->super, &local_ip, &local_port);
+    legacysocket_getPeerName(&tcp->super, &peer_ip, &peer_port);
+
+    if (!_tcp_restore_trace_enabled(host, local_port, peer_port)) {
+        return;
+    }
+
+    char local_ip_buf[INET_ADDRSTRLEN] = {0};
+    char peer_ip_buf[INET_ADDRSTRLEN] = {0};
+    const char* local_ip_str = inet_ntop(AF_INET, &local_ip, local_ip_buf, sizeof(local_ip_buf));
+    const char* peer_ip_str = inet_ntop(AF_INET, &peer_ip, peer_ip_buf, sizeof(peer_ip_buf));
+    if (local_ip_str == NULL) {
+        local_ip_str = "?";
+    }
+    if (peer_ip_str == NULL) {
+        peer_ip_str = "?";
+    }
+
+    info("restore-tcp-schedule-trace host=%s sim_time_ns=%" G_GUINT64_FORMAT
+         " action=%s local=%s:%u peer=%s:%u delay_ns=%" G_GUINT64_FORMAT
+         " scheduled_abs_ns=%" G_GUINT64_FORMAT " event_id_before=%" G_GUINT64_FORMAT
+         " event_id_after=%" G_GUINT64_FORMAT " delayed_ack=%d delayed_ack_counter=%u"
+         " window_update=%d",
+         host_getName(host), worker_getCurrentSimulationTime(), action, local_ip_str,
+         ntohs(local_port), peer_ip_str, ntohs(peer_port), delay,
+         worker_getCurrentSimulationTime() + delay, event_id_before, event_id_after,
+         tcp->send.delayedACKIsScheduled, tcp->send.delayedACKCounter,
+         tcp->receive.windowUpdatePending);
+}
+
+static void _tcp_restore_trace_window(const Host* host, TCP* tcp, const char* action,
+                                      guint32 prev_recv_last_window,
+                                      guint32 new_recv_last_window,
+                                      guint32 prev_send_window, guint32 new_send_window,
+                                      guint32 prev_send_last_window,
+                                      guint32 new_send_last_window, guint32 header_ack,
+                                      guint32 header_window) {
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(&tcp->super, &local_ip, &local_port);
+    legacysocket_getPeerName(&tcp->super, &peer_ip, &peer_port);
+
+    if (!_tcp_restore_trace_enabled(host, local_port, peer_port)) {
+        return;
+    }
+
+    char local_ip_buf[INET_ADDRSTRLEN] = {0};
+    char peer_ip_buf[INET_ADDRSTRLEN] = {0};
+    const char* local_ip_str = inet_ntop(AF_INET, &local_ip, local_ip_buf, sizeof(local_ip_buf));
+    const char* peer_ip_str = inet_ntop(AF_INET, &peer_ip, peer_ip_buf, sizeof(peer_ip_buf));
+    if (local_ip_str == NULL) {
+        local_ip_str = "?";
+    }
+    if (peer_ip_str == NULL) {
+        peer_ip_str = "?";
+    }
+
+    info("restore-tcp-window-trace host=%s sim_time_ns=%" G_GUINT64_FORMAT
+         " action=%s local=%s:%u peer=%s:%u"
+         " recv_last_window=%u->%u send_window=%u->%u send_last_window=%u->%u"
+         " recv_window=%u cwnd=%d unacked=%u next=%u highest=%u header_ack=%u header_window=%u",
+         host_getName(host), worker_getCurrentSimulationTime(), action, local_ip_str,
+         ntohs(local_port), peer_ip_str, ntohs(peer_port), prev_recv_last_window,
+         new_recv_last_window, prev_send_window, new_send_window, prev_send_last_window,
+         new_send_last_window, tcp->receive.window, tcp->cong.cwnd, tcp->send.unacked,
+         tcp->send.next, tcp->send.highestSequence, header_ack, header_window);
 }
 
 static gint _simulationTimeCompare(const CSimulationTime* value1, const CSimulationTime* value2,
@@ -749,8 +1039,9 @@ static void _tcp_setState(TCP* tcp, const Host* host, enum TCPState state) {
             const InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
             utility_alwaysAssert(inetSocket != NULL);
             TaskRef* closeTask =
-                taskref_new_bound(host_getID(host), _tcp_runCloseTimerExpiredTask,
-                                  (void*)inetSocket, NULL, inetsocket_dropVoid, NULL);
+                taskref_new_bound_legacy_tcp_close_timer_expired(
+                    host_getID(host), (uintptr_t)tcp, _tcp_runCloseTimerExpiredTask,
+                    (void*)inetSocket, NULL, inetsocket_dropVoid, NULL);
             CSimulationTime delay = CONFIG_TCPCLOSETIMER_DELAY;
 
             /* if a child of a server initiated the close, close more quickly */
@@ -775,6 +1066,16 @@ static void _tcp_runCloseTimerExpiredTask(const Host* host, gpointer voidInetSoc
     MAGIC_ASSERT(tcp);
 
     _tcp_setState(tcp, host, TCPS_CLOSED);
+}
+
+void tcp_runCloseTimerExpiredTask(TCP* tcp, const Host* host) {
+    utility_alwaysAssert(tcp != NULL);
+    utility_alwaysAssert(host != NULL);
+    utility_alwaysAssert(tcp->rustSocket != NULL);
+    InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
+    utility_alwaysAssert(inetSocket != NULL);
+    _tcp_runCloseTimerExpiredTask(host, inetSocket, NULL);
+    inetsocket_drop(inetSocket);
 }
 
 /* returns the total amount of buffered data in this TCP socket, including TCP-specific buffers */
@@ -818,6 +1119,10 @@ static void _tcp_bufferPacketOut(TCP* tcp, Packet* packet) {
     MAGIC_ASSERT(tcp);
 
     if(!priorityqueue_find(tcp->throttledOutput, packet)) {
+        Host* host = worker_getCurrentHost();
+        if (host != NULL) {
+            _tcp_restore_trace_flush_state(host, tcp, "buffer_out_before_push", packet);
+        }
         /* TCP wants to avoid congestion */
         priorityqueue_push(tcp->throttledOutput, packet);
         packet_ref(packet);
@@ -829,6 +1134,9 @@ static void _tcp_bufferPacketOut(TCP* tcp, Packet* packet) {
         }
 
         packet_addDeliveryStatus(packet, PDS_SND_TCP_ENQUEUE_THROTTLED);
+        if (host != NULL) {
+            _tcp_restore_trace_flush_state(host, tcp, "buffer_out_after_push", packet);
+        }
     }
 }
 
@@ -878,11 +1186,20 @@ static void _tcp_updateSendWindow(TCP* tcp) {
     MAGIC_ASSERT(tcp);
 
     /* send window is minimum of congestion window and the last advertised window */
+    guint32 prev_send_window = tcp->send.window;
     tcp->send.window = (guint32)MIN(tcp->cong.cwnd, (gint)tcp->receive.lastWindow);
+    const Host* host = worker_getCurrentHost();
+    if (host != NULL && prev_send_window != tcp->send.window) {
+        _tcp_restore_trace_window(host, tcp, "update_send_window", tcp->receive.lastWindow,
+                                  tcp->receive.lastWindow, prev_send_window,
+                                  tcp->send.window, tcp->send.lastWindow,
+                                  tcp->send.lastWindow, tcp->receive.lastAcknowledgment,
+                                  tcp->receive.lastWindow);
+    }
 }
 
 static Packet* _tcp_createPacketWithoutPayload(TCP* tcp, const Host* host, ProtocolTCPFlags flags,
-                                               bool isEmpty) {
+                                               const char* reason, bool isEmpty) {
     MAGIC_ASSERT(tcp);
 
     /* packets from children of a server must appear to be coming from the server */
@@ -919,17 +1236,24 @@ static Packet* _tcp_createPacketWithoutPayload(TCP* tcp, const Host* host, Proto
     /* control packets get priority 0, data packets get the next priority sequence. */
     /* we want to make sure any packets with a sequence number get a priority, so that packets with
      * a higher sequence number are not sent before other packets with a lower sequence nubmer. */
+    guint64 priority_counter_before = host_peekNextPacketPriorityCounter(host);
     uint64_t priority = 0;
     if (sequence != 0) {
         priority = host_getNextPacketPriority(host);
     }
+    guint64 priority_counter_after = host_peekNextPacketPriorityCounter(host);
 
     /* create the TCP packet. the ack, window, and timestamps will be set in _tcp_flush */
     guint hostID = host_getID(host);
+    guint64 packet_id_counter_before = host_peekNextPacketIDCounter(host);
     guint64 packetID = host_getNewPacketID(host);
+    guint64 packet_id_counter_after = host_peekNextPacketIDCounter(host);
     Packet* packet = packet_new_tcp(hostID, packetID, flags, sourceIP, sourcePort, destinationIP,
                                     destinationPort, sequence, priority);
     packet_addDeliveryStatus(packet, PDS_SND_CREATED);
+    _tcp_restore_trace_create_packet(host, tcp, flags, reason, isEmpty, sequence, packetID, priority,
+                                     packet_id_counter_before, packet_id_counter_after,
+                                     priority_counter_before, priority_counter_after);
 
     /* update sequence number */
     if(sequence > 0) {
@@ -945,27 +1269,29 @@ static Packet* _tcp_createDataPacket(TCP* tcp, const Host* host, ProtocolTCPFlag
     MAGIC_ASSERT(tcp);
 
     bool isEmpty = payloadLength == 0;
-    Packet* packet = _tcp_createPacketWithoutPayload(tcp, host, flags, isEmpty);
+    Packet* packet = _tcp_createPacketWithoutPayload(tcp, host, flags, "data", isEmpty);
     if (!isEmpty) {
         packet_appendPayloadWithMemoryManager(packet, payload, payloadLength, mem);
     }
     return packet;
 }
 
-static Packet* _tcp_createControlPacket(TCP* tcp, const Host* host, ProtocolTCPFlags flags) {
+static Packet* _tcp_createControlPacket(TCP* tcp, const Host* host, ProtocolTCPFlags flags,
+                                        const char* reason) {
     MAGIC_ASSERT(tcp);
 
-    return _tcp_createPacketWithoutPayload(tcp, host, flags, /*isEmpty=*/true);
+    return _tcp_createPacketWithoutPayload(tcp, host, flags, reason, /*isEmpty=*/true);
 }
 
-static void _tcp_sendControlPacket(TCP* tcp, const Host* host, ProtocolTCPFlags flags) {
+static void _tcp_sendControlPacketReason(TCP* tcp, const Host* host, ProtocolTCPFlags flags,
+                                         const char* reason) {
     MAGIC_ASSERT(tcp);
 
     trace("%s <-> %s: sending response control packet now",
           tcp->super.boundString, tcp->super.peerString);
 
     /* create the ack packet, without any payload data */
-    Packet* control = _tcp_createControlPacket(tcp, host, flags);
+    Packet* control = _tcp_createControlPacket(tcp, host, flags, reason);
 
     /* push it in the buffer and to the socket */
     _tcp_bufferPacketOut(tcp, control);
@@ -973,6 +1299,10 @@ static void _tcp_sendControlPacket(TCP* tcp, const Host* host, ProtocolTCPFlags 
 
     /* the output buffer holds the packet ref now */
     packet_unref(control);
+}
+
+static void _tcp_sendControlPacket(TCP* tcp, const Host* host, ProtocolTCPFlags flags) {
+    _tcp_sendControlPacketReason(tcp, host, flags, "control");
 }
 
 static void _tcp_addRetransmit(TCP* tcp, Packet* packet) {
@@ -1005,6 +1335,36 @@ static gint _tcp_compare_sequence(gconstpointer ptr_1, gconstpointer ptr_2) {
 static gint _tcp_compare_sequence_data(gconstpointer ptr_1, gconstpointer ptr_2,
                                        gpointer user_data) {
     return _tcp_compare_sequence(ptr_1, ptr_2);
+}
+
+typedef struct _TcpRetransmitQueueEntrySnapshot {
+    guint32 sequence;
+    Packet* packet;
+} TcpRetransmitQueueEntrySnapshot;
+
+static gint _tcp_compare_retransmit_entry(gconstpointer ptr_1, gconstpointer ptr_2) {
+    const TcpRetransmitQueueEntrySnapshot* lhs = ptr_1;
+    const TcpRetransmitQueueEntrySnapshot* rhs = ptr_2;
+    return (lhs->sequence < rhs->sequence) ? -1 : (lhs->sequence > rhs->sequence) ? 1 : 0;
+}
+
+static GPtrArray* _tcp_collect_sorted_retransmit_entries(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+
+    GPtrArray* entries = g_ptr_array_new_with_free_func(g_free);
+    GHashTableIter iter;
+    gpointer key = NULL;
+    gpointer value = NULL;
+    g_hash_table_iter_init(&iter, tcp->retransmit.queue);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        TcpRetransmitQueueEntrySnapshot* entry = g_new(TcpRetransmitQueueEntrySnapshot, 1);
+        entry->sequence = GPOINTER_TO_UINT(key);
+        entry->packet = value;
+        g_ptr_array_add(entries, entry);
+    }
+
+    g_ptr_array_sort(entries, _tcp_compare_retransmit_entry);
+    return entries;
 }
 
 /* remove all packets with a sequence number less than the sequence parameter */
@@ -1087,10 +1447,16 @@ static void _tcp_scheduleRetransmitTimer(TCP* tcp, const Host* host, CSimulation
         const InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
         utility_alwaysAssert(inetSocket != NULL);
         TaskRef* retexpTask =
-            taskref_new_bound(host_getID(host), _tcp_runRetransmitTimerExpiredTask,
-                              (void*)inetSocket, NULL, inetsocket_dropVoid, NULL);
+            taskref_new_bound_legacy_tcp_retransmit_timer_expired(
+                host_getID(host), (uintptr_t)tcp, _tcp_runRetransmitTimerExpiredTask,
+                (void*)inetSocket, NULL, inetsocket_dropVoid, NULL);
+        guint64 event_id_before = host_peekNextEventIDCounter(host);
         host_scheduleTaskWithDelay(host, retexpTask, delay);
+        guint64 event_id_after = host_peekNextEventIDCounter(host);
         taskref_drop(retexpTask);
+        _tcp_restore_trace(host, tcp, "schedule_rto_task", NULL);
+        _tcp_restore_trace_schedule_task(host, tcp, "schedule_rto_task", delay,
+                                         event_id_before, event_id_after);
 
         trace("%s retransmit timer scheduled for %"G_GUINT64_FORMAT" ns",
                 tcp->super.boundString, *expireTimePtr);
@@ -1122,6 +1488,7 @@ static void _tcp_setRetransmitTimer(TCP* tcp, const Host* host, CSimulationTime 
      * track the new expiration time based on the current RTO */
     CSimulationTime delay = tcp->retransmit.timeout * SIMTIME_ONE_MILLISECOND;
     tcp->retransmit.desiredTimerExpiration = now + delay;
+    _tcp_restore_trace(host, tcp, "set_rto_timer", NULL);
 
     _tcp_scheduleRetransmitTimerIfNeeded(tcp, host, now);
 }
@@ -1232,7 +1599,7 @@ static void _tcp_sendShutdownFin(TCP* tcp, const Host* host) {
 
     if(sendFin) {
         /* send a fin */
-        Packet* fin = _tcp_createControlPacket(tcp, host, PTCP_FIN);
+        Packet* fin = _tcp_createControlPacket(tcp, host, PTCP_FIN, "shutdown_fin");
         _tcp_bufferPacketOut(tcp, fin);
         _tcp_flush(tcp, host);
 
@@ -1306,6 +1673,9 @@ void tcp_networkInterfaceIsAboutToSendPacket(TCP* tcp, const Host* host, Packet*
 
     if (header.flags & PTCP_ACK) {
         /* we are sending an ACK already, so we may not need any delayed ACK */
+        if (tcp->send.delayedACKCounter > 0) {
+            _tcp_restore_trace(host, tcp, "delayed_ack_consumed_by_send", packet);
+        }
         tcp->send.delayedACKCounter = 0;
     }
 
@@ -1318,6 +1688,8 @@ void tcp_networkInterfaceIsAboutToSendPacket(TCP* tcp, const Host* host, Packet*
             _tcp_setRetransmitTimer(tcp, host, now);
         }
     }
+
+    _tcp_restore_trace(host, tcp, "send_packet", packet);
 }
 
 static void _tcp_flush(TCP* tcp, const Host* host) {
@@ -1366,6 +1738,8 @@ static void _tcp_flush(TCP* tcp, const Host* host) {
         /* get the next throttled packet, in sequence order */
         Packet* packet = priorityqueue_peek(tcp->throttledOutput);
 
+        _tcp_restore_trace_flush_state(host, tcp, "flush_peek", packet);
+
         /* break out if we have no packets left */
         if(!packet) {
             break;
@@ -1384,6 +1758,10 @@ static void _tcp_flush(TCP* tcp, const Host* host) {
                 (length <= legacysocket_getOutputBufferSpace(&(tcp->super))) ? TRUE : FALSE;
 
             if(!fitsInBuffer || !fitsInWindow) {
+                _tcp_restore_trace_flush_state(host, tcp,
+                                               fitsInBuffer ? "flush_break_window"
+                                                            : "flush_break_buffer",
+                                               packet);
                 _rswlog(tcp, "Can't retransmit %d, inWindow=%d, inBuffer=%d\n", header.sequence,
                         fitsInWindow, fitsInBuffer);
                 /* we cant send the packet yet */
@@ -1397,6 +1775,8 @@ static void _tcp_flush(TCP* tcp, const Host* host) {
         /* packet is sendable, we removed it from out buffer */
         priorityqueue_pop(tcp->throttledOutput);
         tcp->throttledOutputLength -= length;
+
+        _tcp_restore_trace_flush_state(host, tcp, "flush_popped", packet);
 
         /* packet will get stored in retrans queue in tcp_networkInterfaceIsAboutToSendPacket */
 
@@ -1508,6 +1888,7 @@ static void _tcp_runRetransmitTimerExpiredTask(const Host* host, gpointer voidIn
     CSimulationTime* scheduledTimerExpirationPtr =
         priorityqueue_pop(tcp->retransmit.scheduledTimerExpirations);
     utility_debugAssert(scheduledTimerExpirationPtr);
+    _tcp_restore_trace(host, tcp, "rto_expired", NULL);
     g_free(scheduledTimerExpirationPtr);
 
     trace("%s a scheduled retransmit timer expired", tcp->super.boundString);
@@ -1554,6 +1935,16 @@ static void _tcp_runRetransmitTimerExpiredTask(const Host* host, gpointer voidIn
     _rswlog(tcp, "Timeout, marking %d as lost.\n", tcp->receive.lastAcknowledgment);
 
     _tcp_flush(tcp, host);
+}
+
+void tcp_runRetransmitTimerExpiredTask(TCP* tcp, const Host* host) {
+    utility_alwaysAssert(tcp != NULL);
+    utility_alwaysAssert(host != NULL);
+    utility_alwaysAssert(tcp->rustSocket != NULL);
+    InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
+    utility_alwaysAssert(inetSocket != NULL);
+    _tcp_runRetransmitTimerExpiredTask(host, inetSocket, NULL);
+    inetsocket_drop(inetSocket);
 }
 
 static gboolean _tcp_isFamilySupported(LegacySocket* socket, sa_family_t family) {
@@ -1773,6 +2164,11 @@ void tcp_restoreListenerState(TCP* tcp, const Host* host, const LegacyTcpRestore
 
     _tcp_setState(tcp, host, (enum TCPState)state->state);
     _tcp_restore_common(tcp, state);
+    _tcp_restore_trace_window(host, tcp, "restore_listener_state", state->recv_last_window,
+                              tcp->receive.lastWindow, state->send_window,
+                              tcp->send.window, state->send_last_window,
+                              tcp->send.lastWindow, state->recv_last_ack,
+                              state->recv_last_window);
 }
 
 void tcp_restoreEstablishedState(TCP* tcp, const Host* host, const LegacyTcpRestoreState* state) {
@@ -1782,6 +2178,332 @@ void tcp_restoreEstablishedState(TCP* tcp, const Host* host, const LegacyTcpRest
 
     _tcp_setState(tcp, host, (enum TCPState)state->state);
     _tcp_restore_common(tcp, state);
+    _tcp_restore_trace_window(host, tcp, "restore_established_state", state->recv_last_window,
+                              tcp->receive.lastWindow, state->send_window,
+                              tcp->send.window, state->send_last_window,
+                              tcp->send.lastWindow, state->recv_last_ack,
+                              state->recv_last_window);
+}
+
+gsize tcp_getUnorderedInputPacketCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return priorityqueue_getLength(tcp->unorderedInput);
+}
+
+gsize tcp_getThrottledOutputPacketCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return priorityqueue_getLength(tcp->throttledOutput);
+}
+
+gsize tcp_getRetransmitQueuePacketCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return g_hash_table_size(tcp->retransmit.queue);
+}
+
+gint tcp_getRetransmitTimeout(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->retransmit.timeout;
+}
+
+guint tcp_getRetransmitBackoffCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->retransmit.backoffCount;
+}
+
+CSimulationTime tcp_getRetransmitDesiredTimerExpiration(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->retransmit.desiredTimerExpiration;
+}
+
+gsize tcp_getRetransmitScheduledExpirationCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return priorityqueue_getLength(tcp->retransmit.scheduledTimerExpirations);
+}
+
+CSimulationTime tcp_getRetransmitScheduledExpirationAt(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    CSimulationTime* value = priorityqueue_getDataAt(tcp->retransmit.scheduledTimerExpirations, index);
+    return value ? *value : 0;
+}
+
+gboolean tcp_getDelayedAckIsScheduled(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->send.delayedACKIsScheduled;
+}
+
+guint tcp_getDelayedAckCounter(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->send.delayedACKCounter;
+}
+
+guint tcp_getNumQuickACKsSent(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->send.numQuickACKsSent;
+}
+
+gboolean tcp_getWindowUpdatePending(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->receive.windowUpdatePending;
+}
+
+gint tcp_getTimingRttSmoothed(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->timing.rttSmoothed;
+}
+
+gint tcp_getTimingRttVariance(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->timing.rttVariance;
+}
+
+guint32 tcp_getCongestionWindow(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->cong.cwnd;
+}
+
+guint32 tcp_getCongestionSsthresh(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp_cong_reno_get_ssthresh(tcp);
+}
+
+gsize tcp_getCongestionDuplicateAckCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp_cong_reno_get_duplicate_ack_count(tcp);
+}
+
+guint32 tcp_getCongestionAvoidNacked(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp_cong_reno_get_cong_avoid_nacked(tcp);
+}
+
+LegacyTcpCongestionState tcp_getCongestionState(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp_cong_reno_get_state(tcp);
+}
+
+gint64 tcp_getRetransmitTallyLastAck(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return retransmit_tally_get_last_ack(tcp->retransmit.tally);
+}
+
+gsize tcp_getRetransmitTallyNumDupAcks(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return retransmit_tally_get_num_dupl_ack(tcp->retransmit.tally);
+}
+
+static LegacyTcpRangeSnapshot _tcp_range_snapshot_at(
+    size_t (*num_ranges)(const void*),
+    void (*populate_ranges)(const void*, uint32_t*),
+    void* tally,
+    gsize index) {
+    LegacyTcpRangeSnapshot range = {0, 0};
+    gsize count = num_ranges(tally);
+    if (index >= count) {
+        return range;
+    }
+
+    guint32* raw = g_new0(guint32, count * 2);
+    populate_ranges(tally, raw);
+    range.begin = raw[index * 2];
+    range.end = raw[index * 2 + 1];
+    g_free(raw);
+    return range;
+}
+
+gsize tcp_getRetransmitTallyMarkedLostCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return retransmit_tally_num_marked_lost_ranges(tcp->retransmit.tally);
+}
+
+LegacyTcpRangeSnapshot tcp_getRetransmitTallyMarkedLostRange(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    return _tcp_range_snapshot_at(retransmit_tally_num_marked_lost_ranges,
+                                  retransmit_tally_populate_marked_lost_ranges,
+                                  tcp->retransmit.tally, index);
+}
+
+gsize tcp_getRetransmitTallySackedCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return retransmit_tally_num_sacked_ranges(tcp->retransmit.tally);
+}
+
+LegacyTcpRangeSnapshot tcp_getRetransmitTallySackedRange(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    return _tcp_range_snapshot_at(retransmit_tally_num_sacked_ranges,
+                                  retransmit_tally_populate_sacked_ranges,
+                                  tcp->retransmit.tally, index);
+}
+
+gsize tcp_getRetransmitTallyRetransmittedCount(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return retransmit_tally_num_retransmitted_ranges(tcp->retransmit.tally);
+}
+
+LegacyTcpRangeSnapshot tcp_getRetransmitTallyRetransmittedRange(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    return _tcp_range_snapshot_at(retransmit_tally_num_retransmitted_ranges,
+                                  retransmit_tally_populate_retransmitted_ranges,
+                                  tcp->retransmit.tally, index);
+}
+
+Packet* tcp_getUnorderedInputPacketAt(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    Packet* packet = priorityqueue_getDataAt(tcp->unorderedInput, index);
+    if (packet != NULL) {
+        packet_ref(packet);
+    }
+    return packet;
+}
+
+Packet* tcp_getThrottledOutputPacketAt(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    Packet* packet = priorityqueue_getDataAt(tcp->throttledOutput, index);
+    if (packet != NULL) {
+        packet_ref(packet);
+    }
+    return packet;
+}
+
+Packet* tcp_getRetransmitQueuePacketAt(TCP* tcp, gsize index) {
+    MAGIC_ASSERT(tcp);
+    GPtrArray* entries = _tcp_collect_sorted_retransmit_entries(tcp);
+    Packet* packet = NULL;
+    if (index < entries->len) {
+        TcpRetransmitQueueEntrySnapshot* entry = g_ptr_array_index(entries, index);
+        packet = entry->packet;
+        if (packet != NULL) {
+            packet_ref(packet);
+        }
+    }
+    g_ptr_array_free(entries, TRUE);
+    return packet;
+}
+
+Packet* tcp_getPartialUserDataPacket(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    if (tcp->partialUserDataPacket != NULL) {
+        packet_ref(tcp->partialUserDataPacket);
+    }
+    return tcp->partialUserDataPacket;
+}
+
+guint tcp_getPartialOffset(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    return tcp->partialOffset;
+}
+
+void tcp_restoreInputBufferPacket(TCP* tcp, const Host* host, Packet* packet) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(host);
+    utility_alwaysAssert(packet);
+    gboolean fit = legacysocket_addToInputBuffer(&tcp->super, host, packet);
+    utility_alwaysAssert(fit);
+    packet_unref(packet);
+}
+
+void tcp_restoreOutputBufferPacket(TCP* tcp, const Host* host, Packet* packet) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(host);
+    utility_alwaysAssert(packet);
+    utility_alwaysAssert(tcp->rustSocket != NULL);
+    InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
+    utility_alwaysAssert(inetSocket != NULL);
+    gboolean fit = legacysocket_addToOutputBuffer(&tcp->super, inetSocket, host, packet);
+    utility_alwaysAssert(fit);
+    packet_unref(packet);
+}
+
+void tcp_restoreThrottledOutputPacket(TCP* tcp, Packet* packet) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(packet);
+    gboolean inserted = priorityqueue_push(tcp->throttledOutput, packet);
+    utility_alwaysAssert(inserted);
+    tcp->throttledOutputLength += packet_getPayloadSize(packet);
+}
+
+void tcp_restoreRetransmitQueuePacket(TCP* tcp, Packet* packet) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(packet);
+    _tcp_addRetransmit(tcp, packet);
+    packet_unref(packet);
+}
+
+void tcp_restoreRetransmitState(TCP* tcp, gint timeout, CSimulationTime desired_expiration,
+                                guint backoff_count, gint rtt_smoothed, gint rtt_variance,
+                                gboolean delayed_ack_is_scheduled, guint delayed_ack_counter,
+                                guint num_quick_acks_sent, gboolean window_update_pending) {
+    MAGIC_ASSERT(tcp);
+    tcp->retransmit.timeout = timeout;
+    tcp->retransmit.desiredTimerExpiration = desired_expiration;
+    tcp->retransmit.backoffCount = backoff_count;
+    tcp->timing.rttSmoothed = rtt_smoothed;
+    tcp->timing.rttVariance = rtt_variance;
+    tcp->send.delayedACKIsScheduled = delayed_ack_is_scheduled;
+    tcp->send.delayedACKCounter = delayed_ack_counter;
+    tcp->send.numQuickACKsSent = num_quick_acks_sent;
+    tcp->receive.windowUpdatePending = window_update_pending;
+}
+
+void tcp_restoreCongestionState(TCP* tcp, guint32 cwnd, guint32 ssthresh,
+                                gsize duplicate_ack_n, guint32 cong_avoid_nacked,
+                                LegacyTcpCongestionState state) {
+    MAGIC_ASSERT(tcp);
+    tcp_cong_reno_restore_state(tcp, cwnd, ssthresh, duplicate_ack_n, cong_avoid_nacked, state);
+}
+
+void tcp_restoreRetransmitScheduledExpiration(TCP* tcp, CSimulationTime expiration) {
+    MAGIC_ASSERT(tcp);
+    CSimulationTime* expireTimePtr = g_new0(CSimulationTime, 1);
+    *expireTimePtr = expiration;
+    gboolean inserted = priorityqueue_push(tcp->retransmit.scheduledTimerExpirations, expireTimePtr);
+    utility_alwaysAssert(inserted);
+}
+
+void tcp_restoreRetransmitTally(TCP* tcp, gint64 last_ack, gsize num_dup_acks,
+                                const LegacyTcpRangeSnapshot* marked_lost,
+                                gsize marked_lost_len,
+                                const LegacyTcpRangeSnapshot* sacked,
+                                gsize sacked_len,
+                                const LegacyTcpRangeSnapshot* retransmitted,
+                                gsize retransmitted_len) {
+    MAGIC_ASSERT(tcp);
+    retransmit_tally_reset(tcp->retransmit.tally, last_ack, num_dup_acks);
+    for (gsize i = 0; i < marked_lost_len; i++) {
+        retransmit_tally_add_marked_lost_range(
+            tcp->retransmit.tally, marked_lost[i].begin, marked_lost[i].end);
+    }
+    for (gsize i = 0; i < sacked_len; i++) {
+        retransmit_tally_add_sacked_range(
+            tcp->retransmit.tally, sacked[i].begin, sacked[i].end);
+    }
+    for (gsize i = 0; i < retransmitted_len; i++) {
+        retransmit_tally_add_retransmitted_range(
+            tcp->retransmit.tally, retransmitted[i].begin, retransmitted[i].end);
+    }
+    retransmit_tally_finalize_restore(tcp->retransmit.tally);
+}
+
+void tcp_restoreUnorderedInputPacket(TCP* tcp, Packet* packet) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(packet);
+    gboolean inserted = priorityqueue_push(tcp->unorderedInput, packet);
+    utility_alwaysAssert(inserted);
+    tcp->unorderedInputLength += packet_getPayloadSize(packet);
+}
+
+void tcp_restorePartialUserDataPacket(TCP* tcp, Packet* packet, guint offset) {
+    MAGIC_ASSERT(tcp);
+    utility_alwaysAssert(packet);
+    utility_alwaysAssert(tcp->partialUserDataPacket == NULL);
+    tcp->partialUserDataPacket = packet;
+    tcp->partialOffset = offset;
+}
+
+void tcp_refreshReadableInputState(TCP* tcp) {
+    MAGIC_ASSERT(tcp);
+    gboolean has_readable_data =
+        (legacysocket_getInputBufferLength(&tcp->super) > 0) || (tcp->partialUserDataPacket != NULL);
+    legacyfile_adjustStatus((LegacyFile*)tcp, FileState_READABLE, has_readable_data, 0);
 }
 
 /* Address and port must be in network byte order. */
@@ -2100,7 +2822,13 @@ TCPProcessFlags _tcp_ackProcessing(TCP* tcp, const Host* host, Packet* packet,
 
     if(isValidWindow) {
         /* accept the window update */
+        guint32 prev_recv_last_window = tcp->receive.lastWindow;
         tcp->receive.lastWindow = (guint32) header->window;
+        _tcp_restore_trace_window(host, tcp, "ack_window_update", prev_recv_last_window,
+                                  tcp->receive.lastWindow, tcp->send.window,
+                                  tcp->send.window, tcp->send.lastWindow,
+                                  tcp->send.lastWindow, header->acknowledgment,
+                                  header->window);
     }
 
     /* update retransmit state (rfc 6298, section 5.2-5.3) */
@@ -2143,12 +2871,24 @@ static void _tcp_sendACKTaskCallback(const Host* host, gpointer voidInetSocket, 
 
     tcp->send.delayedACKIsScheduled = FALSE;
     if(tcp->send.delayedACKCounter > 0) {
+        _tcp_restore_trace(host, tcp, "delayed_ack_fire", NULL);
         trace("sending a delayed ACK now");
-        _tcp_sendControlPacket(tcp, host, PTCP_ACK);
+        _tcp_sendControlPacketReason(tcp, host, PTCP_ACK, "delayed_ack");
         tcp->send.delayedACKCounter = 0;
     } else {
+        _tcp_restore_trace(host, tcp, "delayed_ack_cancelled", NULL);
         trace("delayed ACK was cancelled");
     }
+}
+
+void tcp_sendACKTask(TCP* tcp, const Host* host) {
+    utility_alwaysAssert(tcp != NULL);
+    utility_alwaysAssert(host != NULL);
+    utility_alwaysAssert(tcp->rustSocket != NULL);
+    InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
+    utility_alwaysAssert(inetSocket != NULL);
+    _tcp_sendACKTaskCallback(host, inetSocket, NULL);
+    inetsocket_drop(inetSocket);
 }
 
 /* return TRUE if the packet should be retransmitted */
@@ -2493,8 +3233,9 @@ static void _tcp_processPacket(LegacySocket* socket, const Host* host, Packet* p
                 const InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
                 utility_alwaysAssert(inetSocket != NULL);
                 TaskRef* sendACKTask =
-                    taskref_new_bound(host_getID(host), _tcp_sendACKTaskCallback, (void*)inetSocket,
-                                      NULL, inetsocket_dropVoid, NULL);
+                    taskref_new_bound_legacy_tcp_send_ack(
+                        host_getID(host), (uintptr_t)tcp, _tcp_sendACKTaskCallback,
+                        (void*)inetSocket, NULL, inetsocket_dropVoid, NULL);
 
                 /* figure out what we should use as delay */
                 CSimulationTime delay = 0;
@@ -2507,8 +3248,12 @@ static void _tcp_processPacket(LegacySocket* socket, const Host* host, Packet* p
                     delay = 5*SIMTIME_ONE_MILLISECOND;
                 }
 
+                guint64 event_id_before = host_peekNextEventIDCounter(host);
                 host_scheduleTaskWithDelay(host, sendACKTask, delay);
+                guint64 event_id_after = host_peekNextEventIDCounter(host);
                 taskref_drop(sendACKTask);
+                _tcp_restore_trace_schedule_task(host, tcp, "schedule_delayed_ack", delay,
+                                                 event_id_before, event_id_after);
 
                 tcp->send.delayedACKIsScheduled = TRUE;
             }
@@ -2632,9 +3377,20 @@ static void _tcp_sendWindowUpdate(const Host* host, gpointer voidInetSocket, gpo
             tcp->super.boundString, tcp->super.peerString, tcp->receive.window);
 
     // XXX we may be in trouble if this packet gets dropped
-    _tcp_sendControlPacket(tcp, host, PTCP_ACK);
+    _tcp_restore_trace(host, tcp, "window_update_fire", NULL);
+    _tcp_sendControlPacketReason(tcp, host, PTCP_ACK, "window_update");
 
     tcp->receive.windowUpdatePending = FALSE;
+}
+
+void tcp_sendWindowUpdateTask(TCP* tcp, const Host* host) {
+    utility_alwaysAssert(tcp != NULL);
+    utility_alwaysAssert(host != NULL);
+    utility_alwaysAssert(tcp->rustSocket != NULL);
+    InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
+    utility_alwaysAssert(inetSocket != NULL);
+    _tcp_sendWindowUpdate(host, inetSocket, NULL);
+    inetsocket_drop(inetSocket);
 }
 
 /* Address and port must be in network byte order. */
@@ -2793,10 +3549,15 @@ gssize tcp_receiveUserData(TCP* tcp, const Host* host, UntypedForeignPtr buffer,
         const InetSocket* inetSocket = inetsocketweak_upgrade(tcp->rustSocket);
         utility_alwaysAssert(inetSocket != NULL);
         TaskRef* updateWindowTask =
-            taskref_new_bound(host_getID(host), _tcp_sendWindowUpdate, (void*)inetSocket, NULL,
-                              inetsocket_dropVoid, NULL);
+            taskref_new_bound_legacy_tcp_send_window_update(
+                host_getID(host), (uintptr_t)tcp, _tcp_sendWindowUpdate,
+                (void*)inetSocket, NULL, inetsocket_dropVoid, NULL);
+        guint64 event_id_before = host_peekNextEventIDCounter(host);
         host_scheduleTaskWithDelay(host, updateWindowTask, 1);
+        guint64 event_id_after = host_peekNextEventIDCounter(host);
         taskref_drop(updateWindowTask);
+        _tcp_restore_trace_schedule_task(host, tcp, "schedule_window_update", 1,
+                                         event_id_before, event_id_after);
 
         tcp->receive.windowUpdatePending = TRUE;
     }

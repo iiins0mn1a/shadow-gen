@@ -270,6 +270,84 @@ void retransmit_tally_populate_lost_ranges(const void *p, uint32_t *lost) {
    }
 }
 
+int64_t retransmit_tally_get_last_ack(const void *p) {
+   auto rt = cast_and_assert(p);
+   return rt->last_ack_;
+}
+
+size_t retransmit_tally_get_num_dupl_ack(const void *p) {
+   auto rt = cast_and_assert(p);
+   return rt->num_dupl_ack_;
+}
+
+static void _populate_ranges(const Ranges& ranges, uint32_t* out) {
+   for (std::size_t idx = 0; idx < ranges.size(); ++idx) {
+      const auto& range = ranges[idx];
+      out[2 * idx] = range.first;
+      out[2 * idx + 1] = range.second;
+   }
+}
+
+size_t retransmit_tally_num_marked_lost_ranges(const void *p) {
+   auto rt = cast_and_assert(p);
+   return rt->marked_lost_.size();
+}
+
+void retransmit_tally_populate_marked_lost_ranges(const void *p, uint32_t *ranges) {
+   auto rt = cast_and_assert(p);
+   _populate_ranges(rt->marked_lost_, ranges);
+}
+
+size_t retransmit_tally_num_sacked_ranges(const void *p) {
+   auto rt = cast_and_assert(p);
+   return rt->sacked_.size();
+}
+
+void retransmit_tally_populate_sacked_ranges(const void *p, uint32_t *ranges) {
+   auto rt = cast_and_assert(p);
+   _populate_ranges(rt->sacked_, ranges);
+}
+
+size_t retransmit_tally_num_retransmitted_ranges(const void *p) {
+   auto rt = cast_and_assert(p);
+   return rt->retransmitted_.size();
+}
+
+void retransmit_tally_populate_retransmitted_ranges(const void *p, uint32_t *ranges) {
+   auto rt = cast_and_assert(p);
+   _populate_ranges(rt->retransmitted_, ranges);
+}
+
+void retransmit_tally_reset(void *p, int64_t last_ack, size_t num_dupl_ack) {
+   auto rt = cast_and_assert(p);
+   rt->last_ack_ = last_ack;
+   rt->num_dupl_ack_ = num_dupl_ack;
+   rt->marked_lost_.clear();
+   rt->sacked_.clear();
+   rt->retransmitted_.clear();
+   rt->lost_.clear();
+}
+
+void retransmit_tally_add_marked_lost_range(void *p, uint32_t begin, uint32_t end) {
+   auto rt = cast_and_assert(p);
+   ranges_insert(&rt->marked_lost_, {begin, end});
+}
+
+void retransmit_tally_add_sacked_range(void *p, uint32_t begin, uint32_t end) {
+   auto rt = cast_and_assert(p);
+   ranges_insert(&rt->sacked_, {begin, end});
+}
+
+void retransmit_tally_add_retransmitted_range(void *p, uint32_t begin, uint32_t end) {
+   auto rt = cast_and_assert(p);
+   ranges_insert(&rt->retransmitted_, {begin, end});
+}
+
+void retransmit_tally_finalize_restore(void *p) {
+   auto rt = cast_and_assert(p);
+   rt->compute_lost();
+}
+
 } // extern "C"
 
 RetransmitTally::RetransmitTally()

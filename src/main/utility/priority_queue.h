@@ -22,5 +22,6 @@ gboolean priorityqueue_push(PriorityQueue *q, gpointer data);
 gpointer priorityqueue_peek(PriorityQueue *q);
 gpointer priorityqueue_find(PriorityQueue *q, gpointer data);
 gpointer priorityqueue_pop(PriorityQueue *q);
+gpointer priorityqueue_getDataAt(PriorityQueue *q, gsize index);
 
 #endif /* SHD_PRIORITY_QUEUE_H */

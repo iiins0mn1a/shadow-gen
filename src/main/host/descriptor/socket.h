@@ -93,6 +93,10 @@ void legacysocket_dropPacket(LegacySocket* socket, const Host* host, Packet* pac
 Packet* legacysocket_pullOutPacket(LegacySocket* socket, const Host* host);
 Packet* legacysocket_peekNextOutPacket(const LegacySocket* socket);
 Packet* legacysocket_peekNextInPacket(const LegacySocket* socket);
+gsize legacysocket_getInputBufferPacketCount(LegacySocket* socket);
+Packet* legacysocket_getInputBufferPacketAt(LegacySocket* socket, gsize index);
+gsize legacysocket_getOutputBufferPacketCount(LegacySocket* socket, gboolean control);
+Packet* legacysocket_getOutputBufferPacketAt(LegacySocket* socket, gboolean control, gsize index);
 
 gssize legacysocket_sendUserData(LegacySocket* socket, const Thread* thread,
                                  UntypedForeignPtr buffer, gsize nBytes, in_addr_t ip,

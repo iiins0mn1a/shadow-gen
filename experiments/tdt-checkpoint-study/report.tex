@@ -1,0 +1,49 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\title{Basic Checkpoint/Restore Reliability Note for TDT}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\paragraph{Scope.}
+Checkpoint/restore evaluation is not the TDT mainline goal. TDT is primarily a real-client orchestration environment for Ethereum-like deployments in Shadow. Accordingly, we report only a \emph{basic} reliability evaluation here: whether checkpoint/restore preserves an exact replay window under selected setups, and what the observed checkpoint/restore latency looks like in the currently available deterministic runs.
+
+\paragraph{Determinism criterion.}
+For TDT, determinism reliability is judged by an exact post-checkpoint replay test. For a given setup, the experiment runner captures a \emph{reference} application-log window immediately after checkpoint, restores the checkpoint together with managed external state, replays the same time window, and compares the resulting \emph{replay} window against the reference. The comparison uses role logs from \texttt{geth}, \texttt{beacon}, and \texttt{validator} only; recorder-helper logs and host-side \texttt{shadow.data} artifacts are excluded. A setup is considered deterministic only if the compared windows match exactly.
+
+\begin{table}[h]
+\centering
+\caption{Basic TDT checkpoint/restore results. Determinism values and latency numbers are taken from the current local deterministic runs under setups 1/4/8.}
+\label{tab:tdt-basic-cpr}
+\begin{tabular}{>{\raggedright\arraybackslash}p{1.2cm} >{\raggedleft\arraybackslash}p{1.4cm} >{\centering\arraybackslash}p{2.0cm} >{\raggedleft\arraybackslash}p{2.3cm} >{\raggedleft\arraybackslash}p{2.3cm} >{\raggedright\arraybackslash}p{4.2cm}}
+\toprule
+Setup & Validators & Determinism & Checkpoint (ms) & Restore (ms) & Note \\
+\midrule
+1 & 4  & Yes & 332.14 & 170.44 & Exact replay holds for the current deterministic run. \\
+4 & 16 & Yes & 3489.38 & 403.19 & Exact replay holds for the current deterministic run. \\
+8 & 32 & Yes & 7799.97 & 551.80 & Exact replay holds for the current deterministic run. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+These results support a conservative but positive claim. First, checkpoint/restore is already reliable enough to preserve exact replay in the currently tested real-client TDT runs for setups~1, 4, and~8. Second, the measured wall-clock overhead grows with scale, but remains bounded: the observed checkpoint / restore times range from roughly 0.33\,s / 0.17\,s at setup~1 to 7.80\,s / 0.55\,s at setup~8. Third, because TDT is not designed primarily as an evaluation harness, these results should still be read as a basic reliability check rather than an exhaustive performance study; nevertheless, they provide direct evidence that the present cp/restore path can preserve deterministic replay across multiple real-client deployment scales.
+
+\paragraph{Local data used for this note.}
+The table above was assembled from the following local artifacts already present on disk:
+\begin{itemize}
+    \item \texttt{/tmp/tdt-cong-setup1-results/determinism-setup-1.json}
+    \item \texttt{/tmp/tdt-cong-setup4-results/determinism-setup-4.json}
+    \item \texttt{/tmp/tdt-cong-setup8-results/determinism-setup-8.json}
+\end{itemize}
+
+\end{document}

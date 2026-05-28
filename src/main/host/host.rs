@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut, UnsafeCell};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsString};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
@@ -9,7 +10,7 @@ use std::os::unix::prelude::OsStringExt;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "enable_perf_logging")]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(feature = "enable_perf_logging")]
 use std::time::Instant;
 
@@ -110,6 +111,111 @@ pub struct HostInfo {
     pub log_level: Option<log::LevelFilter>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RestoreOrderTraceConfig {
+    pub host_name: Option<String>,
+    pub epfd: Option<i32>,
+    pub post_restore_only: bool,
+}
+
+impl RestoreOrderTraceConfig {
+    fn from_env() -> Option<Self> {
+        let raw = std::env::var("SHADOW_RESTORE_ORDER_TRACE").ok()?;
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "0" {
+            return None;
+        }
+
+        let mut cfg = Self {
+            host_name: None,
+            epfd: None,
+            post_restore_only: true,
+        };
+
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            let Some((key, value)) = part.split_once('=') else {
+                continue;
+            };
+
+            match key.trim() {
+                "host" => {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        cfg.host_name = Some(value.to_owned());
+                    }
+                }
+                "epfd" => {
+                    if let Ok(epfd) = value.trim().parse::<i32>() {
+                        cfg.epfd = Some(epfd);
+                    }
+                }
+                "post_restore_only" => {
+                    cfg.post_restore_only = matches!(value.trim(), "1" | "true" | "yes");
+                }
+                _ => {}
+            }
+        }
+
+        Some(cfg)
+    }
+}
+
+static RESTORE_ORDER_TRACE_CONFIG: OnceLock<Option<RestoreOrderTraceConfig>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct RestoreThreadTraceConfig {
+    pub host_name: Option<String>,
+    pub post_restore_only: bool,
+}
+
+impl RestoreThreadTraceConfig {
+    fn from_env() -> Option<Self> {
+        let raw = std::env::var("SHADOW_RESTORE_THREAD_TRACE").ok()?;
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "0" {
+            return None;
+        }
+
+        let mut cfg = Self {
+            host_name: None,
+            post_restore_only: true,
+        };
+
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+
+            let Some((key, value)) = part.split_once('=') else {
+                continue;
+            };
+
+            match key.trim() {
+                "host" => {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        cfg.host_name = Some(value.to_owned());
+                    }
+                }
+                "post_restore_only" => {
+                    cfg.post_restore_only = matches!(value.trim(), "1" | "true" | "yes");
+                }
+                _ => {}
+            }
+        }
+
+        Some(cfg)
+    }
+}
+
+static RESTORE_THREAD_TRACE_CONFIG: OnceLock<Option<RestoreThreadTraceConfig>> = OnceLock::new();
+
 /// A simulated Host.
 pub struct Host {
     // Store immutable info in an Arc, that we can safely clone into the
@@ -205,6 +311,10 @@ pub struct Host {
     // host shmem. Mirror time-sensitive fields into that block until we fully
     // rebind shim state to the new host-owned shmem.
     restored_shim_shmem: RefCell<Option<ShMemBlockAlias<'static, HostShmem>>>,
+    // Old checkpoint canonical handles may no longer match newly recreated
+    // file objects after restore. Track explicit old->new aliases so restore-
+    // scheduled tasks can rebind to the right live object.
+    restored_canonical_handle_aliases: RefCell<HashMap<u64, u64>>,
 
     in_notify_socket_has_packets: RootedCell<bool>,
 
@@ -314,6 +424,7 @@ impl Host {
             random,
             shim_shmem,
             restored_shim_shmem: RefCell::new(None),
+            restored_canonical_handle_aliases: RefCell::new(HashMap::new()),
             shim_shmem_lock: RefCell::new(None),
             cpu,
             net_ns,
@@ -383,6 +494,75 @@ impl Host {
         *self.restored_shim_shmem.borrow_mut() = Some(shim_shmem);
     }
 
+    pub fn restore_order_trace_config() -> Option<&'static RestoreOrderTraceConfig> {
+        RESTORE_ORDER_TRACE_CONFIG
+            .get_or_init(RestoreOrderTraceConfig::from_env)
+            .as_ref()
+    }
+
+    pub fn restore_thread_trace_config() -> Option<&'static RestoreThreadTraceConfig> {
+        RESTORE_THREAD_TRACE_CONFIG
+            .get_or_init(RestoreThreadTraceConfig::from_env)
+            .as_ref()
+    }
+
+    pub fn is_post_restore_runtime(&self) -> bool {
+        self.restored_shim_shmem.borrow().is_some()
+    }
+
+    pub fn matches_restore_order_trace_host_phase(&self) -> bool {
+        let Some(cfg) = Self::restore_order_trace_config() else {
+            return false;
+        };
+
+        if cfg.post_restore_only && !self.is_post_restore_runtime() {
+            return false;
+        }
+
+        if let Some(expected_name) = cfg.host_name.as_deref()
+            && expected_name != self.name()
+        {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn matches_restore_thread_trace_host_phase(&self) -> bool {
+        let Some(cfg) = Self::restore_thread_trace_config() else {
+            return false;
+        };
+
+        if cfg.post_restore_only && !self.is_post_restore_runtime() {
+            return false;
+        }
+
+        if let Some(expected_name) = cfg.host_name.as_deref()
+            && expected_name != self.name()
+        {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn clear_restored_canonical_handle_aliases(&self) {
+        self.restored_canonical_handle_aliases.borrow_mut().clear();
+    }
+
+    pub fn register_restored_canonical_handle_alias(&self, old_handle: u64, new_handle: u64) {
+        self.restored_canonical_handle_aliases
+            .borrow_mut()
+            .insert(old_handle, new_handle);
+    }
+
+    pub fn translate_restored_canonical_handle(&self, old_handle: u64) -> Option<u64> {
+        self.restored_canonical_handle_aliases
+            .borrow()
+            .get(&old_handle)
+            .copied()
+    }
+
     pub fn set_shim_clock_state(
         &self,
         sim_time: EmulatedTime,
@@ -442,6 +622,22 @@ impl Host {
         }
 
         EmulatedTime::SIMULATION_START
+    }
+
+    pub fn router_pending_packet_count(&self) -> usize {
+        self.router.borrow().pending_packet_count()
+    }
+
+    pub fn relay_inet_out_pending_packet_count(&self) -> usize {
+        self.relay_inet_out.pending_packet_count()
+    }
+
+    pub fn relay_inet_in_pending_packet_count(&self) -> usize {
+        self.relay_inet_in.pending_packet_count()
+    }
+
+    pub fn relay_loopback_pending_packet_count(&self) -> usize {
+        self.relay_loopback.pending_packet_count()
     }
 
     pub fn add_application(
@@ -559,6 +755,18 @@ impl Host {
     }
 
     pub fn resume(&self, pid: ProcessId, tid: ThreadId) {
+        if self.matches_restore_thread_trace_host_phase() {
+            let sim_time_ns = Worker::current_time()
+                .map(|t| t.to_abs_simtime().as_nanos())
+                .unwrap_or_default();
+            log::info!(
+                "restore-thread-trace host={} sim_time_ns={} stage=host_resume pid={} tid={}",
+                self.name(),
+                sim_time_ns,
+                u32::from(pid),
+                libc::pid_t::from(tid),
+            );
+        }
         let Some(processrc) = self
             .process_borrow(pid)
             .map(|p| RootedRc::clone(&p, &self.root))
@@ -1144,7 +1352,33 @@ impl Host {
             panic!("Recursively calling host.notify_socket_has_packets()");
         }
 
+        let notify_trace_enabled = std::env::var("SHADOW_RESTORE_NOTIFY_TRACE")
+            .map(|raw| {
+                let raw = raw.trim().to_string();
+                if raw.is_empty() || raw == "0" {
+                    return false;
+                }
+                if raw == "1" || raw == "all" {
+                    return true;
+                }
+                raw.split(',')
+                    .any(|token| token.trim() == format!("host={}", self.name()))
+            })
+            .unwrap_or(false);
+
         if let Some(iface) = self.interface_borrow(addr) {
+            if notify_trace_enabled {
+                log::info!(
+                    "restore-notify-trace host={} sim_time_ns={} action=host_notify socket_ptr={:p} addr={}",
+                    self.name(),
+                    Worker::current_time()
+                        .unwrap()
+                        .to_abs_simtime()
+                        .as_nanos(),
+                    socket,
+                    addr
+                );
+            }
             iface.add_data_source(socket);
             match addr {
                 Ipv4Addr::LOCALHOST => self.relay_loopback.notify(self),
@@ -1257,6 +1491,26 @@ mod export {
     ) -> FifoPacketPriority {
         let hostrc = unsafe { hostrc.as_ref().unwrap() };
         hostrc.get_next_packet_priority()
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn host_peekNextPacketPriorityCounter(
+        hostrc: *const Host,
+    ) -> FifoPacketPriority {
+        let hostrc = unsafe { hostrc.as_ref().unwrap() };
+        hostrc.packet_priority_counter()
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn host_peekNextPacketIDCounter(hostrc: *const Host) -> u64 {
+        let hostrc = unsafe { hostrc.as_ref().unwrap() };
+        hostrc.next_packet_id_counter()
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn host_peekNextEventIDCounter(hostrc: *const Host) -> u64 {
+        let hostrc = unsafe { hostrc.as_ref().unwrap() };
+        hostrc.next_event_id_counter()
     }
 
     #[unsafe(no_mangle)]

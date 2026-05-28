@@ -18,7 +18,6 @@ use crate::utility::{HostTreePointer, ObjectCounter};
 
 use self::entry::Entry;
 use self::key::{Key, PriorityKey};
-
 use super::socket::Socket;
 use super::socket::inet::InetSocket;
 
@@ -32,6 +31,18 @@ pub struct WatchRegistrationSnapshot {
     pub watched_canonical_handle: usize,
     pub interest_bits: u32,
     pub data: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadyEventTraceRecord {
+    pub watched_fd: i32,
+    pub watched_canonical_handle: usize,
+    pub interest_bits: u32,
+    pub ready_event_bits: u32,
+    pub data: u64,
+    pub file_kind: &'static str,
+    pub local_addr: Option<String>,
+    pub peer_addr: Option<String>,
 }
 
 pub struct Epoll {
@@ -53,6 +64,36 @@ pub struct Epoll {
 }
 
 impl Epoll {
+    fn describe_watched_file(file: &File) -> (&'static str, Option<String>, Option<String>) {
+        match file {
+            File::Pipe(_) => ("pipe", None, None),
+            File::EventFd(_) => ("eventfd", None, None),
+            File::TimerFd(_) => ("timerfd", None, None),
+            File::Epoll(_) => ("epoll", None, None),
+            File::Socket(socket) => {
+                let socket_ref = socket.borrow();
+                let local_addr = socket_ref
+                    .getsockname()
+                    .ok()
+                    .flatten()
+                    .map(|addr| addr.to_string());
+                let peer_addr = socket_ref
+                    .getpeername()
+                    .ok()
+                    .flatten()
+                    .map(|addr| addr.to_string());
+                let kind = match &*socket {
+                    Socket::Inet(InetSocket::LegacyTcp(_)) => "legacy_tcp",
+                    Socket::Inet(InetSocket::Tcp(_)) => "tcp",
+                    Socket::Inet(InetSocket::Udp(_)) => "udp",
+                    Socket::Unix(_) => "unix",
+                    Socket::Netlink(_) => "netlink",
+                };
+                (kind, local_addr, peer_addr)
+            }
+        }
+    }
+
     pub fn new() -> Arc<AtomicRefCell<Self>> {
         let mut epoll = Self {
             event_source: StateEventSource::new(),
@@ -393,6 +434,15 @@ impl Epoll {
         cb_queue: &mut CallbackQueue,
         max_events: u32,
     ) -> Vec<(EpollEvents, u64)> {
+        self.collect_ready_events_with_trace(cb_queue, max_events, None)
+    }
+
+    pub fn collect_ready_events_with_trace(
+        &mut self,
+        cb_queue: &mut CallbackQueue,
+        max_events: u32,
+        mut trace_records: Option<&mut Vec<ReadyEventTraceRecord>>,
+    ) -> Vec<(EpollEvents, u64)> {
         let mut events = vec![];
         let mut keep = vec![];
 
@@ -401,6 +451,11 @@ impl Epoll {
             let pri_key = self.ready.pop().unwrap();
             let key = Key::from(pri_key);
             let entry = self.monitoring.get_mut(&key).unwrap();
+            let watched_fd = key.fd();
+            let watched_canonical_handle = key.file().canonical_handle();
+            let interest_bits = entry.interest().bits();
+            let data = entry.data();
+            let (file_kind, local_addr, peer_addr) = Self::describe_watched_file(key.file());
 
             // Just removed from the ready set, keep the priority consistent.
             entry.set_priority(None);
@@ -409,7 +464,20 @@ impl Epoll {
             debug_assert!(entry.has_ready_events());
 
             // Store the events we should report to the managed process.
-            events.push(entry.collect_ready_events().unwrap());
+            let (ready_events, ready_data) = entry.collect_ready_events().unwrap();
+            if let Some(trace_records) = trace_records.as_deref_mut() {
+                trace_records.push(ReadyEventTraceRecord {
+                    watched_fd,
+                    watched_canonical_handle,
+                    interest_bits,
+                    ready_event_bits: ready_events.bits(),
+                    data,
+                    file_kind,
+                    local_addr,
+                    peer_addr,
+                });
+            }
+            events.push((ready_events, ready_data));
 
             // It might still be ready even after we report.
             if entry.has_ready_events() {

@@ -10,7 +10,11 @@ use nix::sys::socket::{MsgFlags, SockaddrIn};
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
-use crate::core::checkpoint::snapshot_types::LegacyTcpSocketRuntimeSnapshot;
+use crate::core::checkpoint::event_conversion::{packet_from_snapshot, packet_to_snapshot};
+use crate::core::checkpoint::snapshot_types::{
+    LegacyTcpCongestionStateSnapshot, LegacyTcpSocketRuntimeSnapshot, RetransmitTallySnapshot,
+    SeqRangeSnapshot,
+};
 use crate::core::worker::Worker;
 use crate::cshadow as c;
 use crate::host::descriptor::listener::{StateListenHandle, StateListenerFilter};
@@ -42,6 +46,64 @@ pub struct LegacyTcpSocket {
 }
 
 impl LegacyTcpSocket {
+    fn snapshot_owned_packets<F>(count: usize, mut get_packet: F) -> Vec<crate::core::checkpoint::snapshot_types::PacketSnapshot>
+    where
+        F: FnMut(usize) -> *mut crate::network::packet::Packet,
+    {
+        let mut packets = Vec::with_capacity(count);
+        for idx in 0..count {
+            let packet = get_packet(idx);
+            if packet.is_null() {
+                continue;
+            }
+            let packet = PacketRc::from_raw(packet);
+            packets.push(packet_to_snapshot(&packet));
+        }
+        packets
+    }
+
+    fn trace_restore_drain(
+        &self,
+        bytes: libc::ssize_t,
+        input_len_before: usize,
+        input_len_after: usize,
+    ) {
+        if bytes <= 0 {
+            return;
+        }
+
+        let _ = Worker::with_active_host(|host| {
+            if !host.matches_restore_order_trace_host_phase() {
+                return;
+            }
+
+            let peer = self
+                .getpeername()
+                .ok()
+                .flatten()
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            let local = self
+                .getsockname()
+                .ok()
+                .flatten()
+                .map(|x| x.to_string())
+                .unwrap_or_else(|| "-".to_string());
+
+            log::info!(
+                "restore-order-trace drain host={} sim_time_ns={} canonical_handle={} local={} peer={} bytes={} input_len_before={} input_len_after={}",
+                host.name(),
+                Worker::current_time().unwrap().to_abs_simtime().as_nanos(),
+                self.canonical_handle(),
+                local,
+                peer,
+                bytes,
+                input_len_before,
+                input_len_after,
+            );
+        });
+    }
+
     pub fn new(status: FileStatus, host: &Host) -> Arc<AtomicRefCell<Self>> {
         let recv_buf_size = host.params.init_sock_recv_buf_size.try_into().unwrap();
         let send_buf_size = host.params.init_sock_send_buf_size.try_into().unwrap();
@@ -88,6 +150,31 @@ impl LegacyTcpSocket {
         let mut state = unsafe { std::mem::zeroed::<c::LegacyTcpRestoreState>() };
         unsafe { c::tcp_getRestoreState(self.as_legacy_tcp(), &mut state) };
 
+        let input_buffer_count =
+            unsafe { c::legacysocket_getInputBufferPacketCount(self.as_legacy_socket()) } as usize;
+        let output_buffer_count =
+            unsafe { c::legacysocket_getOutputBufferPacketCount(self.as_legacy_socket(), 0) }
+                as usize;
+        let output_control_buffer_count =
+            unsafe { c::legacysocket_getOutputBufferPacketCount(self.as_legacy_socket(), 1) }
+                as usize;
+        let throttled_output_count =
+            unsafe { c::tcp_getThrottledOutputPacketCount(self.as_legacy_tcp()) } as usize;
+        let retransmit_queue_count =
+            unsafe { c::tcp_getRetransmitQueuePacketCount(self.as_legacy_tcp()) } as usize;
+        let unordered_input_count =
+            unsafe { c::tcp_getUnorderedInputPacketCount(self.as_legacy_tcp()) } as usize;
+        let partial_packet = unsafe { c::tcp_getPartialUserDataPacket(self.as_legacy_tcp()) };
+        let partial_offset = unsafe { c::tcp_getPartialOffset(self.as_legacy_tcp()) };
+        let retransmit_scheduled_expiration_count =
+            unsafe { c::tcp_getRetransmitScheduledExpirationCount(self.as_legacy_tcp()) } as usize;
+        let marked_lost_count =
+            unsafe { c::tcp_getRetransmitTallyMarkedLostCount(self.as_legacy_tcp()) } as usize;
+        let sacked_count =
+            unsafe { c::tcp_getRetransmitTallySackedCount(self.as_legacy_tcp()) } as usize;
+        let retransmitted_count =
+            unsafe { c::tcp_getRetransmitTallyRetransmittedCount(self.as_legacy_tcp()) } as usize;
+
         LegacyTcpSocketRuntimeSnapshot {
             tcp_state: state.state,
             tcp_flags: state.flags,
@@ -117,6 +204,137 @@ impl LegacyTcpSocket {
             send_last_ack: state.send_last_ack,
             send_last_window: state.send_last_window,
             send_highest_seq: state.send_highest_seq,
+            retransmit_queue: Self::snapshot_owned_packets(retransmit_queue_count, |idx| unsafe {
+                c::tcp_getRetransmitQueuePacketAt(self.as_legacy_tcp(), idx.try_into().unwrap())
+            }),
+            throttled_output: Self::snapshot_owned_packets(throttled_output_count, |idx| unsafe {
+                c::tcp_getThrottledOutputPacketAt(self.as_legacy_tcp(), idx.try_into().unwrap())
+            }),
+            output_buffer: Self::snapshot_owned_packets(output_buffer_count, |idx| unsafe {
+                c::legacysocket_getOutputBufferPacketAt(
+                    self.as_legacy_socket(),
+                    0,
+                    idx.try_into().unwrap(),
+                )
+            }),
+            output_control_buffer: Self::snapshot_owned_packets(
+                output_control_buffer_count,
+                |idx| unsafe {
+                    c::legacysocket_getOutputBufferPacketAt(
+                        self.as_legacy_socket(),
+                        1,
+                        idx.try_into().unwrap(),
+                    )
+                },
+            ),
+            input_buffer: Self::snapshot_owned_packets(input_buffer_count, |idx| unsafe {
+                c::legacysocket_getInputBufferPacketAt(
+                    self.as_legacy_socket(),
+                    idx.try_into().unwrap(),
+                )
+            }),
+            unordered_input: Self::snapshot_owned_packets(unordered_input_count, |idx| unsafe {
+                c::tcp_getUnorderedInputPacketAt(self.as_legacy_tcp(), idx.try_into().unwrap())
+            }),
+            partial_user_data_packet: (!partial_packet.is_null()).then(|| {
+                let packet = PacketRc::from_raw(partial_packet);
+                packet_to_snapshot(&packet)
+            }),
+            partial_offset,
+            retransmit_timeout_ms: unsafe { c::tcp_getRetransmitTimeout(self.as_legacy_tcp()) },
+            retransmit_desired_expiration_ns: {
+                let expiration =
+                    unsafe { c::tcp_getRetransmitDesiredTimerExpiration(self.as_legacy_tcp()) };
+                (expiration != 0).then_some(expiration)
+            },
+            retransmit_scheduled_expirations_ns: (0..retransmit_scheduled_expiration_count)
+                .filter_map(|idx| {
+                    let expiration = unsafe {
+                        c::tcp_getRetransmitScheduledExpirationAt(
+                            self.as_legacy_tcp(),
+                            idx.try_into().unwrap(),
+                        )
+                    };
+                    (expiration != 0).then_some(expiration)
+                })
+                .collect(),
+            retransmit_backoff_count: unsafe {
+                c::tcp_getRetransmitBackoffCount(self.as_legacy_tcp())
+            },
+            delayed_ack_is_scheduled: unsafe {
+                c::tcp_getDelayedAckIsScheduled(self.as_legacy_tcp()) != 0
+            },
+            delayed_ack_counter: unsafe { c::tcp_getDelayedAckCounter(self.as_legacy_tcp()) },
+            num_quick_acks_sent: unsafe { c::tcp_getNumQuickACKsSent(self.as_legacy_tcp()) },
+            window_update_pending: unsafe {
+                c::tcp_getWindowUpdatePending(self.as_legacy_tcp()) != 0
+            },
+            timing_rtt_smoothed_ms: unsafe { c::tcp_getTimingRttSmoothed(self.as_legacy_tcp()) },
+            timing_rtt_variance_ms: unsafe { c::tcp_getTimingRttVariance(self.as_legacy_tcp()) },
+            congestion_cwnd: unsafe { c::tcp_getCongestionWindow(self.as_legacy_tcp()) },
+            congestion_ssthresh: unsafe { c::tcp_getCongestionSsthresh(self.as_legacy_tcp()) },
+            congestion_duplicate_ack_n: unsafe {
+                c::tcp_getCongestionDuplicateAckCount(self.as_legacy_tcp())
+            }
+            .try_into()
+            .unwrap(),
+            congestion_avoid_nacked: unsafe {
+                c::tcp_getCongestionAvoidNacked(self.as_legacy_tcp())
+            },
+            congestion_state: match unsafe { c::tcp_getCongestionState(self.as_legacy_tcp()) } {
+                c::_LegacyTcpCongestionState_TCP_CONG_STATE_SLOW_START => {
+                    LegacyTcpCongestionStateSnapshot::SlowStart
+                }
+                c::_LegacyTcpCongestionState_TCP_CONG_STATE_CONG_AVOID => {
+                    LegacyTcpCongestionStateSnapshot::CongestionAvoidance
+                }
+                c::_LegacyTcpCongestionState_TCP_CONG_STATE_FAST_RECOVERY => {
+                    LegacyTcpCongestionStateSnapshot::FastRecovery
+                }
+                _ => LegacyTcpCongestionStateSnapshot::Unknown,
+            },
+            retransmit_tally: RetransmitTallySnapshot {
+                last_ack: unsafe { c::tcp_getRetransmitTallyLastAck(self.as_legacy_tcp()) },
+                num_dup_acks: unsafe { c::tcp_getRetransmitTallyNumDupAcks(self.as_legacy_tcp()) }
+                    .try_into()
+                    .unwrap(),
+                marked_lost: (0..marked_lost_count)
+                    .map(|idx| unsafe {
+                        let range = c::tcp_getRetransmitTallyMarkedLostRange(
+                            self.as_legacy_tcp(),
+                            idx.try_into().unwrap(),
+                        );
+                        SeqRangeSnapshot {
+                            begin: range.begin,
+                            end: range.end,
+                        }
+                    })
+                    .collect(),
+                sacked: (0..sacked_count)
+                    .map(|idx| unsafe {
+                        let range = c::tcp_getRetransmitTallySackedRange(
+                            self.as_legacy_tcp(),
+                            idx.try_into().unwrap(),
+                        );
+                        SeqRangeSnapshot {
+                            begin: range.begin,
+                            end: range.end,
+                        }
+                    })
+                    .collect(),
+                retransmitted: (0..retransmitted_count)
+                    .map(|idx| unsafe {
+                        let range = c::tcp_getRetransmitTallyRetransmittedRange(
+                            self.as_legacy_tcp(),
+                            idx.try_into().unwrap(),
+                        );
+                        SeqRangeSnapshot {
+                            begin: range.begin,
+                            end: range.end,
+                        }
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -207,6 +425,146 @@ impl LegacyTcpSocket {
                 peer_addr.port().to_be(),
             );
             c::tcp_restoreEstablishedState(socket_ref.as_legacy_tcp(), host, &state);
+            c::tcp_restoreRetransmitState(
+                socket_ref.as_legacy_tcp(),
+                snapshot.retransmit_timeout_ms,
+                snapshot
+                    .retransmit_desired_expiration_ns
+                    .unwrap_or_default(),
+                snapshot.retransmit_backoff_count,
+                snapshot.timing_rtt_smoothed_ms,
+                snapshot.timing_rtt_variance_ms,
+                snapshot.delayed_ack_is_scheduled.into(),
+                snapshot.delayed_ack_counter,
+                snapshot.num_quick_acks_sent,
+                snapshot.window_update_pending.into(),
+            );
+            c::tcp_restoreCongestionState(
+                socket_ref.as_legacy_tcp(),
+                snapshot.congestion_cwnd,
+                snapshot.congestion_ssthresh,
+                snapshot.congestion_duplicate_ack_n.try_into().unwrap(),
+                snapshot.congestion_avoid_nacked,
+                match snapshot.congestion_state {
+                    LegacyTcpCongestionStateSnapshot::Unknown => {
+                        c::_LegacyTcpCongestionState_TCP_CONG_STATE_UNKNOWN
+                    }
+                    LegacyTcpCongestionStateSnapshot::SlowStart => {
+                        c::_LegacyTcpCongestionState_TCP_CONG_STATE_SLOW_START
+                    }
+                    LegacyTcpCongestionStateSnapshot::CongestionAvoidance => {
+                        c::_LegacyTcpCongestionState_TCP_CONG_STATE_CONG_AVOID
+                    }
+                    LegacyTcpCongestionStateSnapshot::FastRecovery => {
+                        c::_LegacyTcpCongestionState_TCP_CONG_STATE_FAST_RECOVERY
+                    }
+                },
+            );
+            let marked_lost: Vec<c::LegacyTcpRangeSnapshot> = snapshot
+                .retransmit_tally
+                .marked_lost
+                .iter()
+                .map(|range| c::LegacyTcpRangeSnapshot {
+                    begin: range.begin,
+                    end: range.end,
+                })
+                .collect();
+            let sacked: Vec<c::LegacyTcpRangeSnapshot> = snapshot
+                .retransmit_tally
+                .sacked
+                .iter()
+                .map(|range| c::LegacyTcpRangeSnapshot {
+                    begin: range.begin,
+                    end: range.end,
+                })
+                .collect();
+            let retransmitted: Vec<c::LegacyTcpRangeSnapshot> = snapshot
+                .retransmit_tally
+                .retransmitted
+                .iter()
+                .map(|range| c::LegacyTcpRangeSnapshot {
+                    begin: range.begin,
+                    end: range.end,
+                })
+                .collect();
+            c::tcp_restoreRetransmitTally(
+                socket_ref.as_legacy_tcp(),
+                snapshot.retransmit_tally.last_ack,
+                snapshot.retransmit_tally.num_dup_acks.try_into().unwrap(),
+                marked_lost.as_ptr(),
+                marked_lost.len().try_into().unwrap(),
+                sacked.as_ptr(),
+                sacked.len().try_into().unwrap(),
+                retransmitted.as_ptr(),
+                retransmitted.len().try_into().unwrap(),
+            );
+            for expiration in &snapshot.retransmit_scheduled_expirations_ns {
+                c::tcp_restoreRetransmitScheduledExpiration(
+                    socket_ref.as_legacy_tcp(),
+                    *expiration,
+                );
+            }
+            for packet in &snapshot.retransmit_queue {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restoreRetransmitQueuePacket(
+                        socket_ref.as_legacy_tcp(),
+                        PacketRc::from(packet).into_raw(),
+                    );
+                }
+            }
+            for packet in &snapshot.output_control_buffer {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restoreOutputBufferPacket(
+                        socket_ref.as_legacy_tcp(),
+                        host,
+                        PacketRc::from(packet).into_raw(),
+                    );
+                }
+            }
+            for packet in &snapshot.output_buffer {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restoreOutputBufferPacket(
+                        socket_ref.as_legacy_tcp(),
+                        host,
+                        PacketRc::from(packet).into_raw(),
+                    );
+                }
+            }
+            for packet in &snapshot.throttled_output {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restoreThrottledOutputPacket(
+                        socket_ref.as_legacy_tcp(),
+                        PacketRc::from(packet).into_raw(),
+                    );
+                }
+            }
+            for packet in &snapshot.input_buffer {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restoreInputBufferPacket(
+                        socket_ref.as_legacy_tcp(),
+                        host,
+                        PacketRc::from(packet).into_raw(),
+                    );
+                }
+            }
+            for packet in &snapshot.unordered_input {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restoreUnorderedInputPacket(
+                        socket_ref.as_legacy_tcp(),
+                        PacketRc::from(packet).into_raw(),
+                    );
+                }
+            }
+            if let Some(packet) = &snapshot.partial_user_data_packet {
+                if let Some(packet) = packet_from_snapshot(packet) {
+                    c::tcp_restorePartialUserDataPacket(
+                        socket_ref.as_legacy_tcp(),
+                        PacketRc::from(packet).into_raw(),
+                        snapshot.partial_offset,
+                    );
+                }
+            }
+            c::tcp_refreshReadableInputState(socket_ref.as_legacy_tcp());
         }
 
         Ok(())
@@ -635,6 +993,9 @@ impl LegacyTcpSocket {
                     }
                 }
 
+                let input_len_before =
+                    usize::try_from(unsafe { c::tcp_getInputBufferLength(tcp) }).unwrap();
+
                 // SAFETY: We're passing a mutable pointer to the memory manager. We should not have
                 // any other mutable references to the memory manager at this point.
                 let rv = Worker::with_active_host(|host| unsafe {
@@ -658,6 +1019,13 @@ impl LegacyTcpSocket {
                     }
                 }
 
+                let input_len_after =
+                    usize::try_from(unsafe { c::tcp_getInputBufferLength(tcp) }).unwrap();
+                socket_ref.trace_restore_drain(
+                    rv.try_into().unwrap(),
+                    input_len_before,
+                    input_len_after,
+                );
                 bytes_read += rv;
 
                 if usize::try_from(rv).unwrap() < iov.len {

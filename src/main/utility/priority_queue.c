@@ -173,3 +173,11 @@ gpointer priorityqueue_pop(PriorityQueue *q) {
     }
     return NULL;
 }
+
+gpointer priorityqueue_getDataAt(PriorityQueue *q, gsize index) {
+    utility_debugAssert(q);
+    if (index < q->size) {
+        return q->heap[index];
+    }
+    return NULL;
+}

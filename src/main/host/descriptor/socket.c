@@ -18,6 +18,124 @@
 
 gsize _legacysocket_getOutputBufferSpaceIncludingTCP(LegacySocket* socket);
 
+static gboolean _legacysocket_restore_output_trace_enabled(const Host* host, LegacySocket* socket) {
+    const char* raw = getenv("SHADOW_RESTORE_OUTPUT_TRACE");
+    if (raw == NULL || raw[0] == '\0' || strcmp(raw, "0") == 0) {
+        return FALSE;
+    }
+
+    const char* host_name = host_getName(host);
+    if (host_name == NULL) {
+        host_name = "";
+    }
+
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(socket, &local_ip, &local_port);
+    legacysocket_getPeerName(socket, &peer_ip, &peer_port);
+
+    guint16 local_port_host = ntohs(local_port);
+    guint16 peer_port_host = ntohs(peer_port);
+    bool matched = false;
+    bool host_ok = false;
+    bool port_ok = false;
+
+    gchar** parts = g_strsplit(raw, ",", -1);
+    for (gsize i = 0; parts[i] != NULL; i++) {
+        gchar* token = g_strstrip(parts[i]);
+        if (token[0] == '\0') {
+            continue;
+        }
+        if (strcmp(token, "1") == 0 || strcmp(token, "all") == 0) {
+            matched = true;
+            host_ok = true;
+            port_ok = true;
+            continue;
+        }
+        if (g_str_has_prefix(token, "host=")) {
+            matched = true;
+            if (strcmp(token + strlen("host="), host_name) == 0) {
+                host_ok = true;
+            }
+            continue;
+        }
+        if (g_str_has_prefix(token, "port=")) {
+            matched = true;
+            guint64 port = g_ascii_strtoull(token + strlen("port="), NULL, 10);
+            if (port > 0 && port <= G_MAXUINT16 &&
+                (((guint16)port == local_port_host) || ((guint16)port == peer_port_host))) {
+                port_ok = true;
+            }
+            continue;
+        }
+    }
+    g_strfreev(parts);
+
+    if (!matched) {
+        return FALSE;
+    }
+    if (strstr(raw, "host=") != NULL && !host_ok) {
+        return FALSE;
+    }
+    if (strstr(raw, "port=") != NULL && !port_ok) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void _legacysocket_restore_output_trace(const Host* host, LegacySocket* socket,
+                                               const char* action, Packet* packet_or_null,
+                                               const char* buffer_kind) {
+    if (!_legacysocket_restore_output_trace_enabled(host, socket)) {
+        return;
+    }
+
+    in_addr_t local_ip = 0;
+    in_port_t local_port = 0;
+    in_addr_t peer_ip = 0;
+    in_port_t peer_port = 0;
+    legacysocket_getSocketName(socket, &local_ip, &local_port);
+    legacysocket_getPeerName(socket, &peer_ip, &peer_port);
+
+    char local_ip_buf[INET_ADDRSTRLEN] = {0};
+    char peer_ip_buf[INET_ADDRSTRLEN] = {0};
+    const char* local_ip_str = inet_ntop(AF_INET, &local_ip, local_ip_buf, sizeof(local_ip_buf));
+    const char* peer_ip_str = inet_ntop(AF_INET, &peer_ip, peer_ip_buf, sizeof(peer_ip_buf));
+    if (local_ip_str == NULL) {
+        local_ip_str = "?";
+    }
+    if (peer_ip_str == NULL) {
+        peer_ip_str = "?";
+    }
+
+    guint seq = 0;
+    guint ack = 0;
+    guint flags = 0;
+    guint64 priority = 0;
+    guint payload = 0;
+    if (packet_or_null != NULL) {
+        PacketTCPHeader header = packet_getTCPHeader(packet_or_null);
+        seq = header.sequence;
+        ack = header.acknowledgment;
+        flags = header.flags;
+        priority = packet_getPriority(packet_or_null);
+        payload = packet_getPayloadSize(packet_or_null);
+    }
+
+    info("restore-output-trace host=%s sim_time_ns=%" G_GUINT64_FORMAT
+         " action=%s local=%s:%u peer=%s:%u socket_ptr=%p buffer_kind=%s"
+         " output_len=%" G_GSIZE_FORMAT " output_ctl_count=%" G_GSIZE_FORMAT
+         " output_count=%" G_GSIZE_FORMAT
+         " priority=%" G_GUINT64_FORMAT " seq=%u ack=%u flags=0x%x payload=%u",
+         host_getName(host), worker_getCurrentSimulationTime(), action, local_ip_str,
+         ntohs(local_port), peer_ip_str, ntohs(peer_port), socket,
+         buffer_kind ? buffer_kind : "-", socket->outputBufferLength,
+         (gsize)g_queue_get_length(socket->outputControlBuffer),
+         (gsize)g_queue_get_length(socket->outputBuffer), priority, seq, ack, flags, payload);
+}
+
 static LegacySocket* _legacysocket_fromLegacyFile(LegacyFile* descriptor) {
     utility_debugAssert(legacyfile_getType(descriptor) == DT_TCPSOCKET);
     return (LegacySocket*)descriptor;
@@ -192,6 +310,36 @@ Packet* legacysocket_peekNextOutPacket(const LegacySocket* socket) {
 Packet* legacysocket_peekNextInPacket(const LegacySocket* socket) {
     MAGIC_ASSERT(socket);
     return g_queue_peek_head(socket->inputBuffer);
+}
+
+gsize legacysocket_getInputBufferPacketCount(LegacySocket* socket) {
+    MAGIC_ASSERT(socket);
+    return g_queue_get_length(socket->inputBuffer);
+}
+
+Packet* legacysocket_getInputBufferPacketAt(LegacySocket* socket, gsize index) {
+    MAGIC_ASSERT(socket);
+    Packet* packet = g_queue_peek_nth(socket->inputBuffer, index);
+    if (packet != NULL) {
+        packet_ref(packet);
+    }
+    return packet;
+}
+
+gsize legacysocket_getOutputBufferPacketCount(LegacySocket* socket, gboolean control) {
+    MAGIC_ASSERT(socket);
+    GQueue* queue = control ? socket->outputControlBuffer : socket->outputBuffer;
+    return g_queue_get_length(queue);
+}
+
+Packet* legacysocket_getOutputBufferPacketAt(LegacySocket* socket, gboolean control, gsize index) {
+    MAGIC_ASSERT(socket);
+    GQueue* queue = control ? socket->outputControlBuffer : socket->outputBuffer;
+    Packet* packet = g_queue_peek_nth(queue, index);
+    if (packet != NULL) {
+        packet_ref(packet);
+    }
+    return packet;
 }
 
 gboolean legacysocket_getPeerName(LegacySocket* socket, in_addr_t* ip, in_port_t* port) {
@@ -408,8 +556,10 @@ gboolean legacysocket_addToOutputBuffer(LegacySocket* socket, InetSocket* inetSo
     if(packet_getPriority(packet) == 0) {
         /* control packets get sent first */
         g_queue_push_tail(socket->outputControlBuffer, packet);
+        _legacysocket_restore_output_trace(host, socket, "add_output", packet, "control");
     } else {
         g_queue_push_tail(socket->outputBuffer, packet);
+        _legacysocket_restore_output_trace(host, socket, "add_output", packet, "data");
     }
 
     socket->outputBufferLength += length;
@@ -430,6 +580,12 @@ Packet* legacysocket_removeFromOutputBuffer(LegacySocket* socket, const Host* ho
             g_queue_pop_head(socket->outputControlBuffer) : g_queue_pop_head(socket->outputBuffer);
 
     if(packet) {
+        _legacysocket_restore_output_trace(
+            host,
+            socket,
+            "remove_output",
+            packet,
+            packet_getPriority(packet) == 0 ? "control" : "data");
         /* just removed a packet */
         gsize length = packet_getPayloadSize(packet);
         socket->outputBufferLength -= length;

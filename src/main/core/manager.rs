@@ -1,6 +1,8 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr, OsString};
+use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -672,10 +674,9 @@ impl<'a> Manager<'a> {
                     }
                 };
 
-                let mut print_next_window_info = || {
+                let mut print_next_window_info = || -> String {
                     let Some((next_window_start, next_window_end)) = next_window else {
-                        eprintln!("** No next window (simulation ending)");
-                        return;
+                        return "** No next window (simulation ending)\n".to_string();
                     };
 
                     let info = Arc::new(Mutex::new(Vec::new()));
@@ -706,40 +707,42 @@ impl<'a> Manager<'a> {
                     });
 
                     let mut info = info.lock().unwrap();
+                    let mut output = String::new();
                     if info.is_empty() {
-                        eprintln!("** No hosts scheduled in next window");
-                        return;
+                        output.push_str("** No hosts scheduled in next window\n");
+                        return output;
                     }
                     info.sort_by_key(|(id, _, _, _)| *id);
 
-                    eprintln!("**");
-                    eprintln!(
-                        "** Next window: t=[{}, {}]",
+                    output.push_str("**\n");
+                    output.push_str(&format!(
+                        "** Next window: t=[{}, {}]\n",
                         fmt_s(
                             (next_window_start - EmulatedTime::SIMULATION_START).as_nanos() as u64
                         ),
                         fmt_s((next_window_end - EmulatedTime::SIMULATION_START).as_nanos() as u64)
-                    );
-                    eprintln!("** Hosts scheduled for next window:");
+                    ));
+                    output.push_str("** Hosts scheduled for next window:\n");
                     for (host_id, hostname, next_time, pids) in info.iter() {
-                        eprintln!(
-                            "**   Host {:?} ({}) - next event at t={}",
+                        output.push_str(&format!(
+                            "**   Host {:?} ({}) - next event at t={}\n",
                             host_id,
                             hostname,
                             fmt_s((*next_time - EmulatedTime::SIMULATION_START).as_nanos() as u64)
-                        );
+                        ));
                         if pids.is_empty() {
-                            eprintln!("**     <no running processes>");
+                            output.push_str("**     <no running processes>\n");
                         } else {
                             for pid in pids {
-                                eprintln!(
-                                    "**     pid={} (attach: s:{})",
+                                output.push_str(&format!(
+                                    "**     pid={} (attach: s:{})\n",
                                     pid.as_raw_nonzero().get(),
                                     pid.as_raw_nonzero().get()
-                                );
+                                ));
                             }
                         }
                     }
+                    output
                 };
 
                 let boundary_ctx = WindowBoundaryContext {
@@ -1157,6 +1160,7 @@ impl<'a> Manager<'a> {
         let criu_base_dir = checkpoint_base.join("criu");
         let checkpoint_time =
             EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(current_sim_time_ns);
+        let restore_mode = restore_protocol_mode_from_env();
 
         std::fs::create_dir_all(&checkpoint_base)
             .context("Failed to create checkpoint directory")?;
@@ -1194,6 +1198,7 @@ impl<'a> Manager<'a> {
             });
         });
         let mut host_snapshots = host_snapshots.lock().unwrap().clone();
+        audit_checkpoint_event_queue(&host_snapshots, restore_mode)?;
 
         // (3) CRIU: freeze+dump each native plugin process tree; record image dir in the snapshot
         // so JSON and CRIU dirs stay linked. leave_running=true: dump then resume — simulation
@@ -1203,7 +1208,6 @@ impl<'a> Manager<'a> {
         // (4) ASSEMBLE + SAVE: one SimulationCheckpoint struct (hosts + paths + window/sim time + runahead).
         let worker_shared = worker::WORKER_SHARED.borrow();
         let worker_shared = worker_shared.as_ref().unwrap();
-        let restore_mode = restore_protocol_mode_from_env();
         let restore_protocol =
             build_restore_protocol_snapshot(&host_snapshots, current_sim_time_ns, restore_mode);
         let checkpoint = SimulationCheckpoint {
@@ -1306,7 +1310,86 @@ fn checkpoint_running_process_images(
     Ok(())
 }
 
+fn task_descriptor_kind_name(desc: &TaskDescriptor) -> &'static str {
+    match desc {
+        TaskDescriptor::ResumeProcess { .. } => "ResumeProcess",
+        TaskDescriptor::StartApplication { .. } => "StartApplication",
+        TaskDescriptor::ShutdownProcess { .. } => "ShutdownProcess",
+        TaskDescriptor::RelayForward { .. } => "RelayForward",
+        TaskDescriptor::SyscallConditionWake { .. } => "SyscallConditionWake",
+        TaskDescriptor::PreparePollTimeoutCompletion { .. } => "PreparePollTimeoutCompletion",
+        TaskDescriptor::RestoreBlockedSyscallCondition { .. } => "RestoreBlockedSyscallCondition",
+        TaskDescriptor::LegacyTcpDeferredAction { .. } => "LegacyTcpDeferredAction",
+        TaskDescriptor::TimerExpire { .. } => "TimerExpire",
+        TaskDescriptor::ExecContinuation { .. } => "ExecContinuation",
+        TaskDescriptor::Opaque { .. } => "Opaque",
+    }
+}
+
+fn audit_checkpoint_event_queue(
+    host_snapshots: &[HostCheckpoint],
+    restore_mode: RestoreProtocolModeSnapshot,
+) -> anyhow::Result<()> {
+    let mut counts = BTreeMap::<&'static str, usize>::new();
+    let mut opaque_examples = Vec::new();
+
+    for host in host_snapshots {
+        for event in &host.event_queue {
+            let EventDataSnapshot::Local(local) = &event.data else {
+                continue;
+            };
+            let kind = task_descriptor_kind_name(&local.task);
+            *counts.entry(kind).or_default() += 1;
+            if let TaskDescriptor::Opaque { description } = &local.task {
+                opaque_examples.push(format!(
+                    "host='{}' event_id={} time_ns={} desc={}",
+                    host.hostname, local.event_id, event.time_ns, description
+                ));
+            }
+        }
+    }
+
+    if !counts.is_empty() {
+        let summary = counts
+            .iter()
+            .map(|(kind, count)| format!("{kind}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        log::info!(
+            "checkpoint event audit (mode={:?}): local-task counts: {}",
+            restore_mode,
+            summary
+        );
+    }
+
+    if restore_mode == RestoreProtocolModeSnapshot::DeterministicV2 && !opaque_examples.is_empty() {
+        let preview = opaque_examples
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        anyhow::bail!(
+            "deterministic_v2 checkpoint rejected: {} local tasks fell back to Opaque; examples: {}",
+            opaque_examples.len(),
+            preview
+        );
+    }
+
+    Ok(())
+}
+
 fn snapshot_host(host: &Host) -> HostCheckpoint {
+    if restore_protocol_mode_from_env() == RestoreProtocolModeSnapshot::DeterministicV2 {
+        log::info!(
+            "checkpoint network-container audit host='{}': router_pending={} relay_inet_out_pending={} relay_inet_in_pending={} relay_loopback_pending={}",
+            host.name(),
+            host.router_pending_packet_count(),
+            host.relay_inet_out_pending_packet_count(),
+            host.relay_inet_in_pending_packet_count(),
+            host.relay_loopback_pending_packet_count(),
+        );
+    }
     let queue = host.event_queue().lock().unwrap();
     let event_queue = queue
         .cloned_events()
@@ -1318,6 +1401,43 @@ fn snapshot_host(host: &Host) -> HostCheckpoint {
         .saturating_duration_since(&EmulatedTime::SIMULATION_START)
         .as_nanos() as u64;
     drop(queue);
+
+    let localhost_send_queue = host
+        .interface_borrow(Ipv4Addr::LOCALHOST)
+        .map(|iface| {
+            let state = iface.snapshot_send_socket_queue();
+            InterfaceSendQueueCheckpoint {
+                next_push_order: state.next_push_order,
+                entries: state
+                    .entries
+                    .into_iter()
+                    .map(|entry| InterfaceSendQueueEntryCheckpoint {
+                        canonical_handle: entry.canonical_handle,
+                        priority: entry.priority,
+                        push_order: entry.push_order,
+                    })
+                    .collect(),
+            }
+        })
+        .unwrap_or_default();
+    let internet_send_queue = host
+        .interface_borrow(host.default_ip())
+        .map(|iface| {
+            let state = iface.snapshot_send_socket_queue();
+            InterfaceSendQueueCheckpoint {
+                next_push_order: state.next_push_order,
+                entries: state
+                    .entries
+                    .into_iter()
+                    .map(|entry| InterfaceSendQueueEntryCheckpoint {
+                        canonical_handle: entry.canonical_handle,
+                        priority: entry.priority,
+                        push_order: entry.push_order,
+                    })
+                    .collect(),
+            }
+        })
+        .unwrap_or_default();
 
     HostCheckpoint {
         host_id: u32::from(host.id()),
@@ -1354,6 +1474,8 @@ fn snapshot_host(host: &Host) -> HostCheckpoint {
             })
             .collect(),
         host_shmem_handle: host.shim_shmem().serialize().to_string(),
+        localhost_send_queue,
+        internet_send_queue,
     }
 }
 
@@ -1411,10 +1533,16 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
                         runtime.blocked_active_file_fd = cond
                             .active_file_canonical_handle()
                             .and_then(resolve_handle_to_fd);
+                        runtime.blocked_listener_sequence_value =
+                            cond.trigger_listener_sequence_value();
                     }
                     if runtime.blocked_syscall_active
                         && let Some(syscall_args) = thread.mthread().current_syscall_args()
                     {
+                        if syscall_args.number == libc::SYS_futex {
+                            runtime.blocked_futex_word =
+                                Some(u64::try_from(usize::from(syscall_args.args[0])).unwrap());
+                        }
                         runtime.poll_watches = snapshot_poll_watches(process, syscall_args);
                         runtime.blocked_syscall_phase = BlockedSyscallPhaseSnapshot::Waiting;
                         runtime.blocked_syscall_instance_id = Some(make_blocked_syscall_instance_id(
@@ -1438,6 +1566,7 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
                     if runtime.pending_result.is_none()
                         && runtime.blocked_trigger_kind
                             == Some(crate::core::checkpoint::snapshot_types::BlockedTriggerKindSnapshot::Futex)
+                        && restore_mode != RestoreProtocolModeSnapshot::DeterministicV2
                     {
                         runtime.pending_result = Some(
                             crate::core::checkpoint::snapshot_types::PendingSyscallResultSnapshot::Done {
@@ -1525,6 +1654,80 @@ fn restore_host_globals(host: &Host, checkpoint: &HostCheckpoint) {
     );
 }
 
+fn build_live_inet_socket_map(host: &Host) -> HashMap<u64, crate::host::descriptor::socket::inet::InetSocket> {
+    let mut sockets = HashMap::new();
+    let processes = host.processes_borrow();
+    for process_rc in processes.values() {
+        let process = process_rc.borrow(host.root());
+        let Some(thread_rc) = process.first_live_thread_borrow(host.root()) else {
+            continue;
+        };
+        let thread = thread_rc.borrow(host.root());
+        let table = thread.descriptor_table_borrow(host);
+        for (_, descriptor) in table.iter() {
+            let crate::host::descriptor::CompatFile::New(open_file) = descriptor.file() else {
+                continue;
+            };
+            let crate::host::descriptor::File::Socket(crate::host::descriptor::socket::Socket::Inet(inet_socket)) =
+                open_file.inner_file()
+            else {
+                continue;
+            };
+            sockets
+                .entry(inet_socket.canonical_handle() as u64)
+                .or_insert_with(|| inet_socket.clone());
+        }
+    }
+    sockets
+}
+
+fn restore_interface_send_queues(host: &Host, checkpoint: &HostCheckpoint) -> anyhow::Result<()> {
+    let mut sockets_by_handle = build_live_inet_socket_map(host);
+    let translated: Vec<_> = sockets_by_handle
+        .iter()
+        .map(|(live_handle, socket)| (*live_handle, socket.clone()))
+        .collect();
+    for (live_handle, socket) in translated {
+        sockets_by_handle.entry(live_handle).or_insert(socket);
+    }
+
+    let restore_one = |iface: &crate::host::network::interface::NetworkInterface,
+                       snapshot: &InterfaceSendQueueCheckpoint|
+     -> anyhow::Result<()> {
+        let translated_entries = crate::host::network::interface::SendSocketQueueState {
+            kind: iface.snapshot_send_socket_queue().kind,
+            next_push_order: snapshot.next_push_order,
+            entries: snapshot
+                .entries
+                .iter()
+                .map(|entry| crate::host::network::interface::SendSocketQueueEntry {
+                    canonical_handle: host
+                        .translate_restored_canonical_handle(entry.canonical_handle)
+                        .unwrap_or(entry.canonical_handle),
+                    priority: entry.priority,
+                    push_order: entry.push_order,
+                })
+                .collect(),
+        };
+        iface.restore_send_socket_queue(&translated_entries, &sockets_by_handle)
+            .map_err(|missing| {
+                anyhow::anyhow!(
+                    "restore: missing inet sockets for interface send queue on host '{}' handles={missing:?}",
+                    host.name()
+                )
+            })
+    };
+
+    if let Some(localhost_iface) = host.interface_borrow(Ipv4Addr::LOCALHOST) {
+        restore_one(&localhost_iface, &checkpoint.localhost_send_queue)?;
+    }
+    if let Some(internet_iface) = host.interface_borrow(host.default_ip()) {
+        restore_one(&internet_iface, &checkpoint.internet_send_queue)?;
+    }
+
+    Ok(())
+}
+
 fn descriptor_census_enabled() -> bool {
     std::env::var("SHADOW_LOG_DESCRIPTOR_CENSUS")
         .map(|x| x == "1")
@@ -1572,6 +1775,9 @@ fn restore_protocol_mode_from_env() -> RestoreProtocolModeSnapshot {
         .unwrap_or_else(|| "protocol_v1".to_string());
     match raw.trim().to_ascii_lowercase().as_str() {
         "legacy" | "legacy_heuristic" => RestoreProtocolModeSnapshot::LegacyHeuristic,
+        "deterministic" | "deterministic_v2" | "strict_deterministic" => {
+            RestoreProtocolModeSnapshot::DeterministicV2
+        }
         _ => RestoreProtocolModeSnapshot::ProtocolV1,
     }
 }
@@ -1592,6 +1798,11 @@ fn socket_fixup_enabled(restore_protocol_mode: RestoreProtocolModeSnapshot) -> b
     }
 }
 
+fn deterministic_restore_enabled(restore_protocol_mode: RestoreProtocolModeSnapshot) -> bool {
+    restore_protocol_mode == RestoreProtocolModeSnapshot::DeterministicV2
+        || env_flag("SHADOW_STRICT_DETERMINISTIC_RESTORE")
+}
+
 fn thread_restore_policy_from_mode(
     mode: RestoreProtocolModeSnapshot,
 ) -> ThreadRestorePolicySnapshot {
@@ -1600,6 +1811,7 @@ fn thread_restore_policy_from_mode(
             ThreadRestorePolicySnapshot::LegacyHeuristic
         }
         RestoreProtocolModeSnapshot::ProtocolV1 => ThreadRestorePolicySnapshot::ProtocolV1,
+        RestoreProtocolModeSnapshot::DeterministicV2 => ThreadRestorePolicySnapshot::DeterministicV2,
     }
 }
 
@@ -1624,6 +1836,11 @@ fn blocked_restore_action_for_runtime(
     }
     if !runtime.blocked_syscall_active {
         return BlockedSyscallRestoreActionSnapshot::None;
+    }
+    if runtime.blocked_trigger_kind == Some(BlockedTriggerKindSnapshot::Futex)
+        && runtime.blocked_futex_word.is_some()
+    {
+        return BlockedSyscallRestoreActionSnapshot::RearmFutex;
     }
     if !runtime.poll_watches.is_empty() {
         return BlockedSyscallRestoreActionSnapshot::RearmPoll;
@@ -1871,6 +2088,7 @@ fn apply_host_checkpoint(
         };
         host.attach_restored_shim_shmem(restored_shim_shmem);
     }
+    host.clear_restored_canonical_handle_aliases();
     host.set_shim_clock_state(checkpoint_time, checkpoint_time);
 
     // Reinstall the serialized queue and host-global counters before rebuilding
@@ -1896,12 +2114,14 @@ fn apply_host_checkpoint(
             processes.insert(process_id, process);
         }
     }
+    restore_interface_send_queues(host, checkpoint)?;
     let restored_now =
         EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
     // Kick restored runnable processes once after replay. The serialized event
     // queue may not include resume tasks for already-running workloads.
     let replay_time =
         EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(checkpoint.cpu_now_ns);
+    let deterministic_restore = deterministic_restore_enabled(restore_protocol_mode);
     for process_cp in &checkpoint.processes {
         let Ok(process_id) = crate::host::process::ProcessId::try_from(process_cp.process_id)
         else {
@@ -1911,7 +2131,11 @@ fn apply_host_checkpoint(
             let Some(runtime) = thread_cp.runtime.as_ref() else {
                 continue;
             };
-            if restore_protocol_mode == RestoreProtocolModeSnapshot::ProtocolV1
+            if matches!(
+                restore_protocol_mode,
+                RestoreProtocolModeSnapshot::ProtocolV1
+                    | RestoreProtocolModeSnapshot::DeterministicV2
+            )
                 && runtime.blocked_syscall_active
                 && runtime.blocked_syscall_instance_id.is_none()
             {
@@ -1933,6 +2157,8 @@ fn apply_host_checkpoint(
             let trigger_fd = runtime.blocked_trigger_fd;
             let trigger_state_bits = runtime.blocked_trigger_state_bits;
             let active_file_fd = runtime.blocked_active_file_fd;
+            let blocked_futex_word = runtime.blocked_futex_word;
+            let blocked_listener_sequence_value = runtime.blocked_listener_sequence_value;
             let poll_watches = runtime.poll_watches.clone();
             let blocked_restore_action = runtime.blocked_restore_action;
             let blocked_trigger_kind = runtime.blocked_trigger_kind;
@@ -1958,7 +2184,8 @@ fn apply_host_checkpoint(
                     tid,
                     replay_time + SimulationTime::NANOSECOND,
                 );
-                if blocked_trigger_kind
+                if !deterministic_restore
+                    && blocked_trigger_kind
                     == Some(crate::core::checkpoint::snapshot_types::BlockedTriggerKindSnapshot::Futex)
                 {
                     for nudge_i in 0u64..5 {
@@ -1972,9 +2199,9 @@ fn apply_host_checkpoint(
                 }
                 continue;
             }
-            if !poll_watches.is_empty()
-                && let (Some(abs_timeout), Some(blocked_syscall_nr)) =
-                    (abs_timeout, runtime.blocked_syscall_nr)
+            if let (Some(abs_timeout), Some(blocked_syscall_nr)) =
+                (abs_timeout, runtime.blocked_syscall_nr)
+                && !poll_watches.is_empty()
             {
                 let prepare_task = TaskRef::new_with_descriptor(
                     move |host| {
@@ -1990,11 +2217,10 @@ fn apply_host_checkpoint(
                             .syscallhandler_borrow_mut(host)
                             .prepare_restored_poll_timeout_completion(blocked_syscall_nr);
                     },
-                    TaskDescriptor::Opaque {
-                        description: format!(
-                            "restore_poll_timeout_completion:{}:{}",
-                            process_id, tid
-                        ),
+                    TaskDescriptor::PreparePollTimeoutCompletion {
+                        process_id: u32::from(process_id),
+                        thread_id: u32::try_from(libc::pid_t::from(tid)).unwrap_or_default(),
+                        syscall_nr: blocked_syscall_nr,
                     },
                 );
                 host.schedule_task_at_emulated_time(prepare_task, abs_timeout);
@@ -2013,12 +2239,13 @@ fn apply_host_checkpoint(
                     let thread = thread_rc.borrow(host.root());
                     match blocked_restore_action {
                         BlockedSyscallRestoreActionSnapshot::RearmPoll => {
-                            thread.restore_poll_blocked_syscall_condition(
-                                host,
-                                &process,
-                                &poll_watches,
-                                abs_timeout,
-                            );
+                                thread.restore_poll_blocked_syscall_condition(
+                                    host,
+                                    &process,
+                                    &poll_watches,
+                                    abs_timeout,
+                                    None,
+                                );
                             Worker::clear_active_process();
                             return;
                         }
@@ -2028,6 +2255,19 @@ fn apply_host_checkpoint(
                                     host,
                                     &process,
                                     abs_timeout,
+                                );
+                            }
+                            Worker::clear_active_process();
+                            return;
+                        }
+                        BlockedSyscallRestoreActionSnapshot::RearmFutex => {
+                            if let Some(futex_word) = blocked_futex_word {
+                                thread.restore_futex_blocked_syscall_condition(
+                                    host,
+                                    &process,
+                                    futex_word,
+                                    abs_timeout,
+                                    blocked_listener_sequence_value,
                                 );
                             }
                             Worker::clear_active_process();
@@ -2080,16 +2320,14 @@ fn apply_host_checkpoint(
                     );
                     Worker::clear_active_process();
                 },
-                TaskDescriptor::Opaque {
-                    description: format!(
-                        "restore_blocked_syscall_condition(pid={},tid={})",
-                        u32::from(process_id),
-                        u32::try_from(libc::pid_t::from(tid)).unwrap_or_default()
-                    ),
+                TaskDescriptor::RestoreBlockedSyscallCondition {
+                    process_id: u32::from(process_id),
+                    thread_id: u32::try_from(libc::pid_t::from(tid)).unwrap_or_default(),
                 },
             );
             host.schedule_task_at_emulated_time(task, replay_time + SimulationTime::NANOSECOND);
-            if blocked_restore_action == BlockedSyscallRestoreActionSnapshot::RearmCondition
+            if !deterministic_restore
+                && blocked_restore_action == BlockedSyscallRestoreActionSnapshot::RearmCondition
                 && epoll_triggered_rearm
             {
                 for nudge_i in 0u64..5 {
@@ -2389,9 +2627,11 @@ fn apply_host_checkpoint(
                         });
                         let all_threads_have_runtime =
                             p.threads.iter().all(|t| t.runtime.is_some());
-                        let nudge_count = if has_timeout_blocked_syscall && has_poll_runtime {
+                    let nudge_count = if has_timeout_blocked_syscall && has_poll_runtime {
                             5
                         } else if has_timeout_blocked_syscall {
+                            0
+                        } else if deterministic_restore {
                             0
                         } else if reduced_nudge_mode && all_threads_have_runtime {
                             5
@@ -2422,7 +2662,7 @@ fn apply_host_checkpoint(
             let skip_initial_resume = *file_trigger_blocked_by_process
                 .get(process_id)
                 .unwrap_or(&false);
-            if skip_initial_resume {
+            if skip_initial_resume || (deterministic_restore && *blocked_condition_by_process.get(process_id).unwrap_or(&false)) {
                 continue;
             }
             let process_id_for_log = *process_id;

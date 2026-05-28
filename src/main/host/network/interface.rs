@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use crate::core::configuration::QDiscMode;
 use crate::core::worker::Worker;
 use crate::host::descriptor::socket::inet::InetSocket;
-use crate::host::network::queuing::{NetworkQueue, NetworkQueueKind};
+use crate::host::network::queuing::{
+    NetworkQueue, NetworkQueueKind, NetworkQueueSnapshot, NetworkQueueSnapshotEntry,
+};
 use crate::network::PacketDevice;
 use crate::network::packet::{IanaProtocol, PacketRc, PacketStatus};
 use crate::utility::ObjectCounter;
@@ -18,6 +20,20 @@ use crate::utility::pcap_writer::{PacketDisplay, PcapWriter};
 
 /// The priority used by the fifo qdisc to choose the next socket to send a packet from.
 pub type FifoPacketPriority = u64;
+
+#[derive(Clone, Debug)]
+pub struct SendSocketQueueEntry {
+    pub canonical_handle: u64,
+    pub priority: Option<u64>,
+    pub push_order: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SendSocketQueueState {
+    pub kind: NetworkQueueKind,
+    pub next_push_order: u64,
+    pub entries: Vec<SendSocketQueueEntry>,
+}
 
 #[derive(Debug, Clone)]
 pub struct PcapOptions {
@@ -48,6 +64,91 @@ fn setup_pcap_writer(
 ) -> std::io::Result<PcapWriter<BufWriter<File>>> {
     let file = File::create(options.path.join(format!("{name}.pcap")))?;
     PcapWriter::new(BufWriter::new(file), options.capture_size_bytes)
+}
+
+fn interface_trace_enabled(host_name: &str) -> bool {
+    let Some(raw) = std::env::var_os("SHADOW_RESTORE_INTERFACE_TRACE") else {
+        return false;
+    };
+    let raw = raw.to_string_lossy();
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "0" {
+        return false;
+    }
+
+    let mut matched = false;
+    let mut host_ok = false;
+    for part in raw.split(',') {
+        let token = part.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if token == "1" || token == "all" {
+            matched = true;
+            host_ok = true;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("host=") {
+            matched = true;
+            if value == host_name {
+                host_ok = true;
+            }
+        }
+    }
+
+    if !matched {
+        return false;
+    }
+    if raw.contains("host=") && !host_ok {
+        return false;
+    }
+    true
+}
+
+fn log_interface_trace(
+    iface_addr: Ipv4Addr,
+    action: &str,
+    socket_handle: u64,
+    priority: Option<u64>,
+    push_order: Option<u64>,
+    packet: Option<&PacketRc>,
+    extra: &str,
+) {
+    let _ = Worker::with_active_host(|host| {
+        if !interface_trace_enabled(host.name()) {
+            return;
+        }
+        let sim_time_ns = Worker::current_time()
+            .unwrap()
+            .to_abs_simtime()
+            .as_nanos();
+        let (packet_priority, seq, flags, payload) = if let Some(packet) = packet {
+            let tcp_header = packet.ipv4_tcp_header();
+            (
+                Some(packet.priority()),
+                tcp_header.map(|h| h.seq).unwrap_or_default(),
+                tcp_header.map(|h| h.flags.bits()).unwrap_or_default(),
+                packet.len(),
+            )
+        } else {
+            (None, 0, 0, 0)
+        };
+        log::info!(
+            "restore-interface-trace host={} sim_time_ns={} iface={} action={} socket_handle={} queue_priority={:?} queue_push_order={:?} packet_priority={:?} seq={} flags=0x{:x} packet_len={} {}",
+            host.name(),
+            sim_time_ns,
+            iface_addr,
+            action,
+            socket_handle,
+            priority,
+            push_order,
+            packet_priority,
+            seq,
+            flags,
+            payload,
+            extra,
+        );
+    });
 }
 
 /// Represents a network device that can send and receive packets.
@@ -161,15 +262,85 @@ impl NetworkInterface {
         self.recv_sockets.borrow().contains_key(&key)
     }
 
+    pub fn snapshot_send_socket_queue(&self) -> SendSocketQueueState {
+        let snapshot = self.send_sockets.borrow().snapshot();
+        SendSocketQueueState {
+            kind: snapshot.kind,
+            next_push_order: snapshot.next_push_order,
+            entries: snapshot
+                .entries
+                .into_iter()
+                .map(|entry| SendSocketQueueEntry {
+                    canonical_handle: entry.item.canonical_handle() as u64,
+                    priority: entry.priority,
+                    push_order: entry.push_order,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn restore_send_socket_queue(
+        &self,
+        snapshot: &SendSocketQueueState,
+        sockets_by_handle: &HashMap<u64, InetSocket>,
+    ) -> Result<(), Vec<u64>> {
+        let mut missing = Vec::new();
+        let mut entries = Vec::with_capacity(snapshot.entries.len());
+        for entry in &snapshot.entries {
+            let Some(socket) = sockets_by_handle.get(&entry.canonical_handle).cloned() else {
+                missing.push(entry.canonical_handle);
+                continue;
+            };
+            entries.push(NetworkQueueSnapshotEntry {
+                item: socket,
+                priority: entry.priority,
+                push_order: entry.push_order,
+            });
+        }
+
+        if !missing.is_empty() {
+            return Err(missing);
+        }
+
+        self.send_sockets
+            .borrow_mut()
+            .restore_snapshot(NetworkQueueSnapshot {
+                kind: snapshot.kind,
+                next_push_order: snapshot.next_push_order,
+                entries,
+            });
+        Ok(())
+    }
+
     // Add the socket to the list of sockets that have data ready for us to send out to the network.
     pub fn add_data_source(&self, socket: &InetSocket) {
         assert!(socket.borrow().has_data_to_send());
 
+        let priority = socket.borrow().peek_next_packet_priority();
+        let next_push_order = self.send_sockets.borrow().next_push_order();
         if !self.send_sockets.borrow().contains(socket) {
             self.send_sockets
                 .borrow_mut()
-                .push(socket.clone(), socket.borrow().peek_next_packet_priority());
+                .push(socket.clone(), priority);
+            log_interface_trace(
+                self.addr,
+                "add_data_source",
+                socket.canonical_handle() as u64,
+                priority,
+                next_push_order,
+                None,
+                "queued=1",
+            );
         } else {
+            log_interface_trace(
+                self.addr,
+                "add_data_source_skip",
+                socket.canonical_handle() as u64,
+                priority,
+                next_push_order,
+                None,
+                "queued=0 reason=already_present",
+            );
             log::trace!(
                 "We attemped to add a socket as a packet source but it is already in our queue of \
                 sending sockets. Ignoring."
@@ -250,6 +421,15 @@ impl PacketDevice for NetworkInterface {
 
             packet.add_status(PacketStatus::SndInterfaceSent);
             self.capture_if_configured(&packet);
+            log_interface_trace(
+                self.addr,
+                "pop_send",
+                socket.canonical_handle() as u64,
+                Some(packet.priority()),
+                None,
+                Some(&packet),
+                "",
+            );
 
             return Some(packet);
         }

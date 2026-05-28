@@ -1,0 +1,17 @@
+[base]
+tdt_config = "/home/ins0/Repos/Event-Driven-Testnet/TDT/tdt_config.toml"
+results_dir = "results"
+work_root = "/tmp/tdt-checkpoint-study"
+
+[experiment]
+setups = [1, 4, 8]
+validators_per_beacon = 4
+warmup_step_seconds = 60
+max_warmup_seconds = 1200
+settle_seconds = 60
+comparison_window_seconds = 120
+performance_trials = 3
+managed_external_paths = ["network", "beacon_peers.txt"]
+checkpoint_label_prefix = "checkpoint_study"
+hex_normalization = true
+restore_protocol_mode = "deterministic_v2"

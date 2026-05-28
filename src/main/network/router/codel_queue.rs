@@ -95,7 +95,6 @@ impl CoDelQueue {
     }
 
     /// Returns the total number of packets stored in the queue.
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.elements.len()
     }

@@ -55,6 +55,10 @@ impl Router {
     pub fn route_incoming_packet(&self, packet: PacketRc) {
         self.push_inner(packet, Worker::current_time().unwrap())
     }
+
+    pub fn pending_packet_count(&self) -> usize {
+        self.inbound_packets.borrow().len()
+    }
 }
 
 impl PacketDevice for Router {

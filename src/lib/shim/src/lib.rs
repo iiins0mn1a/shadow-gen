@@ -277,6 +277,13 @@ mod tls_ipc {
         ipc.as_ref().map(|block| f(block)).unwrap()
     }
 
+    pub fn try_get<O>(f: impl FnOnce(&IPCData) -> O) -> Option<O> {
+        debug_assert_eq!(ExecutionContext::current(), ExecutionContext::Shadow);
+        let ipc = IPC_DATA_BLOCK.get();
+        let ipc = ipc.borrow();
+        ipc.as_ref().map(|block| f(block))
+    }
+
     /// The previous value, if any, is dropped.
     ///
     /// # Safety
@@ -768,6 +775,9 @@ pub mod export {
     /// type `IPCData`, which outlives the current thread.
     #[unsafe(no_mangle)]
     pub unsafe extern "C-unwind" fn _shim_parent_init_ipc() {
+        if tls_ipc::try_get(|_| ()).is_some() {
+            return;
+        }
         let mut bytes = [0; core::mem::size_of::<ShMemBlockSerialized>()];
         let bytes_read = rustix::io::read(
             unsafe { rustix::fd::BorrowedFd::borrow_raw(libc::STDIN_FILENO) },
@@ -775,7 +785,13 @@ pub mod export {
         )
         .unwrap();
         // Implement looping? We should get it all in one read, though.
-        assert_eq!(bytes_read, bytes.len());
+        assert!(
+            bytes_read == bytes.len(),
+            "shim-parent-init-ipc pid={} bytes_read={} expected={}",
+            unsafe { libc::getpid() },
+            bytes_read,
+            bytes.len()
+        );
         let ipc_blk = shadow_pod::from_array(&bytes);
         // SAFETY: caller is responsible for `set`'s preconditions.
         unsafe { tls_ipc::set(&ipc_blk) };

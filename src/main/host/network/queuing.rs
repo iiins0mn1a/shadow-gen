@@ -54,6 +54,7 @@ impl<T> PartialEq for Prioritized<T> {
 }
 
 /// The kinds of queuing disciplines the `NetworkQueue` currently supports.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NetworkQueueKind {
     /// A queue where items are sorted and dequeued based on a priority given at enqueue time.
     /// Queues created with this discipline MUST provide `Some` priorities to
@@ -76,6 +77,20 @@ enum QueuingDiscipline<T> {
     MinPriority((BinaryHeap<Prioritized<T>>, PushOrder)),
     /// See `NetworkQueueKind::FirstInFirstOut`.
     FirstInFirstOut(VecDeque<T>),
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkQueueSnapshotEntry<T> {
+    pub item: T,
+    pub priority: Option<u64>,
+    pub push_order: PushOrder,
+}
+
+#[derive(Clone, Debug)]
+pub struct NetworkQueueSnapshot<T> {
+    pub kind: NetworkQueueKind,
+    pub next_push_order: PushOrder,
+    pub entries: Vec<NetworkQueueSnapshotEntry<T>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -124,6 +139,20 @@ impl<T: Clone + Debug + Eq + Hash> NetworkQueue<T> {
             QueuingDiscipline::FirstInFirstOut(deque) => deque.clear(),
         }
         self.membership.clear();
+    }
+
+    pub fn kind(&self) -> NetworkQueueKind {
+        match &self.queue {
+            QueuingDiscipline::MinPriority(_) => NetworkQueueKind::MinPriority,
+            QueuingDiscipline::FirstInFirstOut(_) => NetworkQueueKind::FirstInFirstOut,
+        }
+    }
+
+    pub fn next_push_order(&self) -> Option<u64> {
+        match &self.queue {
+            QueuingDiscipline::MinPriority((_, next_push_order)) => Some(*next_push_order),
+            QueuingDiscipline::FirstInFirstOut(_) => None,
+        }
     }
 
     /// Returns true if the queue contains the item, and false otherwise.
@@ -195,6 +224,90 @@ impl<T: Clone + Debug + Eq + Hash> NetworkQueue<T> {
                 QueuingDiscipline::FirstInFirstOut(deque) => deque.push_back(item),
             };
             Ok(())
+        }
+    }
+
+    pub fn snapshot(&self) -> NetworkQueueSnapshot<T> {
+        match &self.queue {
+            QueuingDiscipline::MinPriority((heap, next_push_order)) => {
+                let mut entries: Vec<_> = heap
+                    .iter()
+                    .map(|entry| NetworkQueueSnapshotEntry {
+                        item: entry.item.clone(),
+                        priority: Some(entry.priority),
+                        push_order: entry.push_order,
+                    })
+                    .collect();
+                entries.sort_by(|a, b| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| a.push_order.cmp(&b.push_order))
+                });
+                NetworkQueueSnapshot {
+                    kind: NetworkQueueKind::MinPriority,
+                    next_push_order: *next_push_order,
+                    entries,
+                }
+            }
+            QueuingDiscipline::FirstInFirstOut(deque) => {
+                let entries = deque
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(push_order, item)| NetworkQueueSnapshotEntry {
+                        item,
+                        priority: None,
+                        push_order: push_order.try_into().unwrap(),
+                    })
+                    .collect();
+                NetworkQueueSnapshot {
+                    kind: NetworkQueueKind::FirstInFirstOut,
+                    next_push_order: deque.len().try_into().unwrap(),
+                    entries,
+                }
+            }
+        }
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: NetworkQueueSnapshot<T>) {
+        assert_eq!(self.kind(), snapshot.kind);
+        self.clear();
+        match (&mut self.queue, snapshot) {
+            (
+                QueuingDiscipline::MinPriority((heap, next_push_order)),
+                NetworkQueueSnapshot {
+                    kind: NetworkQueueKind::MinPriority,
+                    next_push_order: snapshot_next_push_order,
+                    entries,
+                },
+            ) => {
+                *next_push_order = snapshot_next_push_order;
+                for entry in entries {
+                    let priority = entry
+                        .priority
+                        .expect("priority must exist for min-priority queue restore");
+                    assert!(self.membership.insert(entry.item.clone()));
+                    heap.push(Prioritized {
+                        item: entry.item,
+                        priority,
+                        push_order: entry.push_order,
+                    });
+                }
+            }
+            (
+                QueuingDiscipline::FirstInFirstOut(deque),
+                NetworkQueueSnapshot {
+                    kind: NetworkQueueKind::FirstInFirstOut,
+                    entries,
+                    ..
+                },
+            ) => {
+                for entry in entries {
+                    assert!(self.membership.insert(entry.item.clone()));
+                    deque.push_back(entry.item);
+                }
+            }
+            _ => unreachable!("queue kind mismatch during snapshot restore"),
         }
     }
 }

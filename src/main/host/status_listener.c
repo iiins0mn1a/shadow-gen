@@ -50,6 +50,16 @@ int status_listener_compare(const void* ptr_1, const void* ptr_2) {
     return (listener_1->deterministicSequenceValue < listener_2->deterministicSequenceValue) ? -1 : 1;
 }
 
+uint64_t statuslistener_getDeterministicSequenceValue(StatusListener* listener) {
+    MAGIC_ASSERT(listener);
+    return listener->deterministicSequenceValue;
+}
+
+void statuslistener_setDeterministicSequenceValue(StatusListener* listener, uint64_t value) {
+    MAGIC_ASSERT(listener);
+    listener->deterministicSequenceValue = value;
+}
+
 StatusListener* statuslistener_new(StatusCallbackFunc notifyFunc, void* callbackObject,
                                    StatusObjectFreeFunc objectFreeFunc, void* callbackArgument,
                                    StatusArgumentFreeFunc argumentFreeFunc, const Host* host) {

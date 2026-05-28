@@ -116,6 +116,8 @@ impl ManagedThread {
                 blocked_trigger_state_bits: None,
                 blocked_active_file_fd: None,
                 blocked_trigger_kind: None,
+                blocked_futex_word: None,
+                blocked_listener_sequence_value: None,
                 poll_watches: Vec::new(),
                 pending_result: None,
                 blocked_syscall_nr: None,
@@ -133,6 +135,8 @@ impl ManagedThread {
                 blocked_trigger_state_bits: None,
                 blocked_active_file_fd: None,
                 blocked_trigger_kind: None,
+                blocked_futex_word: None,
+                blocked_listener_sequence_value: None,
                 poll_watches: Vec::new(),
                 pending_result: None,
                 blocked_syscall_nr: None,
@@ -150,6 +154,8 @@ impl ManagedThread {
                 blocked_trigger_state_bits: None,
                 blocked_active_file_fd: None,
                 blocked_trigger_kind: None,
+                blocked_futex_word: None,
+                blocked_listener_sequence_value: None,
                 poll_watches: Vec::new(),
                 pending_result: None,
                 blocked_syscall_nr: Some(syscall.syscall_args.number),
@@ -167,6 +173,8 @@ impl ManagedThread {
                 blocked_trigger_state_bits: None,
                 blocked_active_file_fd: None,
                 blocked_trigger_kind: None,
+                blocked_futex_word: None,
+                blocked_listener_sequence_value: None,
                 poll_watches: Vec::new(),
                 pending_result: None,
                 blocked_syscall_nr: None,
@@ -184,6 +192,8 @@ impl ManagedThread {
                 blocked_trigger_state_bits: None,
                 blocked_active_file_fd: None,
                 blocked_trigger_kind: None,
+                blocked_futex_word: None,
+                blocked_listener_sequence_value: None,
                 poll_watches: Vec::new(),
                 pending_result: None,
                 blocked_syscall_nr: None,
@@ -435,6 +445,19 @@ impl ManagedThread {
                         && !syscall_handler.has_pending_result()
                         && (!has_restored_timeout || (is_poll_family && has_restored_poll_trigger));
                     if should_force_synthetic_completion {
+                        if ctx.host.matches_restore_thread_trace_host_phase() {
+                            let sim_time_ns = crate::core::worker::Worker::current_time()
+                                .map(|t| t.to_abs_simtime().as_nanos())
+                                .unwrap_or_default();
+                            log::info!(
+                                "restore-thread-trace host={} sim_time_ns={} stage=managed_thread_synthetic_completion pid={} tid={} syscall_nr={}",
+                                ctx.host.name(),
+                                sim_time_ns,
+                                self.native_pid.as_raw_nonzero().get(),
+                                self.native_tid.as_raw_nonzero().get(),
+                                syscall.syscall_args.number,
+                            );
+                        }
                         if syscall.syscall_args.number == libc::SYS_pselect6
                             || syscall.syscall_args.number == libc::SYS_select
                         {
@@ -508,6 +531,21 @@ impl ManagedThread {
                         }
 
                         let scr = syscall_handler.syscall(ctx, &syscall.syscall_args).into();
+
+                        if ctx.host.matches_restore_thread_trace_host_phase() {
+                            let sim_time_ns = crate::core::worker::Worker::current_time()
+                                .map(|t| t.to_abs_simtime().as_nanos())
+                                .unwrap_or_default();
+                            log::info!(
+                                "restore-thread-trace host={} sim_time_ns={} stage=managed_thread_syscall_result pid={} tid={} syscall_nr={} result={:?}",
+                                ctx.host.name(),
+                                sim_time_ns,
+                                self.native_pid.as_raw_nonzero().get(),
+                                self.native_tid.as_raw_nonzero().get(),
+                                syscall.syscall_args.number,
+                                scr,
+                            );
+                        }
 
                         // remove the mthread's old syscall condition since it's no longer needed
                         ctx.thread.cleanup_syscall_condition();
@@ -961,19 +999,51 @@ impl ManagedThread {
         // Write the serialized shmem descriptor to the stdin pipe. The pipe
         // buffer should be large enough that we can write it all without having
         // to wait for data to be read.
-        if child_pid_res.is_ok() {
+        if let Ok(child_pid) = child_pid_res {
             // we avoid using the rustix write wrapper here, since we can't guarantee
             // that all bytes of the serialized shmem block are initd, and hence
             // can't safely construct the &[u8] that it wants.
             let serialized_bytes = shadow_pod::as_u8_slice(shmem_block);
-            let written = Errno::result_from_libc_errno(-1, unsafe {
+            let write_res = Errno::result_from_libc_errno(-1, unsafe {
                 libc::write(
                     stdin_writer.as_raw_fd(),
                     serialized_bytes.as_ptr().cast(),
                     serialized_bytes.len(),
                 )
-            })
-            .unwrap();
+            });
+            let _ = (|| -> std::io::Result<()> {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/shadow-spawn-ipc.log")?;
+                writeln!(
+                    f,
+                    "shadow-spawn-ipc-attempt pid={:?} stdin_writer_fd={} expected={} result={:?}",
+                    child_pid,
+                    stdin_writer.as_raw_fd(),
+                    serialized_bytes.len(),
+                    write_res
+                )?;
+                Ok(())
+            })();
+            let written = write_res.unwrap();
+            let _ = (|| -> std::io::Result<()> {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/shadow-spawn-ipc.log")?;
+                writeln!(
+                    f,
+                    "shadow-spawn-ipc pid={:?} stdin_writer_fd={} wrote={} expected={}",
+                    child_pid,
+                    stdin_writer.as_raw_fd(),
+                    written,
+                    serialized_bytes.len()
+                )?;
+                Ok(())
+            })();
             // TODO: loop if needed. Shouldn't be in practice, though.
             assert_eq!(written, isize::try_from(serialized_bytes.len()).unwrap());
         }

@@ -313,7 +313,7 @@ impl TimeController for InteractiveController {
                 fmt_s(ctx.current_sim_time_ns),
             );
 
-            print_info();
+            eprint!("{}", print_info());
 
             eprintln!("**");
             eprintln!("** To attach gdb: s:<pid> (e.g. s:12345)");
@@ -338,7 +338,7 @@ impl TimeController for InteractiveController {
             }
 
             if s.info_requested.swap(false, Ordering::Relaxed) {
-                print_info();
+                eprint!("{}", print_info());
             }
 
             paused = s.cv.wait(paused).unwrap();
