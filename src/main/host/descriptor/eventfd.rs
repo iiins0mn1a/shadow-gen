@@ -4,8 +4,8 @@ use linux_api::errno::Errno;
 use linux_api::ioctls::IoctlRequest;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
-use crate::cshadow as c;
 use crate::core::checkpoint::snapshot_types::EventFdSnapshot;
+use crate::cshadow as c;
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::{FileMode, FileSignals, FileState, FileStatus};
 use crate::host::memory_manager::MemoryManager;

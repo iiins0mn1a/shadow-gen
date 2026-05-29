@@ -46,7 +46,10 @@ pub struct LegacyTcpSocket {
 }
 
 impl LegacyTcpSocket {
-    fn snapshot_owned_packets<F>(count: usize, mut get_packet: F) -> Vec<crate::core::checkpoint::snapshot_types::PacketSnapshot>
+    fn snapshot_owned_packets<F>(
+        count: usize,
+        mut get_packet: F,
+    ) -> Vec<crate::core::checkpoint::snapshot_types::PacketSnapshot>
     where
         F: FnMut(usize) -> *mut crate::network::packet::Packet,
     {

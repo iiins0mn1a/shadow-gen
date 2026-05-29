@@ -356,10 +356,15 @@ impl SyscallHandler {
             let mut ready_trace = trace_ready.then(Vec::new);
             let ready = CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
                 if let Some(trace_records) = ready_trace.as_mut() {
-                    epoll.borrow_mut()
-                        .collect_ready_events_with_trace(cb_queue, max_events, Some(trace_records))
+                    epoll.borrow_mut().collect_ready_events_with_trace(
+                        cb_queue,
+                        max_events,
+                        Some(trace_records),
+                    )
                 } else {
-                    epoll.borrow_mut().collect_ready_events(cb_queue, max_events)
+                    epoll
+                        .borrow_mut()
+                        .collect_ready_events(cb_queue, max_events)
                 }
             });
             let n_ready = ready.len();

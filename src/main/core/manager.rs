@@ -6,11 +6,11 @@ use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -23,12 +23,12 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use scheduler::thread_per_core::ThreadPerCoreSched;
 use scheduler::thread_per_host::ThreadPerHostSched;
 use scheduler::{HostIter, Scheduler};
+use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::option::FfiOption;
 use shadow_shim_helper_rs::shim_shmem::{ManagerShmem, NativePreemptionConfig};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::{SyscallArgs, UntypedForeignPtr};
-use shadow_shim_helper_rs::HostId;
 use shadow_shmem::allocator::ShMemBlock;
 
 use crate::core::checkpoint::criu;
@@ -41,9 +41,9 @@ use crate::core::configuration::{self, ConfigOptions, Flatten};
 use crate::core::controller::{Controller, ShadowStatusBarState, SimController};
 use crate::core::cpu;
 use crate::core::resource_usage;
+use crate::core::run_control::TimeController;
 use crate::core::run_control::commands::{ControlDecision, SimulationRunResult};
 use crate::core::run_control::controller::WindowBoundaryContext;
-use crate::core::run_control::TimeController;
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::{Bandwidth, HostInfo};
 use crate::core::sim_stats;
@@ -830,9 +830,13 @@ impl<'a> Manager<'a> {
                                                         .syscall_condition_wake_wall_ns;
                                             }
                                         }
-                                        let host_next_event_time = host.next_event_time();
-                                        host.unlock_shmem();
-                                        host_next_event_time
+                                        if execution_stats.async_continuation_pending {
+                                            None
+                                        } else {
+                                            let host_next_event_time = host.next_event_time();
+                                            host.unlock_shmem();
+                                            host_next_event_time
+                                        }
                                     }
                                     host_next_event_time => host_next_event_time,
                                 };
@@ -953,6 +957,25 @@ impl<'a> Manager<'a> {
                         (window_start - EmulatedTime::SIMULATION_START).as_nanos(),
                         (window_end - EmulatedTime::SIMULATION_START).as_nanos(),
                     );
+                }
+                if crate::host::managed_thread::tdt_async_continue_enabled() {
+                    scheduler.scope(|s| {
+                        s.run_with_data(&scheduler_thread_data, move |_, hosts, thread_data| {
+                            let mut next_event_time = thread_data.next_event_time.borrow_mut();
+                            for_each_host(hosts, |host| {
+                                if !host.has_async_continuation_pending() {
+                                    return;
+                                }
+                                host.drain_async_continuations();
+                                let host_next_event_time = host.next_event_time();
+                                host.unlock_shmem();
+                                *next_event_time = min_emulated_time_option(
+                                    *next_event_time,
+                                    host_next_event_time,
+                                );
+                            });
+                        });
+                    });
                 }
                 if let Some(started) = scheduler_scope_started
                     && let Some(stats) = scheduler_perf_stats.as_ref()

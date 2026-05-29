@@ -307,10 +307,7 @@ impl ByteQueue {
             .collect()
     }
 
-    pub fn replace_with_chunks(
-        &mut self,
-        chunks: impl IntoIterator<Item = (Vec<u8>, ChunkType)>,
-    ) {
+    pub fn replace_with_chunks(&mut self, chunks: impl IntoIterator<Item = (Vec<u8>, ChunkType)>) {
         self.bytes.clear();
         self.unused_buffer = None;
         self.length = 0;

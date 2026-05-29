@@ -21,13 +21,13 @@ use crate::core::checkpoint::store::{CheckpointStore, FilesystemStore};
 use crate::core::configuration::{CliOptions, ConfigFileOptions, ConfigOptions};
 use crate::core::controller::Controller;
 use crate::core::logger::shadow_logger;
-use crate::core::run_control::commands::SimulationRunResult;
 #[cfg(feature = "enable_run_control")]
 use crate::core::run_control::InteractiveController;
 #[cfg(not(feature = "enable_run_control"))]
 use crate::core::run_control::NoopController;
 use crate::core::run_control::SocketController;
 use crate::core::run_control::TimeController;
+use crate::core::run_control::commands::SimulationRunResult;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
 use crate::cshadow as c;

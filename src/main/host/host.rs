@@ -1,8 +1,8 @@
 //! An emulated Linux system.
 
 use std::cell::{Cell, Ref, RefCell, RefMut, UnsafeCell};
-use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{CStr, CString, OsString};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::ops::{Deref, DerefMut};
@@ -15,21 +15,21 @@ use std::time::Instant;
 
 use asm_util::tsc::Tsc;
 use atomic_refcell::AtomicRefCell;
-use linux_api::signal::{siginfo_t, Signal};
+use linux_api::signal::{Signal, siginfo_t};
 use log::{debug, trace};
 use logger::LogLevel;
 use once_cell::unsync::OnceCell;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::explicit_drop::ExplicitDropper;
+use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::rootedcell::cell::RootedCell;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
-use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::shim_shmem::{HostShmem, HostShmemProtected, ManagerShmem};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
-use shadow_shim_helper_rs::HostId;
 use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias};
 use vasi_sync::scmutex::SelfContainedMutexGuard;
 
@@ -57,9 +57,9 @@ use crate::host::network::interface::{FifoPacketPriority, NetworkInterface, Pcap
 use crate::host::network::namespace::NetworkNamespace;
 use crate::host::process::Process;
 use crate::host::thread::{Thread, ThreadId};
+use crate::network::PacketDevice;
 use crate::network::relay::{RateLimit, Relay};
 use crate::network::router::Router;
-use crate::network::PacketDevice;
 use crate::utility;
 #[cfg(feature = "perf_timers")]
 use crate::utility::perf_timer::PerfTimer;
@@ -246,6 +246,7 @@ pub struct HostExecutionStats {
     pub opaque_wall_ns: u64,
     pub undescribed_events: u64,
     pub undescribed_wall_ns: u64,
+    pub async_continuation_pending: bool,
 }
 
 impl HostExecutionStats {
@@ -375,6 +376,7 @@ pub struct Host {
 
     // Owned pointers to processes.
     processes: RefCell<BTreeMap<ProcessId, RootedRc<RootedRefCell<Process>>>>,
+    async_continuations: RefCell<VecDeque<AsyncContinuation>>,
 
     tsc: Tsc,
     // Cached lock for shim_shmem. `[Host::shmem_lock]` uses unsafe code to give it
@@ -414,6 +416,13 @@ pub struct Host {
 
     /// Paths to be added to LD_PRELOAD of managed processes.
     preload_paths: Arc<Vec<PathBuf>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AsyncContinuation {
+    pid: ProcessId,
+    tid: ThreadId,
+    time: EmulatedTime,
 }
 
 /// Host must be `Send`.
@@ -531,6 +540,7 @@ impl Host {
             determinism_sequence_counter,
             tsc,
             processes: RefCell::new(BTreeMap::new()),
+            async_continuations: RefCell::new(VecDeque::new()),
             #[cfg(feature = "perf_timers")]
             execution_timer,
             in_notify_socket_has_packets,
@@ -924,6 +934,57 @@ impl Host {
             trace!("Dropping orphan zombie process {pid:?}");
             let processrc = processes.remove(&pid).unwrap();
             RootedRc::explicit_drop_recursive(processrc, &self.root, self);
+        }
+    }
+
+    pub fn record_async_continuation(&self, pid: ProcessId, tid: ThreadId, time: EmulatedTime) {
+        self.async_continuations
+            .borrow_mut()
+            .push_back(AsyncContinuation { pid, tid, time });
+    }
+
+    pub fn has_async_continuation_pending(&self) -> bool {
+        !self.async_continuations.borrow().is_empty()
+    }
+
+    pub fn drain_async_continuations(&self) {
+        loop {
+            let Some(pending) = self.async_continuations.borrow_mut().pop_front() else {
+                break;
+            };
+            Worker::set_current_time(pending.time);
+            self.continue_execution_timer();
+
+            let threadrc = {
+                let processrc = self
+                    .process_borrow(pending.pid)
+                    .map(|p| RootedRc::clone(&p, self.root()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing process {:?} while draining async continuation",
+                            pending.pid
+                        )
+                    });
+                let process = processrc.borrow(self.root());
+                process
+                    .thread_borrow(pending.tid)
+                    .map(|t| RootedRc::clone(&t, self.root()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing thread {:?} while draining async continuation",
+                            pending.tid
+                        )
+                    })
+            };
+
+            {
+                let thread = threadrc.borrow(self.root());
+                thread.complete_async_continuation(self);
+            }
+
+            self.resume(pending.pid, pending.tid);
+            self.stop_execution_timer();
+            Worker::clear_current_time();
         }
     }
 
@@ -1345,6 +1406,11 @@ impl Host {
                 }
             }
             self.stop_execution_timer();
+            if self.has_async_continuation_pending() {
+                stats.async_continuation_pending = true;
+                Worker::clear_current_time();
+                break;
+            }
             Worker::clear_current_time();
         }
 
@@ -1541,10 +1607,7 @@ impl Host {
                 log::info!(
                     "restore-notify-trace host={} sim_time_ns={} action=host_notify socket_ptr={:p} addr={}",
                     self.name(),
-                    Worker::current_time()
-                        .unwrap()
-                        .to_abs_simtime()
-                        .as_nanos(),
+                    Worker::current_time().unwrap().to_abs_simtime().as_nanos(),
                     socket,
                     addr
                 );

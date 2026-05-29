@@ -10,10 +10,10 @@ use linux_api::socket::Shutdown;
 use nix::sys::socket::MsgFlags;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
 
-use crate::cshadow as c;
 use crate::core::checkpoint::snapshot_types::{
     UnixSocketRestoreKindSnapshot, UnixSocketSnapshot, UnixSocketTypeSnapshot,
 };
+use crate::cshadow as c;
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::shared_buf::{
     BufferHandle, BufferSignals, BufferState, ReaderHandle, SharedBuf, WriterHandle,

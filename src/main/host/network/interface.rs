@@ -118,10 +118,7 @@ fn log_interface_trace(
         if !interface_trace_enabled(host.name()) {
             return;
         }
-        let sim_time_ns = Worker::current_time()
-            .unwrap()
-            .to_abs_simtime()
-            .as_nanos();
+        let sim_time_ns = Worker::current_time().unwrap().to_abs_simtime().as_nanos();
         let (packet_priority, seq, flags, payload) = if let Some(packet) = packet {
             let tcp_header = packet.ipv4_tcp_header();
             (

@@ -9,8 +9,9 @@ use shadow_shim_helper_rs::{
     emulated_time::EmulatedTime, simulation_time::SimulationTime, syscall_types::ForeignPtr,
 };
 
-use crate::cshadow as c;
 use crate::core::checkpoint::snapshot_types::TimerFdSnapshot;
+use crate::core::worker::Worker;
+use crate::cshadow as c;
 use crate::host::descriptor::listener::{StateEventSource, StateListenHandle, StateListenerFilter};
 use crate::host::descriptor::{FileMode, FileSignals, FileState, FileStatus};
 use crate::host::host::Host;
@@ -18,7 +19,6 @@ use crate::host::memory_manager::MemoryManager;
 use crate::host::syscall::io::{IoVec, IoVecWriter};
 use crate::host::syscall::types::{SyscallError, SyscallResult};
 use crate::host::timer::Timer;
-use crate::core::worker::Worker;
 use crate::utility::HostTreePointer;
 use crate::utility::callback_queue::CallbackQueue;
 

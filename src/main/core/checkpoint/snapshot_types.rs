@@ -213,10 +213,7 @@ pub enum TaskDescriptor {
         syscall_nr: i64,
     },
     /// Recreate a blocked syscall condition for a restored thread.
-    RestoreBlockedSyscallCondition {
-        process_id: u32,
-        thread_id: u32,
-    },
+    RestoreBlockedSyscallCondition { process_id: u32, thread_id: u32 },
     /// Exact replay of a deferred legacy TCP callback.
     LegacyTcpDeferredAction {
         canonical_handle: u64,

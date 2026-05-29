@@ -8,14 +8,14 @@ use linux_api::fcntl::DescriptorFlags;
 use linux_api::mman::{MapFlags, ProtFlags};
 use linux_api::posix_types::Pid;
 use linux_api::signal::stack_t;
+use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::explicit_drop::ExplicitDrop;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
 use shadow_shim_helper_rs::shim_shmem::{HostShmemProtected, ThreadShmem};
 use shadow_shim_helper_rs::syscall_types::{ForeignPtr, SyscallReg};
 use shadow_shim_helper_rs::util::SendPointer;
-use shadow_shim_helper_rs::HostId;
-use shadow_shmem::allocator::{shmalloc, ShMemBlock};
+use shadow_shmem::allocator::{ShMemBlock, shmalloc};
 
 use super::context::ProcessContext;
 use super::descriptor::descriptor_table::{DescriptorHandle, DescriptorTable};
@@ -28,13 +28,13 @@ use crate::core::checkpoint::snapshot_types::{
 };
 use crate::cshadow as c;
 use crate::host::futex_table::FutexRef;
+use crate::host::syscall::Trigger;
 use crate::host::syscall::condition::{
     SyscallCondition, SyscallConditionRef, SyscallConditionRefMut,
 };
 use crate::host::syscall::handler::SyscallHandler;
-use crate::host::syscall::Trigger;
 use crate::utility::callback_queue::CallbackQueue;
-use crate::utility::{syscall, IsSend, ObjectCounter};
+use crate::utility::{IsSend, ObjectCounter, syscall};
 
 /// The thread's state after having been allowed to execute some code.
 #[derive(Debug)]
@@ -42,6 +42,9 @@ use crate::utility::{syscall, IsSend, ObjectCounter};
 pub enum ResumeResult {
     /// Blocked on a syscall.
     Blocked,
+    /// The native thread is running after a syscall completion and must be
+    /// drained before checkpoint/pause.
+    AsyncPending,
     /// The thread has exited with the given code.
     ExitedThread(i32),
     /// The process has exited.
@@ -733,6 +736,7 @@ impl Thread {
                 }
                 ResumeResult::Blocked
             }
+            managed_thread::ResumeResult::AsyncPending => ResumeResult::AsyncPending,
             managed_thread::ResumeResult::ExitedThread(c) => {
                 if ctx.host.matches_restore_thread_trace_host_phase() {
                     let sim_time_ns = crate::core::worker::Worker::current_time()
@@ -765,6 +769,10 @@ impl Thread {
                 ResumeResult::ExitedProcess
             }
         }
+    }
+
+    pub fn complete_async_continuation(&self, host: &Host) {
+        self.mthread.borrow().complete_async_continue(host);
     }
 
     pub fn handle_process_exit(&self) {
@@ -871,8 +879,8 @@ mod export {
 
     use super::*;
     use crate::core::worker::Worker;
-    use crate::host::descriptor::socket::inet::InetSocket;
     use crate::host::descriptor::socket::Socket;
+    use crate::host::descriptor::socket::inet::InetSocket;
     use crate::host::descriptor::{CompatFile, Descriptor, File};
 
     /// Make the requested syscall from within the plugin.

@@ -166,9 +166,7 @@ impl Timer {
         internal_ptr: Weak<AtomicRefCell<TimerInternal>>,
         host: &Host,
     ) {
-        let now = Worker::current_time().unwrap_or_else(|| {
-            host.restore_time_hint()
-        });
+        let now = Worker::current_time().unwrap_or_else(|| host.restore_time_hint());
 
         // have the timer expire between (1,2] seconds from now, but on a 1-second edge so that all
         // timer events for all hosts will expire at the same times (and therefore in the same

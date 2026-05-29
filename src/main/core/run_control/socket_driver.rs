@@ -402,9 +402,15 @@ impl TimeController for SocketController {
             log::info!(
                 "run-control boundary enter: current_sim_time_ns={} window_start_ns={} window_end_ns={} min_next_event_ns={} sim_waiting={} run_continuously={} auto_run_until={:?} pause_requested={} step_windows_remaining={}",
                 ctx.current_sim_time_ns,
-                (ctx.window_start - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START).as_nanos(),
-                (ctx.window_end - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START).as_nanos(),
-                (ctx.min_next_event_time - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START).as_nanos(),
+                (ctx.window_start
+                    - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START)
+                    .as_nanos(),
+                (ctx.window_end
+                    - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START)
+                    .as_nanos(),
+                (ctx.min_next_event_time
+                    - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START)
+                    .as_nanos(),
                 guard.sim_waiting,
                 guard.run_continuously,
                 guard.auto_run_until_ns,
@@ -419,7 +425,10 @@ impl TimeController for SocketController {
                 guard.run_continuously = false;
             } else {
                 if trace {
-                    log::info!("run-control boundary decision: continue step_windows_remaining={}", guard.step_windows_remaining);
+                    log::info!(
+                        "run-control boundary decision: continue step_windows_remaining={}",
+                        guard.step_windows_remaining
+                    );
                 }
                 return ControlDecision::Continue;
             }
@@ -450,7 +459,10 @@ impl TimeController for SocketController {
         guard.sim_waiting = true;
         self.state.cv.notify_all();
         if trace {
-            log::info!("run-control boundary paused: current_sim_time_ns={}", guard.sim_time_ns);
+            log::info!(
+                "run-control boundary paused: current_sim_time_ns={}",
+                guard.sim_time_ns
+            );
         }
 
         loop {

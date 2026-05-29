@@ -12,7 +12,7 @@ use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{atomic, Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, atomic};
 use std::time::Instant;
 
 use linux_api::errno::Errno;
@@ -20,7 +20,7 @@ use linux_api::posix_types::Pid;
 use linux_api::sched::CloneFlags;
 use linux_api::signal::tgkill;
 use linux_api::syscall::SyscallNum;
-use log::{debug, error, log_enabled, trace, Level};
+use log::{Level, debug, error, log_enabled, trace};
 use rand::Rng as _;
 use rustix::pipe::PipeFlags;
 use rustix::process::WaitOptions;
@@ -32,7 +32,7 @@ use shadow_shim_helper_rs::shim_event::{
 use shadow_shim_helper_rs::syscall_types::{
     ForeignPtr, SyscallArgs, SyscallReg, UntypedForeignPtr,
 };
-use shadow_shmem::allocator::{shdeserialize, ShMemBlock, ShMemBlockAlias, ShMemBlockSerialized};
+use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias, ShMemBlockSerialized, shdeserialize};
 use vasi_sync::scchannel::SelfContainedChannelError;
 
 use super::context::ThreadContext;
@@ -44,11 +44,11 @@ use crate::core::checkpoint::snapshot_types::{
     BlockedSyscallPhaseSnapshot, BlockedSyscallRestoreActionSnapshot, ThreadEventKindSnapshot,
     ThreadRestorePolicySnapshot, ThreadRuntimeSnapshot,
 };
-use crate::core::worker::{Worker, WORKER_SHARED};
+use crate::core::worker::{WORKER_SHARED, Worker};
 use crate::cshadow;
 use crate::host::syscall::handler::SyscallHandler;
 use crate::host::syscall::types::{ForeignArrayPtr, SyscallReturn};
-use crate::utility::{inject_preloads, syscall, verify_plugin_path, VerifyPluginPathError};
+use crate::utility::{VerifyPluginPathError, inject_preloads, syscall, verify_plugin_path};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SyscallPerf {
@@ -90,6 +90,7 @@ struct ManagedThreadPerfStats {
 
 static MANAGED_THREAD_PERF_STATS: OnceLock<ManagedThreadPerfStats> = OnceLock::new();
 static TDT_PERF_COUNTERS_ENABLED: OnceLock<bool> = OnceLock::new();
+static TDT_ASYNC_CONTINUE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 thread_local! {
     static TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS: Cell<u64> = const { Cell::new(0) };
@@ -109,6 +110,31 @@ fn tdt_perf_counters_enabled() -> bool {
 fn managed_thread_perf_stats() -> Option<&'static ManagedThreadPerfStats> {
     tdt_perf_counters_enabled()
         .then(|| MANAGED_THREAD_PERF_STATS.get_or_init(ManagedThreadPerfStats::default))
+}
+
+pub fn tdt_async_continue_enabled() -> bool {
+    *TDT_ASYNC_CONTINUE_ENABLED.get_or_init(|| {
+        std::env::var("SHADOW_TDT_ASYNC_CONTINUE")
+            .map(|raw| {
+                let raw = raw.trim();
+                !raw.is_empty() && raw != "0"
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn tdt_async_continue_syscall_allowed(syscall_nr: u32) -> bool {
+    let syscall_nr = i64::from(syscall_nr);
+    syscall_nr == libc::SYS_epoll_wait
+        || syscall_nr == libc::SYS_epoll_pwait
+        || syscall_nr == libc::SYS_epoll_pwait2
+        || syscall_nr == libc::SYS_futex
+        || syscall_nr == libc::SYS_poll
+        || syscall_nr == libc::SYS_ppoll
+        || syscall_nr == libc::SYS_select
+        || syscall_nr == libc::SYS_pselect6
+        || syscall_nr == libc::SYS_nanosleep
+        || syscall_nr == libc::SYS_clock_nanosleep
 }
 
 pub fn tdt_perf_reset_worker_body_continue_receive_wall_ns() {
@@ -389,10 +415,19 @@ pub fn log_tdt_managed_thread_perf_stats() {
 pub enum ResumeResult {
     /// Blocked on a SyscallCondition.
     Blocked(SyscallCondition),
+    /// A syscall completion was sent to the native thread and must be drained
+    /// before the next checkpoint/pause safepoint.
+    AsyncPending,
     /// The native thread has exited with the given code.
     ExitedThread(i32),
     /// The thread's process has exited.
     ExitedProcess,
+}
+
+#[must_use]
+enum ContinuePluginResult {
+    Ready(ShimEventToShadow),
+    AsyncPending,
 }
 
 pub struct ManagedThread {
@@ -417,6 +452,9 @@ pub struct ManagedThread {
     // If true, send a one-way shim refresh event before returning the first
     // post-restore syscall result to the application.
     needs_post_restore_refresh: Cell<bool>,
+    // True between sending an async continuation to the shim and receiving the
+    // next shim event. While set, Shadow does not own this host's shim shmem lock.
+    async_continue_pending: Cell<bool>,
 }
 
 enum IpcShmem {
@@ -440,6 +478,10 @@ impl Deref for IpcShmem {
 
 impl ManagedThread {
     pub fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {
+        assert!(
+            !self.async_continue_pending.get(),
+            "checkpoint attempted with a managed thread async continuation in flight"
+        );
         let event = *self.current_event.borrow();
         match event {
             ShimEventToShadow::StartReq(_) => ThreadRuntimeSnapshot {
@@ -693,6 +735,7 @@ impl ManagedThread {
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(false),
             needs_post_restore_refresh: Cell::new(false),
+            async_continue_pending: Cell::new(false),
         })
     }
 
@@ -851,7 +894,17 @@ impl ManagedThread {
                             retval: synthetic_retval,
                             restartable: false,
                         });
-                        self.continue_plugin_after_syscall(ctx.host, &event, syscall_nr)
+                        match self.continue_plugin_after_syscall(ctx.host, &event, syscall_nr) {
+                            ContinuePluginResult::Ready(event) => event,
+                            ContinuePluginResult::AsyncPending => {
+                                ctx.host.record_async_continuation(
+                                    ctx.process.id(),
+                                    ctx.thread.id(),
+                                    Worker::current_time().unwrap(),
+                                );
+                                return ResumeResult::AsyncPending;
+                            }
+                        }
                     } else {
                         // Emulate the given syscall.
                         // `exit` is tricky since it only exits the *mthread*, and we don't have a way
@@ -944,13 +997,37 @@ impl ManagedThread {
                                         retval: d.retval,
                                         restartable: d.restartable,
                                     });
-                                self.continue_plugin_after_syscall(ctx.host, &event, syscall_nr)
+                                match self
+                                    .continue_plugin_after_syscall(ctx.host, &event, syscall_nr)
+                                {
+                                    ContinuePluginResult::Ready(event) => event,
+                                    ContinuePluginResult::AsyncPending => {
+                                        ctx.host.record_async_continuation(
+                                            ctx.process.id(),
+                                            ctx.thread.id(),
+                                            Worker::current_time().unwrap(),
+                                        );
+                                        return ResumeResult::AsyncPending;
+                                    }
+                                }
                             }
-                            SyscallReturn::Native => self.continue_plugin_after_syscall(
-                                ctx.host,
-                                &ShimEventToShim::SyscallDoNative,
-                                syscall_nr,
-                            ),
+                            SyscallReturn::Native => {
+                                match self.continue_plugin_after_syscall(
+                                    ctx.host,
+                                    &ShimEventToShim::SyscallDoNative,
+                                    syscall_nr,
+                                ) {
+                                    ContinuePluginResult::Ready(event) => event,
+                                    ContinuePluginResult::AsyncPending => {
+                                        ctx.host.record_async_continuation(
+                                            ctx.process.id(),
+                                            ctx.thread.id(),
+                                            Worker::current_time().unwrap(),
+                                        );
+                                        return ResumeResult::AsyncPending;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1083,6 +1160,7 @@ impl ManagedThread {
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(false),
             needs_post_restore_refresh: Cell::new(false),
+            async_continue_pending: Cell::new(false),
         })
     }
 
@@ -1092,7 +1170,16 @@ impl ManagedThread {
         host: &Host,
         event: &ShimEventToShim,
         syscall_nr: u32,
-    ) -> ShimEventToShadow {
+    ) -> ContinuePluginResult {
+        if tdt_async_continue_enabled()
+            && !self.needs_post_restore_refresh.get()
+            && matches!(event, ShimEventToShim::SyscallComplete(_))
+            && tdt_async_continue_syscall_allowed(syscall_nr)
+        {
+            self.begin_async_continue(host, event);
+            return ContinuePluginResult::AsyncPending;
+        }
+
         let stats = managed_thread_perf_stats();
         let started = stats.map(|_| Instant::now());
         let next_event = self.continue_plugin(host, event);
@@ -1107,7 +1194,69 @@ impl ManagedThread {
                 perf.continue_wall_ns += elapsed_ns;
             });
         }
-        next_event
+        ContinuePluginResult::Ready(next_event)
+    }
+
+    fn begin_async_continue(&self, host: &Host, event: &ShimEventToShim) {
+        assert!(!self.async_continue_pending.replace(true));
+
+        let max_runahead_time = Worker::max_event_runahead_time(host);
+        let sim_time = Worker::current_time().unwrap();
+        log::info!(
+            "tdt-async-continue begin host={} sim_time_ns={} native_pid={} native_tid={} event={:?}",
+            host.name(),
+            sim_time.to_abs_simtime().as_nanos(),
+            self.native_pid.as_raw_nonzero().get(),
+            self.native_tid.as_raw_nonzero().get(),
+            event,
+        );
+        host.set_shim_clock_state(sim_time, max_runahead_time);
+
+        // Release the host shmem lock while the native thread runs. The scheduler
+        // must drain this pending continuation before checkpoint/pause.
+        host.unlock_shmem();
+        self.ipc_shmem.to_plugin().send(*event);
+    }
+
+    pub fn complete_async_continue(&self, host: &Host) {
+        assert!(self.async_continue_pending.replace(false));
+
+        let receive_started = managed_thread_perf_stats().map(|_| Instant::now());
+        // SAFETY: Each IPC channel has a single Shadow-side consumer, and the
+        // scheduler only drains one pending continuation per managed thread.
+        let event = match unsafe {
+            self.ipc_shmem
+                .from_plugin()
+                .receive_assuming_single_consumer()
+        } {
+            Ok(e) => e,
+            Err(SelfContainedChannelError::WriterIsClosed) => ShimEventToShadow::ProcessDeath,
+        };
+        let receive_wall_ns = receive_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
+
+        host.lock_shmem();
+
+        let shim_time = host.shim_shmem().sim_time.load(atomic::Ordering::Relaxed);
+        Worker::set_current_time(shim_time);
+        log::info!(
+            "tdt-async-continue complete host={} sim_time_ns={} native_pid={} native_tid={} event={:?}",
+            host.name(),
+            shim_time.to_abs_simtime().as_nanos(),
+            self.native_pid.as_raw_nonzero().get(),
+            self.native_tid.as_raw_nonzero().get(),
+            event,
+        );
+        *self.current_event.borrow_mut() = event;
+
+        if let Some(stats) = managed_thread_perf_stats() {
+            stats.continue_plugin_calls.fetch_add(1, Ordering::Relaxed);
+            stats
+                .continue_plugin_receive_wall_ns
+                .fetch_add(receive_wall_ns, Ordering::Relaxed);
+            tdt_perf_add_worker_body_continue_receive_wall_ns(receive_wall_ns);
+        }
     }
 
     #[must_use]
@@ -1619,6 +1768,7 @@ impl ManagedThread {
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(force_syscall_eintr_once),
             needs_post_restore_refresh: Cell::new(true),
+            async_continue_pending: Cell::new(false),
         }
     }
 }

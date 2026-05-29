@@ -2,15 +2,15 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt::Write;
 use std::num::TryFromIntError;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "perf_timers")]
 use std::time::Duration;
 
@@ -20,19 +20,19 @@ use linux_api::fcntl::OFlag;
 use linux_api::posix_types::Pid;
 use linux_api::sched::{CloneFlags, SuidDump};
 use linux_api::signal::{
-    defaultaction, siginfo_t, sigset_t, LinuxDefaultAction, SigActionFlags, Signal,
-    SignalFromI32Error,
+    LinuxDefaultAction, SigActionFlags, Signal, SignalFromI32Error, defaultaction, siginfo_t,
+    sigset_t,
 };
 use log::{debug, trace, warn};
 use rustix::process::{WaitOptions, WaitStatus};
+use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::explicit_drop::{ExplicitDrop, ExplicitDropper};
+use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
-use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::shim_shmem::ProcessShmem;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::{ForeignPtr, ManagedPhysicalMemoryAddr};
-use shadow_shim_helper_rs::HostId;
 use shadow_shmem::allocator::ShMemBlock;
 
 use crate::core::checkpoint::snapshot_types::DescriptorSocketImplementation;
@@ -53,8 +53,8 @@ use crate::core::checkpoint::snapshot_types::{
 };
 use crate::core::configuration::{ProcessFinalState, RunningVal};
 use crate::core::work::task::TaskRef;
-use crate::core::worker::Worker;
 use crate::core::worker::WORKER_SHARED;
+use crate::core::worker::Worker;
 use crate::cshadow;
 use crate::host::context::ProcessContext;
 use crate::host::descriptor::Descriptor;
@@ -1669,6 +1669,12 @@ impl Process {
                     &*self.name()
                 );
             }
+            crate::host::thread::ResumeResult::AsyncPending => {
+                debug!(
+                    "thread {tid} in process '{}' yielded with an async continuation pending",
+                    &*self.name()
+                );
+            }
             crate::host::thread::ResumeResult::ExitedThread(return_code) => {
                 debug!(
                     "thread {tid} in process '{}' exited with code {return_code}",
@@ -2514,8 +2520,8 @@ impl Process {
         use crate::core::checkpoint::snapshot_types::{
             UnixSocketRestoreKindSnapshot, UnixSocketTypeSnapshot,
         };
-        use crate::host::descriptor::socket::unix::{UnixSocket, UnixSocketType};
         use crate::host::descriptor::socket::Socket;
+        use crate::host::descriptor::socket::unix::{UnixSocket, UnixSocketType};
         use crate::host::descriptor::{File, OpenFile};
 
         if Self::restore_reused_open_file(
@@ -2647,10 +2653,10 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::socket::inet::{
-            legacy_tcp::LegacyTcpSocket, tcp::TcpSocket, udp::UdpSocket, InetSocket,
-        };
         use crate::host::descriptor::socket::Socket;
+        use crate::host::descriptor::socket::inet::{
+            InetSocket, legacy_tcp::LegacyTcpSocket, tcp::TcpSocket, udp::UdpSocket,
+        };
         if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "socket") {
             return;
         }
@@ -2847,7 +2853,7 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::{eventfd::EventFd, File, OpenFile};
+        use crate::host::descriptor::{File, OpenFile, eventfd::EventFd};
 
         if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "eventfd")
         {
@@ -2883,7 +2889,7 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::{timerfd::TimerFd, File, OpenFile};
+        use crate::host::descriptor::{File, OpenFile, timerfd::TimerFd};
 
         if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "timerfd")
         {

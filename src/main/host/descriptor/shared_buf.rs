@@ -70,13 +70,14 @@ impl SharedBuf {
         cb_queue: &mut CallbackQueue,
     ) {
         self.max_len = std::cmp::max(snapshot.max_len, 1);
-        self.queue.replace_with_chunks(snapshot.chunks.iter().map(|chunk| {
-            let chunk_type = match chunk.chunk_type {
-                SharedBufChunkTypeSnapshot::Stream => ChunkType::Stream,
-                SharedBufChunkTypeSnapshot::Packet => ChunkType::Packet,
-            };
-            (chunk.data.clone(), chunk_type)
-        }));
+        self.queue
+            .replace_with_chunks(snapshot.chunks.iter().map(|chunk| {
+                let chunk_type = match chunk.chunk_type {
+                    SharedBufChunkTypeSnapshot::Stream => ChunkType::Stream,
+                    SharedBufChunkTypeSnapshot::Packet => ChunkType::Packet,
+                };
+                (chunk.data.clone(), chunk_type)
+            }));
         self.refresh_state(BufferSignals::empty(), cb_queue);
     }
 
