@@ -1409,6 +1409,10 @@ impl Host {
             }
             self.stop_execution_timer();
             if self.has_async_continuation_pending() {
+                if crate::host::managed_thread::tdt_async_continue_inline_drain_enabled() {
+                    self.drain_async_continuations();
+                    continue;
+                }
                 stats.async_continuation_pending = true;
                 Worker::clear_current_time();
                 break;

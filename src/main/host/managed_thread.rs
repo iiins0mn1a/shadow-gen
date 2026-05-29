@@ -92,6 +92,8 @@ static MANAGED_THREAD_PERF_STATS: OnceLock<ManagedThreadPerfStats> = OnceLock::n
 static TDT_PERF_COUNTERS_ENABLED: OnceLock<bool> = OnceLock::new();
 static TDT_ASYNC_CONTINUE_ENABLED: OnceLock<bool> = OnceLock::new();
 static TDT_ASYNC_SCOPE_DRAIN_ENABLED: OnceLock<bool> = OnceLock::new();
+static TDT_ASYNC_SOCKET_IO_ENABLED: OnceLock<bool> = OnceLock::new();
+static TDT_ASYNC_INLINE_DRAIN_ENABLED: OnceLock<bool> = OnceLock::new();
 
 thread_local! {
     static TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS: Cell<u64> = const { Cell::new(0) };
@@ -135,8 +137,45 @@ pub fn tdt_async_continue_scope_drain_enabled() -> bool {
     })
 }
 
-fn tdt_async_continue_syscall_allowed(syscall_nr: u32) -> bool {
+pub fn tdt_async_continue_inline_drain_enabled() -> bool {
+    *TDT_ASYNC_INLINE_DRAIN_ENABLED.get_or_init(|| {
+        std::env::var("SHADOW_TDT_ASYNC_INLINE_DRAIN")
+            .map(|raw| {
+                let raw = raw.trim();
+                !raw.is_empty() && raw != "0"
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn tdt_async_continue_socket_io_enabled() -> bool {
+    *TDT_ASYNC_SOCKET_IO_ENABLED.get_or_init(|| {
+        std::env::var("SHADOW_TDT_ASYNC_SOCKET_IO")
+            .map(|raw| {
+                let raw = raw.trim();
+                !raw.is_empty() && raw != "0"
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn tdt_async_continue_syscall_allowed(
+    ctx: &ThreadContext,
+    syscall_nr: u32,
+    args: &SyscallArgs,
+) -> bool {
     let syscall_nr = i64::from(syscall_nr);
+    if tdt_async_continue_socket_io_enabled() {
+        let Some(fd) = syscall_first_fd(syscall_nr as u32, args) else {
+            return false;
+        };
+        let kind = descriptor_kind_for_fd(ctx, fd);
+        return matches!(
+            syscall_nr,
+            libc::SYS_read | libc::SYS_write | libc::SYS_readv | libc::SYS_writev
+        ) && matches!(kind, "socket" | "legacy-tcp");
+    }
+
     syscall_nr == libc::SYS_epoll_wait
         || syscall_nr == libc::SYS_epoll_pwait
         || syscall_nr == libc::SYS_epoll_pwait2
@@ -903,7 +942,9 @@ impl ManagedThread {
                             retval: synthetic_retval,
                             restartable: false,
                         });
-                        match self.continue_plugin_after_syscall(ctx.host, &event, syscall_nr) {
+                        match self
+                            .continue_plugin_after_syscall(ctx.host, &event, syscall_nr, false)
+                        {
                             ContinuePluginResult::Ready(event) => event,
                             ContinuePluginResult::AsyncPending => {
                                 ctx.host.record_async_continuation(
@@ -1006,9 +1047,16 @@ impl ManagedThread {
                                         retval: d.retval,
                                         restartable: d.restartable,
                                     });
-                                match self
-                                    .continue_plugin_after_syscall(ctx.host, &event, syscall_nr)
-                                {
+                                match self.continue_plugin_after_syscall(
+                                    ctx.host,
+                                    &event,
+                                    syscall_nr,
+                                    tdt_async_continue_syscall_allowed(
+                                        ctx,
+                                        syscall_nr,
+                                        &syscall.syscall_args,
+                                    ),
+                                ) {
                                     ContinuePluginResult::Ready(event) => event,
                                     ContinuePluginResult::AsyncPending => {
                                         ctx.host.record_async_continuation(
@@ -1025,6 +1073,7 @@ impl ManagedThread {
                                     ctx.host,
                                     &ShimEventToShim::SyscallDoNative,
                                     syscall_nr,
+                                    false,
                                 ) {
                                     ContinuePluginResult::Ready(event) => event,
                                     ContinuePluginResult::AsyncPending => {
@@ -1179,11 +1228,12 @@ impl ManagedThread {
         host: &Host,
         event: &ShimEventToShim,
         syscall_nr: u32,
+        async_eligible: bool,
     ) -> ContinuePluginResult {
         if tdt_async_continue_enabled()
             && !self.needs_post_restore_refresh.get()
             && matches!(event, ShimEventToShim::SyscallComplete(_))
-            && tdt_async_continue_syscall_allowed(syscall_nr)
+            && async_eligible
         {
             self.begin_async_continue(host, event);
             return ContinuePluginResult::AsyncPending;
@@ -1211,7 +1261,7 @@ impl ManagedThread {
 
         let max_runahead_time = Worker::max_event_runahead_time(host);
         let sim_time = Worker::current_time().unwrap();
-        log::info!(
+        log::debug!(
             "tdt-async-continue begin host={} sim_time_ns={} native_pid={} native_tid={} event={:?}",
             host.name(),
             sim_time.to_abs_simtime().as_nanos(),
@@ -1249,7 +1299,7 @@ impl ManagedThread {
 
         let shim_time = host.shim_shmem().sim_time.load(atomic::Ordering::Relaxed);
         Worker::set_current_time(shim_time);
-        log::info!(
+        log::debug!(
             "tdt-async-continue complete host={} sim_time_ns={} native_pid={} native_tid={} event={:?}",
             host.name(),
             shim_time.to_abs_simtime().as_nanos(),
