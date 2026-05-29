@@ -163,4 +163,105 @@ mod scchannel_tests {
             assert_eq!(beta.join().unwrap(), vec![Ok(1), Ok(2), Ok(3)]);
         })
     }
+
+    #[test]
+    fn test_channel_reuse_fast_receive() {
+        // Same as `test_channel_reuse`, but using the fast SPSC receive path
+        // used by Shadow/shim IPC.
+        sync::model_with_max_preemptions(3, || {
+            let alpha_to_beta = sync::Arc::new(SelfContainedChannel::<u32>::new());
+            let beta_to_alpha = sync::Arc::new(SelfContainedChannel::<u32>::new());
+
+            let alpha = {
+                let send_channel = alpha_to_beta.clone();
+                let recv_channel = beta_to_alpha.clone();
+                sync::thread::spawn(move || {
+                    let mut v = Vec::new();
+                    send_channel.send(1);
+                    // SAFETY: This test has one receiver for this channel.
+                    v.push(unsafe { recv_channel.receive_assuming_single_consumer() });
+                    send_channel.send(2);
+                    // SAFETY: This test has one receiver for this channel.
+                    v.push(unsafe { recv_channel.receive_assuming_single_consumer() });
+                    send_channel.send(3);
+                    // SAFETY: This test has one receiver for this channel.
+                    v.push(unsafe { recv_channel.receive_assuming_single_consumer() });
+                    v
+                })
+            };
+            let beta = {
+                let send_channel = beta_to_alpha;
+                let recv_channel = alpha_to_beta;
+                sync::thread::spawn(move || {
+                    let mut v = Vec::new();
+                    // SAFETY: This test has one receiver for this channel.
+                    v.push(unsafe { recv_channel.receive_assuming_single_consumer() });
+                    send_channel.send(4);
+                    // SAFETY: This test has one receiver for this channel.
+                    v.push(unsafe { recv_channel.receive_assuming_single_consumer() });
+                    send_channel.send(5);
+                    // SAFETY: This test has one receiver for this channel.
+                    v.push(unsafe { recv_channel.receive_assuming_single_consumer() });
+                    send_channel.send(6);
+                    v
+                })
+            };
+            assert_eq!(alpha.join().unwrap(), vec![Ok(4), Ok(5), Ok(6)]);
+            assert_eq!(beta.join().unwrap(), vec![Ok(1), Ok(2), Ok(3)]);
+        })
+    }
+
+    #[test]
+    fn test_try_receive_single_thread() {
+        sync::model(|| {
+            let channel = SelfContainedChannel::new();
+
+            // SAFETY: This test has one receiver for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Ok(None)
+            );
+
+            channel.send(42);
+            // SAFETY: This test has one receiver for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Ok(Some(42))
+            );
+
+            // SAFETY: This test has one receiver for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Ok(None)
+            );
+
+            channel.close_writer();
+            // SAFETY: This test has one receiver for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Err(SelfContainedChannelError::WriterIsClosed)
+            );
+        })
+    }
+
+    #[test]
+    fn test_try_receive_gets_pending_message_after_close() {
+        sync::model(|| {
+            let channel = SelfContainedChannel::new();
+            channel.send(42);
+            channel.close_writer();
+
+            // SAFETY: This test has one receiver for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Ok(Some(42))
+            );
+
+            // SAFETY: This test has one receiver for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Err(SelfContainedChannelError::WriterIsClosed)
+            );
+        })
+    }
 }

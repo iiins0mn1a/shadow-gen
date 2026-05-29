@@ -3,6 +3,7 @@
 //! This contains the code where the simulator can create or communicate with a managed process.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::ops::Deref;
@@ -10,13 +11,16 @@ use std::os::fd::AsRawFd;
 use std::os::unix::prelude::OsStrExt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, atomic};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{atomic, Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use linux_api::errno::Errno;
 use linux_api::posix_types::Pid;
 use linux_api::sched::CloneFlags;
 use linux_api::signal::tgkill;
-use log::{Level, debug, error, log_enabled, trace};
+use linux_api::syscall::SyscallNum;
+use log::{debug, error, log_enabled, trace, Level};
 use rand::Rng as _;
 use rustix::pipe::PipeFlags;
 use rustix::process::WaitOptions;
@@ -28,21 +32,356 @@ use shadow_shim_helper_rs::shim_event::{
 use shadow_shim_helper_rs::syscall_types::{
     ForeignPtr, SyscallArgs, SyscallReg, UntypedForeignPtr,
 };
-use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias, ShMemBlockSerialized, shdeserialize};
+use shadow_shmem::allocator::{shdeserialize, ShMemBlock, ShMemBlockAlias, ShMemBlockSerialized};
 use vasi_sync::scchannel::SelfContainedChannelError;
 
 use super::context::ThreadContext;
+use super::descriptor::descriptor_table::DescriptorHandle;
+use super::descriptor::{CompatFile, File};
 use super::host::Host;
 use super::syscall::condition::SyscallCondition;
 use crate::core::checkpoint::snapshot_types::{
     BlockedSyscallPhaseSnapshot, BlockedSyscallRestoreActionSnapshot, ThreadEventKindSnapshot,
     ThreadRestorePolicySnapshot, ThreadRuntimeSnapshot,
 };
-use crate::core::worker::{WORKER_SHARED, Worker};
+use crate::core::worker::{Worker, WORKER_SHARED};
 use crate::cshadow;
 use crate::host::syscall::handler::SyscallHandler;
 use crate::host::syscall::types::{ForeignArrayPtr, SyscallReturn};
-use crate::utility::{VerifyPluginPathError, inject_preloads, syscall, verify_plugin_path};
+use crate::utility::{inject_preloads, syscall, verify_plugin_path, VerifyPluginPathError};
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SyscallPerf {
+    handler_calls: u64,
+    handler_wall_ns: u64,
+    continue_calls: u64,
+    continue_wall_ns: u64,
+    done_results: u64,
+    blocked_results: u64,
+    native_results: u64,
+    synthetic_completions: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ContinueExchangePerf {
+    calls: u64,
+    wall_ns: u64,
+    receive_wall_ns: u64,
+}
+
+#[derive(Default)]
+struct ManagedThreadPerfStats {
+    continue_plugin_calls: AtomicU64,
+    continue_plugin_wall_ns: AtomicU64,
+    continue_plugin_receive_wall_ns: AtomicU64,
+    continue_plugin_lock_wall_ns: AtomicU64,
+    continue_plugin_prepare_wall_ns: AtomicU64,
+    continue_plugin_send_wall_ns: AtomicU64,
+    continue_plugin_time_update_wall_ns: AtomicU64,
+    syscall_handler_calls: AtomicU64,
+    syscall_handler_wall_ns: AtomicU64,
+    syscall_continue_calls: AtomicU64,
+    syscall_continue_wall_ns: AtomicU64,
+    syscalls: Mutex<HashMap<u32, SyscallPerf>>,
+    syscall_fds: Mutex<HashMap<(u32, i32), u64>>,
+    syscall_fd_kinds: Mutex<HashMap<(u32, &'static str), u64>>,
+    continue_exchanges: Mutex<HashMap<(&'static str, &'static str), ContinueExchangePerf>>,
+}
+
+static MANAGED_THREAD_PERF_STATS: OnceLock<ManagedThreadPerfStats> = OnceLock::new();
+static TDT_PERF_COUNTERS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+thread_local! {
+    static TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn tdt_perf_counters_enabled() -> bool {
+    *TDT_PERF_COUNTERS_ENABLED.get_or_init(|| {
+        std::env::var("SHADOW_TDT_PERF_COUNTERS")
+            .map(|raw| {
+                let raw = raw.trim();
+                !raw.is_empty() && raw != "0"
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn managed_thread_perf_stats() -> Option<&'static ManagedThreadPerfStats> {
+    tdt_perf_counters_enabled()
+        .then(|| MANAGED_THREAD_PERF_STATS.get_or_init(ManagedThreadPerfStats::default))
+}
+
+pub fn tdt_perf_reset_worker_body_continue_receive_wall_ns() {
+    if !tdt_perf_counters_enabled() {
+        return;
+    }
+    TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS.with(|counter| counter.set(0));
+}
+
+pub fn tdt_perf_take_worker_body_continue_receive_wall_ns() -> u64 {
+    if !tdt_perf_counters_enabled() {
+        return 0;
+    }
+    TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS.with(|counter| counter.replace(0))
+}
+
+fn tdt_perf_add_worker_body_continue_receive_wall_ns(delta_ns: u64) {
+    TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS.with(|counter| {
+        counter.set(counter.get().saturating_add(delta_ns));
+    });
+}
+
+fn syscall_name(syscall_nr: u32) -> &'static str {
+    SyscallNum::new(syscall_nr)
+        .to_str()
+        .unwrap_or("unknown-syscall")
+}
+
+fn syscall_first_fd(syscall_nr: u32, args: &SyscallArgs) -> Option<i32> {
+    match i64::from(syscall_nr) {
+        libc::SYS_read
+        | libc::SYS_write
+        | libc::SYS_readv
+        | libc::SYS_writev
+        | libc::SYS_pread64
+        | libc::SYS_pwrite64
+        | libc::SYS_preadv
+        | libc::SYS_pwritev
+        | libc::SYS_preadv2
+        | libc::SYS_pwritev2
+        | libc::SYS_epoll_wait
+        | libc::SYS_epoll_pwait
+        | libc::SYS_epoll_pwait2
+        | libc::SYS_close
+        | libc::SYS_fsync
+        | libc::SYS_fdatasync => i64::from(args.args[0]).try_into().ok(),
+        _ => None,
+    }
+}
+
+fn descriptor_kind_for_fd(ctx: &ThreadContext, fd: i32) -> &'static str {
+    let Ok(fd) = u32::try_from(fd) else {
+        return "invalid-fd";
+    };
+    let Some(handle) = DescriptorHandle::new(fd) else {
+        return "invalid-fd";
+    };
+    let desc_table = ctx.thread.descriptor_table_borrow(ctx.host);
+    let Some(desc) = desc_table.get(handle) else {
+        return "missing";
+    };
+    match desc.file() {
+        CompatFile::New(file) => match file.inner_file() {
+            File::Pipe(_) => "pipe",
+            File::EventFd(_) => "eventfd",
+            File::Socket(_) => "socket",
+            File::TimerFd(_) => "timerfd",
+            File::Epoll(_) => "epoll",
+        },
+        CompatFile::Legacy(file) => match unsafe { cshadow::legacyfile_getType(file.ptr()) } {
+            cshadow::_LegacyFileType_DT_TCPSOCKET => "legacy-tcp",
+            cshadow::_LegacyFileType_DT_EPOLL => "legacy-epoll",
+            cshadow::_LegacyFileType_DT_FILE => "legacy-file",
+            _ => "legacy-other",
+        },
+    }
+}
+
+fn record_syscall_perf(syscall_nr: u32, update: impl FnOnce(&mut SyscallPerf)) {
+    let Some(stats) = managed_thread_perf_stats() else {
+        return;
+    };
+    record_syscall_perf_with_stats(stats, syscall_nr, update);
+}
+
+fn record_syscall_perf_with_stats(
+    stats: &ManagedThreadPerfStats,
+    syscall_nr: u32,
+    update: impl FnOnce(&mut SyscallPerf),
+) {
+    let mut syscalls = stats.syscalls.lock().unwrap();
+    update(syscalls.entry(syscall_nr).or_default());
+}
+
+fn record_syscall_fd_with_stats(stats: &ManagedThreadPerfStats, syscall_nr: u32, fd: i32) {
+    let mut fds = stats.syscall_fds.lock().unwrap();
+    *fds.entry((syscall_nr, fd)).or_default() += 1;
+}
+
+fn record_syscall_fd_kind_with_stats(
+    stats: &ManagedThreadPerfStats,
+    syscall_nr: u32,
+    kind: &'static str,
+) {
+    let mut kinds = stats.syscall_fd_kinds.lock().unwrap();
+    *kinds.entry((syscall_nr, kind)).or_default() += 1;
+}
+
+fn shim_event_to_shadow_kind(event: &ShimEventToShadow) -> &'static str {
+    match event {
+        ShimEventToShadow::StartReq(_) => "StartReq",
+        ShimEventToShadow::ProcessDeath => "ProcessDeath",
+        ShimEventToShadow::Syscall(_) => "Syscall",
+        ShimEventToShadow::SyscallComplete(_) => "SyscallComplete",
+        ShimEventToShadow::AddThreadRes(_) => "AddThreadRes",
+    }
+}
+
+fn shim_event_to_shim_kind(event: &ShimEventToShim) -> &'static str {
+    match event {
+        ShimEventToShim::StartRes(_) => "StartRes",
+        ShimEventToShim::Syscall(_) => "Syscall",
+        ShimEventToShim::AddThreadReq(_) => "AddThreadReq",
+        ShimEventToShim::SyscallComplete(_) => "SyscallComplete",
+        ShimEventToShim::SyscallDoNative => "SyscallDoNative",
+    }
+}
+
+fn record_continue_exchange(
+    stats: &ManagedThreadPerfStats,
+    sent: &'static str,
+    received: &'static str,
+    wall_ns: u64,
+    receive_wall_ns: u64,
+) {
+    let mut exchanges = stats.continue_exchanges.lock().unwrap();
+    let entry = exchanges.entry((sent, received)).or_default();
+    entry.calls += 1;
+    entry.wall_ns += wall_ns;
+    entry.receive_wall_ns += receive_wall_ns;
+}
+
+pub fn log_tdt_managed_thread_perf_stats() {
+    let Some(stats) = MANAGED_THREAD_PERF_STATS.get() else {
+        return;
+    };
+
+    let continue_plugin_calls = stats.continue_plugin_calls.load(Ordering::Relaxed);
+    let continue_plugin_wall_ns = stats.continue_plugin_wall_ns.load(Ordering::Relaxed);
+    let continue_plugin_receive_wall_ns = stats
+        .continue_plugin_receive_wall_ns
+        .load(Ordering::Relaxed);
+    let continue_plugin_lock_wall_ns = stats.continue_plugin_lock_wall_ns.load(Ordering::Relaxed);
+    let continue_plugin_prepare_wall_ns = stats
+        .continue_plugin_prepare_wall_ns
+        .load(Ordering::Relaxed);
+    let continue_plugin_send_wall_ns = stats.continue_plugin_send_wall_ns.load(Ordering::Relaxed);
+    let continue_plugin_time_update_wall_ns = stats
+        .continue_plugin_time_update_wall_ns
+        .load(Ordering::Relaxed);
+    let syscall_handler_calls = stats.syscall_handler_calls.load(Ordering::Relaxed);
+    let syscall_handler_wall_ns = stats.syscall_handler_wall_ns.load(Ordering::Relaxed);
+    let syscall_continue_calls = stats.syscall_continue_calls.load(Ordering::Relaxed);
+    let syscall_continue_wall_ns = stats.syscall_continue_wall_ns.load(Ordering::Relaxed);
+    let syscall_top = {
+        let fd_counts = stats.syscall_fds.lock().unwrap();
+        let fd_kind_counts = stats.syscall_fd_kinds.lock().unwrap();
+        let mut items: Vec<_> = stats
+            .syscalls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(nr, perf)| (*nr, *perf))
+            .collect();
+        items.sort_by_key(|(_, perf)| {
+            std::cmp::Reverse(perf.handler_wall_ns + perf.continue_wall_ns)
+        });
+        items
+            .into_iter()
+            .take(8)
+            .map(|(nr, perf)| {
+                let mut top_fds = fd_counts
+                    .iter()
+                    .filter_map(|((fd_nr, fd), count)| (*fd_nr == nr).then_some((*fd, *count)))
+                    .collect::<Vec<_>>();
+                top_fds.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                let fd_top = top_fds
+                    .into_iter()
+                    .take(4)
+                    .map(|(fd, count)| format!("{fd}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                let mut top_fd_kinds = fd_kind_counts
+                    .iter()
+                    .filter_map(|((fd_nr, kind), count)| {
+                        (*fd_nr == nr).then_some((*kind, *count))
+                    })
+                    .collect::<Vec<_>>();
+                top_fd_kinds.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                let fd_kind_top = top_fd_kinds
+                    .into_iter()
+                    .take(4)
+                    .map(|(kind, count)| format!("{kind}={count}"))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                let avg_continue_ns = if perf.continue_calls == 0 {
+                    0.0
+                } else {
+                    perf.continue_wall_ns as f64 / perf.continue_calls as f64
+                };
+                format!(
+                    "{}({}):handler_ms={:.3}:continue_ms={:.3}:continue_avg_ns={:.1}:handler_calls={}:continue_calls={}:done={}:block={}:native={}:synthetic={}:fd_top={}:fd_kind_top={}",
+                    syscall_name(nr),
+                    nr,
+                    perf.handler_wall_ns as f64 / 1_000_000.0,
+                    perf.continue_wall_ns as f64 / 1_000_000.0,
+                    avg_continue_ns,
+                    perf.handler_calls,
+                    perf.continue_calls,
+                    perf.done_results,
+                    perf.blocked_results,
+                    perf.native_results,
+                    perf.synthetic_completions,
+                    fd_top,
+                    fd_kind_top,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let continue_exchange_top = {
+        let mut items: Vec<_> = stats
+            .continue_exchanges
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(kind, perf)| (*kind, *perf))
+            .collect();
+        items.sort_by_key(|(_, perf)| std::cmp::Reverse(perf.receive_wall_ns));
+        items
+            .into_iter()
+            .take(8)
+            .map(|((sent, received), perf)| {
+                format!(
+                    "{}->{}:calls={}:wall_ms={:.3}:receive_ms={:.3}",
+                    sent,
+                    received,
+                    perf.calls,
+                    perf.wall_ns as f64 / 1_000_000.0,
+                    perf.receive_wall_ns as f64 / 1_000_000.0,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+
+    log::info!(
+        "TDT managed-thread counters: continue_plugin_calls={} continue_plugin_wall_ns={} continue_plugin_receive_wall_ns={} continue_plugin_lock_wall_ns={} continue_plugin_prepare_wall_ns={} continue_plugin_send_wall_ns={} continue_plugin_time_update_wall_ns={} syscall_handler_calls={} syscall_handler_wall_ns={} syscall_continue_calls={} syscall_continue_wall_ns={} syscall_top={} continue_exchange_top={}",
+        continue_plugin_calls,
+        continue_plugin_wall_ns,
+        continue_plugin_receive_wall_ns,
+        continue_plugin_lock_wall_ns,
+        continue_plugin_prepare_wall_ns,
+        continue_plugin_send_wall_ns,
+        continue_plugin_time_update_wall_ns,
+        syscall_handler_calls,
+        syscall_handler_wall_ns,
+        syscall_continue_calls,
+        syscall_continue_wall_ns,
+        syscall_top,
+        continue_exchange_top,
+    );
+}
 
 /// The ManagedThread's state after having been allowed to execute some code.
 #[derive(Debug)]
@@ -297,7 +636,13 @@ impl ManagedThread {
         };
 
         trace!("waiting for start event from shim with native pid {native_pid:?}");
-        let start_req = ipc_shmem.from_plugin().receive().unwrap();
+        // SAFETY: Each IPC channel has a single Shadow-side consumer.
+        let start_req = unsafe {
+            ipc_shmem
+                .from_plugin()
+                .receive_assuming_single_consumer()
+                .unwrap()
+        };
         match &start_req {
             ShimEventToShadow::StartReq(_) => {
                 // Expected result; shim is ready to initialize.
@@ -420,6 +765,7 @@ impl ManagedThread {
                     return ResumeResult::ExitedProcess;
                 }
                 ShimEventToShadow::Syscall(syscall) => {
+                    let syscall_nr = u32::try_from(syscall.syscall_args.number).unwrap_or_default();
                     let is_poll_family = matches!(
                         syscall.syscall_args.number,
                         x if x == libc::SYS_pselect6
@@ -497,14 +843,15 @@ impl ManagedThread {
                             syscall.syscall_args.number,
                             <i64 as From<SyscallReg>>::from(synthetic_retval)
                         );
+                        record_syscall_perf(syscall_nr, |perf| {
+                            perf.synthetic_completions += 1;
+                        });
                         syscall_handler.clear_blocked_syscall();
-                        self.continue_plugin(
-                            ctx.host,
-                            &ShimEventToShim::SyscallComplete(ShimEventSyscallComplete {
-                                retval: synthetic_retval,
-                                restartable: false,
-                            }),
-                        )
+                        let event = ShimEventToShim::SyscallComplete(ShimEventSyscallComplete {
+                            retval: synthetic_retval,
+                            restartable: false,
+                        });
+                        self.continue_plugin_after_syscall(ctx.host, &event, syscall_nr)
                     } else {
                         // Emulate the given syscall.
                         // `exit` is tricky since it only exits the *mthread*, and we don't have a way
@@ -530,7 +877,36 @@ impl ManagedThread {
                             return ResumeResult::ExitedThread(return_code);
                         }
 
-                        let scr = syscall_handler.syscall(ctx, &syscall.syscall_args).into();
+                        let handler_stats = managed_thread_perf_stats();
+                        let fd_perf = handler_stats.and_then(|_| {
+                            syscall_first_fd(syscall_nr, &syscall.syscall_args)
+                                .map(|fd| (fd, descriptor_kind_for_fd(ctx, fd)))
+                        });
+                        let handler_started = handler_stats.map(|_| Instant::now());
+                        let scr: crate::host::syscall::types::SyscallReturn =
+                            syscall_handler.syscall(ctx, &syscall.syscall_args).into();
+                        if let (Some(stats), Some(started)) = (handler_stats, handler_started) {
+                            let elapsed_ns = started.elapsed().as_nanos() as u64;
+                            stats.syscall_handler_calls.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .syscall_handler_wall_ns
+                                .fetch_add(elapsed_ns, Ordering::Relaxed);
+                            record_syscall_perf_with_stats(stats, syscall_nr, |perf| {
+                                perf.handler_calls += 1;
+                                perf.handler_wall_ns += elapsed_ns;
+                                match scr {
+                                    SyscallReturn::Done(_) => perf.done_results += 1,
+                                    SyscallReturn::Block(_) => perf.blocked_results += 1,
+                                    SyscallReturn::Native => perf.native_results += 1,
+                                }
+                            });
+                            if let Some(fd) = syscall_first_fd(syscall_nr, &syscall.syscall_args) {
+                                record_syscall_fd_with_stats(stats, syscall_nr, fd);
+                            }
+                            if let Some((_, kind)) = fd_perf {
+                                record_syscall_fd_kind_with_stats(stats, syscall_nr, kind);
+                            }
+                        }
 
                         if ctx.host.matches_restore_thread_trace_host_phase() {
                             let sim_time_ns = crate::core::worker::Worker::current_time()
@@ -562,16 +938,19 @@ impl ManagedThread {
                                     SyscallCondition::consume_from_c(b.cond)
                                 });
                             }
-                            SyscallReturn::Done(d) => self.continue_plugin(
-                                ctx.host,
-                                &ShimEventToShim::SyscallComplete(ShimEventSyscallComplete {
-                                    retval: d.retval,
-                                    restartable: d.restartable,
-                                }),
-                            ),
-                            SyscallReturn::Native => {
-                                self.continue_plugin(ctx.host, &ShimEventToShim::SyscallDoNative)
+                            SyscallReturn::Done(d) => {
+                                let event =
+                                    ShimEventToShim::SyscallComplete(ShimEventSyscallComplete {
+                                        retval: d.retval,
+                                        restartable: d.restartable,
+                                    });
+                                self.continue_plugin_after_syscall(ctx.host, &event, syscall_nr)
                             }
+                            SyscallReturn::Native => self.continue_plugin_after_syscall(
+                                ctx.host,
+                                &ShimEventToShim::SyscallDoNative,
+                                syscall_nr,
+                            ),
                         }
                     }
                 }
@@ -652,7 +1031,13 @@ impl ManagedThread {
         trace!("native clone treated tid {child_native_tid:?}");
 
         trace!("waiting for start event from shim with native tid {child_native_tid:?}");
-        let start_req = child_ipc_shmem.from_plugin().receive().unwrap();
+        // SAFETY: Each IPC channel has a single Shadow-side consumer.
+        let start_req = unsafe {
+            child_ipc_shmem
+                .from_plugin()
+                .receive_assuming_single_consumer()
+                .unwrap()
+        };
         match &start_req {
             ShimEventToShadow::StartReq(_) => (),
             other => panic!("Unexpected result from shim: {other:?}"),
@@ -702,7 +1087,35 @@ impl ManagedThread {
     }
 
     #[must_use]
+    fn continue_plugin_after_syscall(
+        &self,
+        host: &Host,
+        event: &ShimEventToShim,
+        syscall_nr: u32,
+    ) -> ShimEventToShadow {
+        let stats = managed_thread_perf_stats();
+        let started = stats.map(|_| Instant::now());
+        let next_event = self.continue_plugin(host, event);
+        if let (Some(stats), Some(started)) = (stats, started) {
+            let elapsed_ns = started.elapsed().as_nanos() as u64;
+            stats.syscall_continue_calls.fetch_add(1, Ordering::Relaxed);
+            stats
+                .syscall_continue_wall_ns
+                .fetch_add(elapsed_ns, Ordering::Relaxed);
+            record_syscall_perf_with_stats(stats, syscall_nr, |perf| {
+                perf.continue_calls += 1;
+                perf.continue_wall_ns += elapsed_ns;
+            });
+        }
+        next_event
+    }
+
+    #[must_use]
     fn continue_plugin(&self, host: &Host, event: &ShimEventToShim) -> ShimEventToShadow {
+        let stats = managed_thread_perf_stats();
+        let perf_started = stats.map(|_| Instant::now());
+        let sent_kind = stats.map(|_| shim_event_to_shim_kind(event));
+        let prepare_started = stats.map(|_| Instant::now());
         // Update shared state before transferring control.
         let max_runahead_time = Worker::max_event_runahead_time(host);
         let sim_time = Worker::current_time().unwrap();
@@ -710,6 +1123,9 @@ impl ManagedThread {
 
         // Release lock so that plugin can take it. Reacquired in `wait_for_next_event`.
         host.unlock_shmem();
+        let prepare_wall_ns = prepare_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
 
         let supports_post_restore_refresh = matches!(
             event,
@@ -718,10 +1134,17 @@ impl ManagedThread {
                 | ShimEventToShim::SyscallDoNative
         );
         if supports_post_restore_refresh && self.needs_post_restore_refresh.replace(false) {
-            self.ipc_shmem.to_plugin().send(ShimEventToShim::StartRes(ShimEventStartRes {
-                auxvec_random: [0u8; 16],
-            }));
-            let refresh_ack = match self.ipc_shmem.from_plugin().receive() {
+            self.ipc_shmem
+                .to_plugin()
+                .send(ShimEventToShim::StartRes(ShimEventStartRes {
+                    auxvec_random: [0u8; 16],
+                }));
+            // SAFETY: Each IPC channel has a single Shadow-side consumer.
+            let refresh_ack = match unsafe {
+                self.ipc_shmem
+                    .from_plugin()
+                    .receive_assuming_single_consumer()
+            } {
                 Ok(e) => e,
                 Err(SelfContainedChannelError::WriterIsClosed) => ShimEventToShadow::ProcessDeath,
             };
@@ -733,18 +1156,36 @@ impl ManagedThread {
                 other => panic!("Unexpected post-restore refresh ack: {other:?}"),
             }
         }
+        let send_started = stats.map(|_| Instant::now());
         self.ipc_shmem.to_plugin().send(*event);
+        let send_wall_ns = send_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
 
-        let event = match self.ipc_shmem.from_plugin().receive() {
+        let receive_started = stats.map(|_| Instant::now());
+        // SAFETY: Each IPC channel has a single Shadow-side consumer.
+        let event = match unsafe {
+            self.ipc_shmem
+                .from_plugin()
+                .receive_assuming_single_consumer()
+        } {
             Ok(e) => e,
             Err(SelfContainedChannelError::WriterIsClosed) => ShimEventToShadow::ProcessDeath,
         };
+        let receive_wall_ns = receive_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
 
         // Reacquire the shared memory lock, now that the shim has yielded control
         // back to us.
+        let lock_started = stats.map(|_| Instant::now());
         host.lock_shmem();
+        let lock_wall_ns = lock_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
 
         // Update time, which may have been incremented in the shim.
+        let time_update_started = stats.map(|_| Instant::now());
         let shim_time = host.shim_shmem().sim_time.load(atomic::Ordering::Relaxed);
         if log_enabled!(Level::Trace) {
             let worker_time = Worker::current_time().unwrap();
@@ -756,6 +1197,42 @@ impl ManagedThread {
             }
         }
         Worker::set_current_time(shim_time);
+        let time_update_wall_ns = time_update_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
+
+        if let (Some(stats), Some(started)) = (stats, perf_started) {
+            let continue_wall_ns = started.elapsed().as_nanos() as u64;
+            stats.continue_plugin_calls.fetch_add(1, Ordering::Relaxed);
+            stats
+                .continue_plugin_wall_ns
+                .fetch_add(continue_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_receive_wall_ns
+                .fetch_add(receive_wall_ns, Ordering::Relaxed);
+            tdt_perf_add_worker_body_continue_receive_wall_ns(receive_wall_ns);
+            stats
+                .continue_plugin_lock_wall_ns
+                .fetch_add(lock_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_prepare_wall_ns
+                .fetch_add(prepare_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_send_wall_ns
+                .fetch_add(send_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_time_update_wall_ns
+                .fetch_add(time_update_wall_ns, Ordering::Relaxed);
+            if let Some(sent_kind) = sent_kind {
+                record_continue_exchange(
+                    stats,
+                    sent_kind,
+                    shim_event_to_shadow_kind(&event),
+                    continue_wall_ns,
+                    receive_wall_ns,
+                );
+            }
+        }
 
         event
     }
@@ -1123,6 +1600,9 @@ impl ManagedThread {
         );
 
         let restored_event = event_from_bytes(current_event_bytes);
+        if !matches!(restored_event, ShimEventToShadow::ProcessDeath) {
+            ipc_shmem.from_plugin().reopen_writer_after_restore();
+        }
         log::debug!(
             "Rebuilt ManagedThread event kind at restore: pid={:?} tid={:?} event={:?}",
             native_pid,

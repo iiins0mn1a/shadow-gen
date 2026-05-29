@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use nix::errno::Errno;
 
+const SPIN_YIELD_BEFORE_FUTEX: usize = 10_000;
+
 /// A simple reusable latch. Multiple waiters can wait for the latch to open. After opening the
 /// latch with [`open()`](Self::open), you must not open the latch again until all waiters have
 /// waited with [`wait()`](LatchWaiter::wait) on the latch. In other words, you must not call
@@ -116,11 +118,45 @@ impl LatchWaiter {
                     "FUTEX_WAIT failed with {rv:?}"
                 );
             } else {
-                // we don't know if a pause instruction is beneficial or not here, but it doesn't
-                // seem to hurt performance
-                // https://www.intel.com/content/www/us/en/docs/cpp-compiler/developer-guide-reference/2021-9/pause-intrinsic.html
-                std::hint::spin_loop();
-                std::thread::yield_now();
+                // Spinning helps when the next scheduler task arrives almost immediately, but
+                // run-control pauses can leave workers waiting indefinitely. Bound the spin phase
+                // and then park on the futex so paused simulations don't consume whole cores.
+                for _ in 0..SPIN_YIELD_BEFORE_FUTEX {
+                    let latch_gen = self.latch_gen.load(Ordering::Acquire);
+                    match latch_gen.wrapping_sub(self.waiter_gen) {
+                        1 => {
+                            self.waiter_gen = self.waiter_gen.wrapping_add(1);
+                            return;
+                        }
+                        0 => {}
+                        _ => panic!("Latch has been opened multiple times without us waiting"),
+                    }
+                    std::hint::spin_loop();
+                    std::thread::yield_now();
+                }
+
+                let latch_gen = self.latch_gen.load(Ordering::Acquire);
+                match latch_gen.wrapping_sub(self.waiter_gen) {
+                    // the latch opened after the spin loop and before we parked
+                    1 => break,
+                    // the latch has not been opened and we're at the same generation
+                    0 => {}
+                    // the latch has been opened multiple times and we haven't been kept in sync
+                    _ => panic!("Latch has been opened multiple times without us waiting"),
+                }
+
+                let rv = libc_futex(
+                    &self.latch_gen,
+                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                    latch_gen,
+                    None,
+                    None,
+                    0,
+                );
+                assert!(
+                    matches!(rv, Ok(_) | Err(Errno::EAGAIN | Errno::EINTR)),
+                    "FUTEX_WAIT failed with {rv:?}"
+                );
             }
         }
 
@@ -217,6 +253,56 @@ mod tests {
         let threshold = Duration::from_millis(40);
         assert!(wait_duration > sleep_duration - threshold);
         assert!(wait_duration < sleep_duration + threshold);
+    }
+
+    #[test]
+    fn test_spin_yield_waiter_blocks_without_busy_spinning() {
+        let mut latch = Latch::new();
+        let mut waiter = latch.waiter(true);
+
+        let t = std::thread::spawn(move || {
+            let start = Instant::now();
+            waiter.wait();
+            start.elapsed()
+        });
+
+        let sleep_duration = Duration::from_millis(200);
+        sleep(sleep_duration);
+        latch.open();
+
+        let wait_duration = t.join().unwrap();
+
+        let threshold = Duration::from_millis(40);
+        assert!(wait_duration > sleep_duration - threshold);
+        assert!(wait_duration < sleep_duration + threshold);
+    }
+
+    #[test]
+    fn test_spin_yield_waiter_does_not_lose_racing_wake() {
+        use std::sync::mpsc;
+
+        for i in 0..1000 {
+            let mut latch = Latch::new();
+            let mut waiter = latch.waiter(true);
+            let (tx, rx) = mpsc::channel();
+
+            let t = std::thread::spawn(move || {
+                waiter.wait();
+                tx.send(()).unwrap();
+            });
+
+            match i % 3 {
+                0 => {}
+                1 => std::thread::yield_now(),
+                _ => sleep(Duration::from_micros(50)),
+            }
+
+            latch.open();
+
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("spin-yield waiter likely lost a racing wake");
+            t.join().unwrap();
+        }
     }
 
     #[test]

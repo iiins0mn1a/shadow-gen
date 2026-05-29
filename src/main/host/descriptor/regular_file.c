@@ -754,6 +754,12 @@ int regularfile_fsync(RegularFile* file) {
         return -EBADF;
     }
 
+    const char* fastSync = getenv("SHADOW_FAST_FILE_SYNC");
+    if (fastSync != NULL && fastSync[0] != '\0' && strcmp(fastSync, "0") != 0) {
+        trace("RegularFile %p fast fsync os-backed file %i", file, _regularfile_getOSBackedFD(file));
+        return 0;
+    }
+
     trace("RegularFile %p fsync os-backed file %i", file, _regularfile_getOSBackedFD(file));
 
     int result = fsync(_regularfile_getOSBackedFD(file));

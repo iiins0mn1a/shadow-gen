@@ -613,7 +613,8 @@ fn wait_for_start_event(is_first_thread: bool) {
     });
     let res = tls_ipc::with(|ipc| {
         ipc.to_shadow().send(start_req);
-        ipc.from_shadow().receive().unwrap()
+        // SAFETY: Each IPC channel has a single shim-side consumer.
+        unsafe { ipc.from_shadow().receive_assuming_single_consumer().unwrap() }
     });
     let ShimEventToShim::StartRes(res) = res else {
         panic!("Unexpected response: {res:?}");

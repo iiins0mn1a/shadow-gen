@@ -11,26 +11,25 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "enable_perf_logging")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-#[cfg(feature = "enable_perf_logging")]
 use std::time::Instant;
 
 use asm_util::tsc::Tsc;
 use atomic_refcell::AtomicRefCell;
-use linux_api::signal::{Signal, siginfo_t};
+use linux_api::signal::{siginfo_t, Signal};
 use log::{debug, trace};
 use logger::LogLevel;
 use once_cell::unsync::OnceCell;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
-use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::explicit_drop::ExplicitDropper;
-use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::rootedcell::cell::RootedCell;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
+use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::shim_shmem::{HostShmem, HostShmemProtected, ManagerShmem};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
+use shadow_shim_helper_rs::HostId;
 use shadow_shmem::allocator::{ShMemBlock, ShMemBlockAlias};
 use vasi_sync::scmutex::SelfContainedMutexGuard;
 
@@ -58,9 +57,9 @@ use crate::host::network::interface::{FifoPacketPriority, NetworkInterface, Pcap
 use crate::host::network::namespace::NetworkNamespace;
 use crate::host::process::Process;
 use crate::host::thread::{Thread, ThreadId};
-use crate::network::PacketDevice;
 use crate::network::relay::{RateLimit, Relay};
 use crate::network::router::Router;
+use crate::network::PacketDevice;
 use crate::utility;
 #[cfg(feature = "perf_timers")]
 use crate::utility::perf_timer::PerfTimer;
@@ -215,6 +214,101 @@ impl RestoreThreadTraceConfig {
 }
 
 static RESTORE_THREAD_TRACE_CONFIG: OnceLock<Option<RestoreThreadTraceConfig>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostExecutionStats {
+    pub packet_events: u64,
+    pub local_events: u64,
+    pub cpu_delayed_events: u64,
+    pub packet_event_wall_ns: u64,
+    pub local_event_wall_ns: u64,
+    pub resume_process_events: u64,
+    pub resume_process_wall_ns: u64,
+    pub start_application_events: u64,
+    pub start_application_wall_ns: u64,
+    pub shutdown_process_events: u64,
+    pub shutdown_process_wall_ns: u64,
+    pub relay_forward_events: u64,
+    pub relay_forward_wall_ns: u64,
+    pub syscall_condition_wake_events: u64,
+    pub syscall_condition_wake_wall_ns: u64,
+    pub prepare_poll_timeout_completion_events: u64,
+    pub prepare_poll_timeout_completion_wall_ns: u64,
+    pub restore_blocked_syscall_condition_events: u64,
+    pub restore_blocked_syscall_condition_wall_ns: u64,
+    pub timer_expire_events: u64,
+    pub timer_expire_wall_ns: u64,
+    pub legacy_tcp_deferred_events: u64,
+    pub legacy_tcp_deferred_wall_ns: u64,
+    pub exec_continuation_events: u64,
+    pub exec_continuation_wall_ns: u64,
+    pub opaque_events: u64,
+    pub opaque_wall_ns: u64,
+    pub undescribed_events: u64,
+    pub undescribed_wall_ns: u64,
+}
+
+impl HostExecutionStats {
+    fn record_packet_event(&mut self, wall_ns: u64) {
+        self.packet_events += 1;
+        self.packet_event_wall_ns += wall_ns;
+    }
+
+    fn record_local_task(&mut self, descriptor: Option<&TaskDescriptor>, wall_ns: u64) {
+        self.local_events += 1;
+        self.local_event_wall_ns += wall_ns;
+        match descriptor {
+            Some(TaskDescriptor::ResumeProcess { .. }) => {
+                self.resume_process_events += 1;
+                self.resume_process_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::StartApplication { .. }) => {
+                self.start_application_events += 1;
+                self.start_application_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::ShutdownProcess { .. }) => {
+                self.shutdown_process_events += 1;
+                self.shutdown_process_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::RelayForward { .. }) => {
+                self.relay_forward_events += 1;
+                self.relay_forward_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::SyscallConditionWake { .. }) => {
+                self.syscall_condition_wake_events += 1;
+                self.syscall_condition_wake_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::PreparePollTimeoutCompletion { .. }) => {
+                self.prepare_poll_timeout_completion_events += 1;
+                self.prepare_poll_timeout_completion_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::RestoreBlockedSyscallCondition { .. }) => {
+                self.restore_blocked_syscall_condition_events += 1;
+                self.restore_blocked_syscall_condition_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::LegacyTcpDeferredAction { .. }) => {
+                self.legacy_tcp_deferred_events += 1;
+                self.legacy_tcp_deferred_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::TimerExpire { .. }) => {
+                self.timer_expire_events += 1;
+                self.timer_expire_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::ExecContinuation { .. }) => {
+                self.exec_continuation_events += 1;
+                self.exec_continuation_wall_ns += wall_ns;
+            }
+            Some(TaskDescriptor::Opaque { .. }) => {
+                self.opaque_events += 1;
+                self.opaque_wall_ns += wall_ns;
+            }
+            None => {
+                self.undescribed_events += 1;
+                self.undescribed_wall_ns += wall_ns;
+            }
+        }
+    }
+}
 
 /// A simulated Host.
 pub struct Host {
@@ -563,11 +657,7 @@ impl Host {
             .copied()
     }
 
-    pub fn set_shim_clock_state(
-        &self,
-        sim_time: EmulatedTime,
-        max_runahead_time: EmulatedTime,
-    ) {
+    pub fn set_shim_clock_state(&self, sim_time: EmulatedTime, max_runahead_time: EmulatedTime) {
         self.shim_shmem()
             .sim_time
             .store(sim_time, std::sync::atomic::Ordering::Relaxed);
@@ -613,9 +703,7 @@ impl Host {
 
         let restored = self.restored_shim_shmem.borrow();
         if let Some(restored) = restored.as_ref() {
-            let restored_time = restored
-                .sim_time
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let restored_time = restored.sim_time.load(std::sync::atomic::Ordering::Relaxed);
             if restored_time >= EmulatedTime::SIMULATION_START {
                 return restored_time;
             }
@@ -1140,10 +1228,14 @@ impl Host {
         trace!("done freeing application for host '{}'", self.name());
     }
 
-    pub fn execute(&self, until: EmulatedTime) {
+    pub fn execute(&self, until: EmulatedTime, collect_stats: bool) -> HostExecutionStats {
         // 真实运行时间统计：用于分析 Host::execute 的性能开销。
         #[cfg(feature = "enable_perf_logging")]
         let real_start = Instant::now();
+
+        let mut stats = HostExecutionStats::default();
+        let run_control_trace = Self::run_control_trace_enabled();
+        let mut traced_events = 0u64;
 
         loop {
             let mut event = {
@@ -1154,13 +1246,53 @@ impl Host {
                 };
                 event_queue.pop().unwrap()
             };
+            traced_events += 1;
+
+            if run_control_trace && (traced_events <= 512 || traced_events % 1_000 == 0) {
+                let event_kind = match event.data_ref() {
+                    EventData::Packet(data) => {
+                        format!(
+                            "packet src_host_id={:?} src_host_event_id={}",
+                            data.src_host_id(),
+                            data.src_host_event_id()
+                        )
+                    }
+                    EventData::Local(data) => {
+                        format!(
+                            "local event_id={} task={:?}",
+                            data.event_id(),
+                            data.task().descriptor()
+                        )
+                    }
+                };
+                log::info!(
+                    "run-control host event: host='{}' event_count={} event_time_ns={} until_ns={} kind={}",
+                    self.name(),
+                    traced_events,
+                    (event.time() - EmulatedTime::SIMULATION_START).as_nanos(),
+                    (until - EmulatedTime::SIMULATION_START).as_nanos(),
+                    event_kind,
+                );
+            }
 
             {
                 let mut cpu = self.cpu.borrow_mut();
                 cpu.update_time(event.time());
                 let cpu_delay = cpu.delay();
                 if cpu_delay > SimulationTime::ZERO {
+                    if run_control_trace && (traced_events <= 512 || traced_events % 1_000 == 0) {
+                        log::info!(
+                            "run-control host event cpu-delayed: host='{}' event_count={} event_time_ns={} cpu_delay_ns={}",
+                            self.name(),
+                            traced_events,
+                            (event.time() - EmulatedTime::SIMULATION_START).as_nanos(),
+                            cpu_delay.as_nanos(),
+                        );
+                    }
                     trace!("event blocked on CPU, rescheduled for {cpu_delay:?} from now");
+                    if collect_stats {
+                        stats.cpu_delayed_events += 1;
+                    }
 
                     // reschedule the event after the CPU delay time
                     event.set_time(event.time() + cpu_delay);
@@ -1176,11 +1308,41 @@ impl Host {
             self.continue_execution_timer();
             match event.data() {
                 EventData::Packet(data) => {
+                    let event_started = collect_stats.then(Instant::now);
                     self.upstream_router_borrow_mut()
                         .route_incoming_packet(data.into());
                     self.notify_router_has_packets();
+                    if let Some(started) = event_started {
+                        stats.record_packet_event(started.elapsed().as_nanos() as u64);
+                    }
+                    if run_control_trace && (traced_events <= 512 || traced_events % 1_000 == 0) {
+                        log::info!(
+                            "run-control host event complete: host='{}' event_count={} kind=packet",
+                            self.name(),
+                            traced_events,
+                        );
+                    }
                 }
-                EventData::Local(data) => TaskRef::from(data).execute(self),
+                EventData::Local(data) => {
+                    let task = TaskRef::from(data);
+                    let descriptor = task.descriptor().cloned();
+                    let event_started = collect_stats.then(Instant::now);
+                    task.execute(self);
+                    if let Some(started) = event_started {
+                        stats.record_local_task(
+                            descriptor.as_ref(),
+                            started.elapsed().as_nanos() as u64,
+                        );
+                    }
+                    if run_control_trace && (traced_events <= 512 || traced_events % 1_000 == 0) {
+                        log::info!(
+                            "run-control host event complete: host='{}' event_count={} kind=local task={:?}",
+                            self.name(),
+                            traced_events,
+                            descriptor,
+                        );
+                    }
+                }
             }
             self.stop_execution_timer();
             Worker::clear_current_time();
@@ -1208,10 +1370,18 @@ impl Host {
                 );
             }
         }
+
+        stats
     }
 
     pub fn next_event_time(&self) -> Option<EmulatedTime> {
         self.event_queue.lock().unwrap().next_event_time()
+    }
+
+    fn run_control_trace_enabled() -> bool {
+        std::env::var("SHADOW_RUN_CONTROL_TRACE")
+            .map(|raw| !(raw.trim().is_empty() || raw.trim() == "0"))
+            .unwrap_or(false)
     }
 
     /// The unprotected part of the Host's shared memory.
@@ -1437,7 +1607,7 @@ mod export {
     pub unsafe extern "C-unwind" fn host_execute(hostrc: *const Host, until: CEmulatedTime) {
         let hostrc = unsafe { hostrc.as_ref().unwrap() };
         let until = EmulatedTime::from_c_emutime(until).unwrap();
-        hostrc.execute(until)
+        let _ = hostrc.execute(until, false);
     }
 
     #[unsafe(no_mangle)]

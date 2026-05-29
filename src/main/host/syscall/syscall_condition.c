@@ -5,8 +5,9 @@
 
 #include "main/host/syscall/syscall_condition.h"
 
-#include <stdbool.h>
 #include <inttypes.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,6 +46,43 @@ struct _SysCallCondition {
     gint referenceCount;
     MAGIC_DECLARE;
 };
+
+static uint64_t _syscallcondition_perf_schedule_attempts;
+static uint64_t _syscallcondition_perf_scheduled_wakeups;
+static uint64_t _syscallcondition_perf_skipped_already_scheduled;
+static uint64_t _syscallcondition_perf_trigger_enters;
+static uint64_t _syscallcondition_perf_trigger_continues;
+static uint64_t _syscallcondition_perf_trigger_reblocks;
+static uint64_t _syscallcondition_perf_trigger_missing_process;
+static uint64_t _syscallcondition_perf_trigger_stopped_process;
+static uint64_t _syscallcondition_perf_trigger_missing_thread;
+static uint64_t _syscallcondition_perf_notify_status_changed;
+static uint64_t _syscallcondition_perf_notify_timeout_expired;
+static uint64_t _syscallcondition_perf_signal_wakeups_scheduled;
+static uint64_t _syscallcondition_perf_signal_wakeups_blocked;
+static int _syscallcondition_perf_enabled = -1;
+
+static bool _syscallcondition_perfCountersEnabled() {
+    int enabled = __atomic_load_n(&_syscallcondition_perf_enabled, __ATOMIC_RELAXED);
+    if (enabled >= 0) {
+        return enabled != 0;
+    }
+
+    const char* raw = getenv("SHADOW_TDT_PERF_COUNTERS");
+    int parsed = (raw != NULL && raw[0] != '\0' && strcmp(raw, "0") != 0) ? 1 : 0;
+    __atomic_store_n(&_syscallcondition_perf_enabled, parsed, __ATOMIC_RELAXED);
+    return parsed != 0;
+}
+
+static void _syscallcondition_perfInc(uint64_t* counter) {
+    if (_syscallcondition_perfCountersEnabled()) {
+        __atomic_fetch_add(counter, 1, __ATOMIC_RELAXED);
+    }
+}
+
+static uint64_t _syscallcondition_perfLoad(uint64_t* counter) {
+    return __atomic_load_n(counter, __ATOMIC_RELAXED);
+}
 
 static bool _syscallcondition_trace_enabled(const Host* host) {
     const char* raw = getenv("SHADOW_RESTORE_FUTEX_TRACE");
@@ -408,6 +446,7 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
         utility_panic("cond_wrapper is NULL");
     }
     MAGIC_ASSERT(*cond_wrapper);
+    _syscallcondition_perfInc(&_syscallcondition_perf_trigger_enters);
 
     // The wakeup is executing here and now. Setting to false allows
     // the callback to be scheduled again if the condition isn't canceled
@@ -416,6 +455,7 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 
     const Process* proc = host_getProcess(host, (*cond_wrapper)->proc);
     if (!proc) {
+        _syscallcondition_perfInc(&_syscallcondition_perf_trigger_missing_process);
 #ifdef DEBUG
         _syscallcondition_logListeningState(*cond_wrapper, proc, "ignored (process no longer exists)");
 #endif
@@ -423,6 +463,7 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     }
 
     if (!process_isRunning(proc)) {
+        _syscallcondition_perfInc(&_syscallcondition_perf_trigger_stopped_process);
 #ifdef DEBUG
         _syscallcondition_logListeningState(*cond_wrapper, proc, "ignored (process no longer running)");
 #endif
@@ -431,6 +472,7 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 
     const Thread* thread = process_getThread(proc, (*cond_wrapper)->threadId);
     if (!thread) {
+        _syscallcondition_perfInc(&_syscallcondition_perf_trigger_missing_thread);
 #ifdef DEBUG
         _syscallcondition_logListeningState(*cond_wrapper, proc, "ignored (thread no longer exists)");
 #endif
@@ -446,6 +488,7 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     // Always deliver the wakeup if the timeout expired.
     // Otherwise, only deliver the wakeup if the desc status is still valid.
     if (!_syscallcondition_satisfied(*cond_wrapper, host, thread)) {
+        _syscallcondition_perfInc(&_syscallcondition_perf_trigger_reblocks);
         // Spurious wakeup. Just return without running the process. The
         // condition's listeners should still be installed, and now that we've
         // flipped `wakeupScheduled`, they can schedule this wakeup again.
@@ -463,6 +506,7 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     pid_t tid = (*cond_wrapper)->threadId;
 
     _syscallcondition_trace(host, *cond_wrapper, "trigger_continue");
+    _syscallcondition_perfInc(&_syscallcondition_perf_trigger_continues);
 
     // We need to unref the `SysCallCondition` before we wake up the thread.
     syscallcondition_unref(*cond_wrapper);
@@ -474,8 +518,10 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 
 static void _syscallcondition_scheduleWakeupTask(SysCallCondition* cond, const Host* host) {
     MAGIC_ASSERT(cond);
+    _syscallcondition_perfInc(&_syscallcondition_perf_schedule_attempts);
 
     if (cond->wakeupScheduled) {
+        _syscallcondition_perfInc(&_syscallcondition_perf_skipped_already_scheduled);
         // Deliver one wakeup even if condition is triggered multiple times or
         // ways.
         _syscallcondition_trace(host, cond, "schedule_skip_already_scheduled");
@@ -502,12 +548,14 @@ static void _syscallcondition_scheduleWakeupTask(SysCallCondition* cond, const H
     taskref_drop(wakeupTask);
 
     cond->wakeupScheduled = true;
+    _syscallcondition_perfInc(&_syscallcondition_perf_scheduled_wakeups);
     _syscallcondition_trace(host, cond, "schedule_wakeup");
 }
 
 static void _syscallcondition_notifyStatusChanged(void* obj, void* arg) {
     SysCallCondition* cond = obj;
     MAGIC_ASSERT(cond);
+    _syscallcondition_perfInc(&_syscallcondition_perf_notify_status_changed);
 
     const Host* host = worker_getCurrentHost();
 
@@ -522,6 +570,7 @@ static void _syscallcondition_notifyStatusChanged(void* obj, void* arg) {
 static void _syscallcondition_notifyTimeoutExpired(const Host* host, void* obj, void* arg) {
     SysCallCondition* cond = obj;
     MAGIC_ASSERT(cond);
+    _syscallcondition_perfInc(&_syscallcondition_perf_notify_timeout_expired);
 
 #ifdef DEBUG
     const Process* proc = host_getProcess(host, cond->proc);
@@ -633,6 +682,7 @@ bool syscallcondition_wakeupForSignal(SysCallCondition* cond, const Host* host, 
     linux_sigset_t blockedSignals = shimshmem_getBlockedSignals(hostLock, thread_sharedMem(thread));
     if (linux_sigismember(&blockedSignals, signo)) {
         // Signal is blocked. Don't schedule.
+        _syscallcondition_perfInc(&_syscallcondition_perf_signal_wakeups_blocked);
         return false;
     }
 
@@ -642,6 +692,7 @@ bool syscallcondition_wakeupForSignal(SysCallCondition* cond, const Host* host, 
 #endif
 
     _syscallcondition_scheduleWakeupTask(cond, host);
+    _syscallcondition_perfInc(&_syscallcondition_perf_signal_wakeups_scheduled);
     return true;
 }
 
@@ -681,3 +732,55 @@ void syscallcondition_setTriggerListenerSequenceValue(SysCallCondition* cond, ui
 }
 
 OpenFile* syscallcondition_getActiveFile(SysCallCondition* cond) { return cond->activeFile; }
+
+uint64_t syscallcondition_perfScheduleAttempts(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_schedule_attempts);
+}
+
+uint64_t syscallcondition_perfScheduledWakeups(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_scheduled_wakeups);
+}
+
+uint64_t syscallcondition_perfSkippedAlreadyScheduled(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_skipped_already_scheduled);
+}
+
+uint64_t syscallcondition_perfTriggerEnters(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_enters);
+}
+
+uint64_t syscallcondition_perfTriggerContinues(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_continues);
+}
+
+uint64_t syscallcondition_perfTriggerReblocks(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_reblocks);
+}
+
+uint64_t syscallcondition_perfTriggerMissingProcess(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_missing_process);
+}
+
+uint64_t syscallcondition_perfTriggerStoppedProcess(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_stopped_process);
+}
+
+uint64_t syscallcondition_perfTriggerMissingThread(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_missing_thread);
+}
+
+uint64_t syscallcondition_perfNotifyStatusChanged(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_notify_status_changed);
+}
+
+uint64_t syscallcondition_perfNotifyTimeoutExpired(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_notify_timeout_expired);
+}
+
+uint64_t syscallcondition_perfSignalWakeupsScheduled(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_signal_wakeups_scheduled);
+}
+
+uint64_t syscallcondition_perfSignalWakeupsBlocked(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_signal_wakeups_blocked);
+}

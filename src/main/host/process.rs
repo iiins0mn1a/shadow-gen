@@ -2,15 +2,15 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::Write;
 use std::num::TryFromIntError;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 #[cfg(feature = "perf_timers")]
 use std::time::Duration;
 
@@ -20,19 +20,19 @@ use linux_api::fcntl::OFlag;
 use linux_api::posix_types::Pid;
 use linux_api::sched::{CloneFlags, SuidDump};
 use linux_api::signal::{
-    LinuxDefaultAction, SigActionFlags, Signal, SignalFromI32Error, defaultaction, siginfo_t,
-    sigset_t,
+    defaultaction, siginfo_t, sigset_t, LinuxDefaultAction, SigActionFlags, Signal,
+    SignalFromI32Error,
 };
 use log::{debug, trace, warn};
 use rustix::process::{WaitOptions, WaitStatus};
-use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::explicit_drop::{ExplicitDrop, ExplicitDropper};
-use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
+use shadow_shim_helper_rs::rootedcell::Root;
 use shadow_shim_helper_rs::shim_shmem::ProcessShmem;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::{ForeignPtr, ManagedPhysicalMemoryAddr};
+use shadow_shim_helper_rs::HostId;
 use shadow_shmem::allocator::ShMemBlock;
 
 use crate::core::checkpoint::snapshot_types::DescriptorSocketImplementation;
@@ -53,8 +53,8 @@ use crate::core::checkpoint::snapshot_types::{
 };
 use crate::core::configuration::{ProcessFinalState, RunningVal};
 use crate::core::work::task::TaskRef;
-use crate::core::worker::WORKER_SHARED;
 use crate::core::worker::Worker;
+use crate::core::worker::WORKER_SHARED;
 use crate::cshadow;
 use crate::host::context::ProcessContext;
 use crate::host::descriptor::Descriptor;
@@ -564,6 +564,7 @@ impl RunnableProcess {
             }
             process_shmem_protected.pending_signals.add(signal);
             process_shmem_protected.set_pending_standard_siginfo(signal, siginfo_t);
+            self.shim_shared_mem_block.mark_pending_signals();
         }
 
         if let Some(thread) = current_thread
@@ -928,8 +929,10 @@ struct DescriptorRestoreContext<'a> {
     table: &'a mut DescriptorTable,
     checkpoint: &'a ProcessCheckpoint,
     restored_open_files: HashMap<u64, crate::host::descriptor::OpenFile>,
-    restored_pipe_buffers:
-        HashMap<u64, Arc<atomic_refcell::AtomicRefCell<crate::host::descriptor::shared_buf::SharedBuf>>>,
+    restored_pipe_buffers: HashMap<
+        u64,
+        Arc<atomic_refcell::AtomicRefCell<crate::host::descriptor::shared_buf::SharedBuf>>,
+    >,
     unix_snapshots_by_handle: HashMap<u64, &'a DescriptorEntrySnapshot>,
     restored_unix_socket_files: HashMap<u64, crate::host::descriptor::OpenFile>,
     rebound_epolls: HashSet<u64>,
@@ -1055,7 +1058,9 @@ impl<'a> DescriptorRestoreContext<'a> {
                     &mut self.restored_pipe_buffers,
                 );
             }
-            DescriptorFileKind::Unknown => self.restore_existing_descriptor_or_stdio(descriptor, fd),
+            DescriptorFileKind::Unknown => {
+                self.restore_existing_descriptor_or_stdio(descriptor, fd)
+            }
         }
     }
 
@@ -2299,10 +2304,9 @@ impl Process {
             return false;
         };
 
-        let mut desc =
-            crate::host::descriptor::Descriptor::new(crate::host::descriptor::CompatFile::New(
-                open_file,
-            ));
+        let mut desc = crate::host::descriptor::Descriptor::new(
+            crate::host::descriptor::CompatFile::New(open_file),
+        );
         desc.set_flags(linux_api::fcntl::DescriptorFlags::from_bits_truncate(
             d.descriptor_flags_bits,
         ));
@@ -2463,13 +2467,18 @@ impl Process {
             .and_then(|handle| restored_pipe_buffers.get(&handle).cloned())
             .unwrap_or_else(|| {
                 let buf_snapshot = snapshot.shared_buffer.clone().unwrap_or_default();
-                let max_len = std::cmp::max(buf_snapshot.max_len, cshadow::CONFIG_PIPE_BUFFER_SIZE as usize);
-                let buffer = Arc::new(atomic_refcell::AtomicRefCell::new(SharedBuf::from_snapshot(
-                    &crate::core::checkpoint::snapshot_types::SharedBufSnapshot {
-                        max_len,
-                        ..buf_snapshot
-                    },
-                )));
+                let max_len = std::cmp::max(
+                    buf_snapshot.max_len,
+                    cshadow::CONFIG_PIPE_BUFFER_SIZE as usize,
+                );
+                let buffer = Arc::new(atomic_refcell::AtomicRefCell::new(
+                    SharedBuf::from_snapshot(
+                        &crate::core::checkpoint::snapshot_types::SharedBufSnapshot {
+                            max_len,
+                            ..buf_snapshot
+                        },
+                    ),
+                ));
                 if let Some(handle) = snapshot.shared_buffer_handle {
                     restored_pipe_buffers.insert(handle, Arc::clone(&buffer));
                 }
@@ -2509,8 +2518,14 @@ impl Process {
         use crate::host::descriptor::socket::Socket;
         use crate::host::descriptor::{File, OpenFile};
 
-        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "unix-socket")
-        {
+        if Self::restore_reused_open_file(
+            table,
+            checkpoint,
+            d,
+            fd,
+            restored_open_files,
+            "unix-socket",
+        ) {
             return;
         }
 
@@ -2540,7 +2555,10 @@ impl Process {
             return;
         };
 
-        if let Some(existing) = restored_unix_socket_files.get(&snapshot.socket_handle).cloned() {
+        if let Some(existing) = restored_unix_socket_files
+            .get(&snapshot.socket_handle)
+            .cloned()
+        {
             Self::register_restored_open_file(table, d, fd, existing, restored_open_files);
             return;
         }
@@ -2629,18 +2647,11 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::socket::Socket;
         use crate::host::descriptor::socket::inet::{
-            InetSocket, legacy_tcp::LegacyTcpSocket, tcp::TcpSocket, udp::UdpSocket,
+            legacy_tcp::LegacyTcpSocket, tcp::TcpSocket, udp::UdpSocket, InetSocket,
         };
-        if Self::restore_reused_open_file(
-            table,
-            checkpoint,
-            d,
-            fd,
-            restored_open_files,
-            "socket",
-        ) {
+        use crate::host::descriptor::socket::Socket;
+        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "socket") {
             return;
         }
         let status = crate::host::descriptor::FileStatus::from_bits_truncate(d.file_status_bits);
@@ -2836,16 +2847,10 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::{File, OpenFile, eventfd::EventFd};
+        use crate::host::descriptor::{eventfd::EventFd, File, OpenFile};
 
-        if Self::restore_reused_open_file(
-            table,
-            checkpoint,
-            d,
-            fd,
-            restored_open_files,
-            "eventfd",
-        ) {
+        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "eventfd")
+        {
             return;
         }
 
@@ -2878,16 +2883,10 @@ impl Process {
         fd: DescriptorHandle,
         restored_open_files: &mut HashMap<u64, crate::host::descriptor::OpenFile>,
     ) {
-        use crate::host::descriptor::{File, OpenFile, timerfd::TimerFd};
+        use crate::host::descriptor::{timerfd::TimerFd, File, OpenFile};
 
-        if Self::restore_reused_open_file(
-            table,
-            checkpoint,
-            d,
-            fd,
-            restored_open_files,
-            "timerfd",
-        ) {
+        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "timerfd")
+        {
             return;
         }
 
@@ -2895,7 +2894,8 @@ impl Process {
         let snapshot = d.timerfd.as_ref().cloned().unwrap_or_default();
         let file = TimerFd::new(status);
         CallbackQueue::queue_and_run_with_legacy(|cb_queue| {
-            file.borrow_mut().restore_from_snapshot(host, &snapshot, cb_queue);
+            file.borrow_mut()
+                .restore_from_snapshot(host, &snapshot, cb_queue);
         });
         let open_file = OpenFile::new(File::TimerFd(file));
         Self::register_restored_open_file(table, d, fd, open_file, restored_open_files);
@@ -2918,14 +2918,7 @@ impl Process {
     ) {
         use crate::host::descriptor::{File, OpenFile};
 
-        if Self::restore_reused_open_file(
-            table,
-            checkpoint,
-            d,
-            fd,
-            restored_open_files,
-            "epoll",
-        ) {
+        if Self::restore_reused_open_file(table, checkpoint, d, fd, restored_open_files, "epoll") {
             return;
         }
 

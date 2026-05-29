@@ -6,8 +6,10 @@ use std::borrow::Borrow;
 use std::ffi::{CStr, OsStr};
 use std::fmt::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
@@ -19,13 +21,13 @@ use crate::core::checkpoint::store::{CheckpointStore, FilesystemStore};
 use crate::core::configuration::{CliOptions, ConfigFileOptions, ConfigOptions};
 use crate::core::controller::Controller;
 use crate::core::logger::shadow_logger;
+use crate::core::run_control::commands::SimulationRunResult;
 #[cfg(feature = "enable_run_control")]
 use crate::core::run_control::InteractiveController;
 #[cfg(not(feature = "enable_run_control"))]
 use crate::core::run_control::NoopController;
 use crate::core::run_control::SocketController;
 use crate::core::run_control::TimeController;
-use crate::core::run_control::commands::SimulationRunResult;
 use crate::core::sim_config::SimConfig;
 use crate::core::worker;
 use crate::cshadow as c;
@@ -336,8 +338,11 @@ fn perform_restore(
     data_path: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<crate::core::checkpoint::snapshot_types::SimulationCheckpoint> {
+    let restore_started = Instant::now();
     let store = FilesystemStore::new(data_path.join("checkpoints"))?;
+    let phase_started = Instant::now();
     let mut checkpoint = store.load(label)?;
+    let load_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
     log::info!(
         "Loaded checkpoint '{}': sim_time_ns={}, shmem_backup={}, restore_protocol_mode={:?}, restore_epoch={}, protocol_connections={}, protocol_blocked_syscalls={}",
@@ -351,6 +356,7 @@ fn perform_restore(
     );
 
     // Restore shared memory files
+    let phase_started = Instant::now();
     if checkpoint.shmem_backup_dir.exists() {
         let restored = shmem_backup::restore_shmem_files(&checkpoint.shmem_backup_dir)?;
         log::info!("Restored {} shmem files", restored.len());
@@ -360,7 +366,9 @@ fn perform_restore(
             checkpoint.shmem_backup_dir.display()
         );
     }
+    let shmem_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
+    let phase_started = Instant::now();
     for host_cp in &checkpoint.hosts {
         if host_cp.host_shmem_handle.is_empty() {
             continue;
@@ -378,89 +386,166 @@ fn perform_restore(
             );
         }
     }
+    let host_shmem_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
-    // CRIU restore processes (if images exist)
-    for proc_cp in checkpoint
-        .hosts
-        .iter_mut()
-        .flat_map(|h| h.processes.iter_mut())
-        .collect::<Vec<_>>()
-    {
-        if let Some(ref criu_dir) = proc_cp.criu_image_dir {
-            if criu_dir.exists() {
-                // Ensure the target native processes aren't running before
-                // CRIU restore. If the original process tree is still alive,
-                // CRIU may fail with pid/fork conflicts.
-                let native_pid = proc_cp.native_pid;
-                if native_pid > 1 {
-                    unsafe {
-                        let _ = libc::kill(native_pid, libc::SIGKILL);
-                    }
-                    // Wait briefly for the process to disappear and be reaped.
-                    // A zombie process can still hold its PID and make CRIU
-                    // restore fail with EEXIST ("Can't fork ... File exists").
-                    for _ in 0..50 {
-                        let mut status: libc::c_int = 0;
-                        let waited =
-                            unsafe { libc::waitpid(native_pid, &mut status, libc::WNOHANG) };
-                        if waited == native_pid {
-                            break;
-                        }
-                        if waited == -1 {
-                            // Not a child or already reaped; fall back to probe.
-                            let rc = unsafe { libc::kill(native_pid, 0) };
-                            if rc == -1 {
-                                break;
-                            }
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
-                }
+    let phase_started = Instant::now();
+    restore_process_images(&mut checkpoint)?;
+    let criu_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
-                match crate::core::checkpoint::criu::restore_process(criu_dir, None) {
-                    Ok(new_pid) => {
-                        let checkpoint_tids: Vec<i32> =
-                            proc_cp.threads.iter().map(|t| t.native_tid).collect();
-                        log::info!(
-                            "CRIU restored process {} -> new pid {} (checkpoint tids={:?})",
-                            proc_cp.native_pid,
-                            new_pid,
-                            checkpoint_tids
-                        );
-                        log_restored_process_tree(new_pid);
-                        proc_cp.native_pid = new_pid;
-                    }
-                    Err(e) => {
-                        // Restore must be all-or-nothing: continuing after
-                        // CRIU failure tends to leave the simulation
-                        // inconsistent and can trigger follow-up panics.
-                        return Err(e).context(format!(
-                            "CRIU restore failed for process native_pid={}",
-                            proc_cp.native_pid
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    log::info!(
+        "Restore '{}' phase timings: load_ms={:.3} shmem_ms={:.3} host_shmem_ms={:.3} criu_ms={:.3} total_ms={:.3}",
+        label,
+        load_ms,
+        shmem_ms,
+        host_shmem_ms,
+        criu_ms,
+        restore_started.elapsed().as_secs_f64() * 1000.0,
+    );
 
     Ok(checkpoint)
 }
 
-fn log_restored_process_tree(pid: i32) {
+fn restore_process_images(
+    checkpoint: &mut crate::core::checkpoint::snapshot_types::SimulationCheckpoint,
+) -> anyhow::Result<()> {
+    let mut jobs = Vec::new();
+    for (host_index, host_cp) in checkpoint.hosts.iter().enumerate() {
+        for (process_index, proc_cp) in host_cp.processes.iter().enumerate() {
+            let Some(criu_dir) = proc_cp.criu_image_dir.as_ref() else {
+                continue;
+            };
+            if !criu_dir.exists() {
+                continue;
+            }
+            jobs.push(CriuRestoreJob {
+                host_index,
+                process_index,
+                host_id: host_cp.host_id,
+                process_id: proc_cp.process_id,
+                old_native_pid: proc_cp.native_pid,
+                images_dir: criu_dir.clone(),
+                checkpoint_tids: proc_cp.threads.iter().map(|t| t.native_tid).collect(),
+            });
+        }
+    }
+
+    log::info!("Restoring {} process image(s)", jobs.len());
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    for job in jobs {
+        let kill_result = kill_and_wait_old_process(job.clone());
+        log::info!(
+            "CRIU restore old process cleanup: host_id={} process_id={} old_pid={} elapsed_ms={:.3} gone={}",
+            kill_result.job.host_id,
+            kill_result.job.process_id,
+            kill_result.job.old_native_pid,
+            kill_result.elapsed_ms,
+            kill_result.gone,
+        );
+        if !kill_result.gone {
+            log::warn!(
+                "Old process pid={} may still exist before CRIU restore",
+                kill_result.job.old_native_pid
+            );
+        }
+
+        match crate::core::checkpoint::criu::restore_process(&job.images_dir, None) {
+            Ok(new_pid) => {
+                log::info!(
+                    "CRIU restored process {} -> new pid {} (checkpoint tids={:?})",
+                    job.old_native_pid,
+                    new_pid,
+                    job.checkpoint_tids,
+                );
+                log_restored_process_tree(new_pid);
+                checkpoint.hosts[job.host_index].processes[job.process_index].native_pid = new_pid;
+            }
+            Err(e) => {
+                return Err(e).context(format!(
+                    "CRIU restore failed for process native_pid={}",
+                    job.old_native_pid
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CriuRestoreJob {
+    host_index: usize,
+    process_index: usize,
+    host_id: u32,
+    process_id: u32,
+    old_native_pid: i32,
+    images_dir: PathBuf,
+    checkpoint_tids: Vec<i32>,
+}
+
+#[derive(Debug)]
+struct CriuRestoreKillResult {
+    job: CriuRestoreJob,
+    elapsed_ms: f64,
+    gone: bool,
+}
+
+fn kill_and_wait_old_process(job: CriuRestoreJob) -> CriuRestoreKillResult {
+    let started = Instant::now();
+    let mut gone = job.old_native_pid <= 1;
+
+    if job.old_native_pid > 1 {
+        unsafe {
+            let _ = libc::kill(job.old_native_pid, libc::SIGKILL);
+        }
+
+        // Wait briefly for the process to disappear and be reaped. A zombie
+        // process can still hold its PID and make CRIU restore fail with
+        // EEXIST ("Can't fork ... File exists").
+        for _ in 0..50 {
+            let mut status: libc::c_int = 0;
+            let waited = unsafe { libc::waitpid(job.old_native_pid, &mut status, libc::WNOHANG) };
+            if waited == job.old_native_pid {
+                gone = true;
+                break;
+            }
+            if waited == -1 {
+                // Not a child or already reaped; fall back to probe.
+                let rc = unsafe { libc::kill(job.old_native_pid, 0) };
+                if rc == -1 {
+                    gone = true;
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    CriuRestoreKillResult {
+        job,
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        gone,
+    }
+}
+
+fn process_thread_tids(pid: i32) -> Vec<i32> {
     let task_dir = format!("/proc/{pid}/task");
-    let tids = std::fs::read_dir(&task_dir)
+    let mut tids: Vec<i32> = std::fs::read_dir(&task_dir)
         .ok()
-        .map(|iter| {
-            let mut tids: Vec<i32> = iter
-                .filter_map(Result::ok)
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .filter_map(|s| s.parse::<i32>().ok())
-                .collect();
-            tids.sort_unstable();
-            tids
-        })
-        .unwrap_or_default();
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|s| s.parse::<i32>().ok())
+        .collect();
+    tids.sort_unstable();
+    tids
+}
+
+fn log_restored_process_tree(pid: i32) {
+    let tids = process_thread_tids(pid);
     log::info!("Restored process tree pid={} task_tids={:?}", pid, tids);
 }
 

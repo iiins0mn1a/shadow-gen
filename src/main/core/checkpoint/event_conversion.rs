@@ -107,11 +107,8 @@ pub fn packet_to_snapshot(packet: &PacketRc) -> PacketSnapshot {
     let dst = packet.dst_ipv4_address();
     let priority = packet.priority();
 
-    let payload_bytes: Vec<u8> = packet
-        .payload()
-        .into_iter()
-        .flat_map(|b| b.to_vec())
-        .collect();
+    let mut payload_bytes = Vec::with_capacity(packet.payload_len());
+    packet.for_each_payload_chunk(|chunk| payload_bytes.extend_from_slice(chunk));
 
     let protocol = match packet.iana_protocol() {
         crate::network::packet::IanaProtocol::Tcp => {

@@ -63,8 +63,8 @@ impl EventQueue {
 
         self.queue.push(Reverse(event.into()));
 
-        let count = PUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
         if LOG_EVERY > 0 {
+            let count = PUSH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             self.log_stats("push", count);
         }
     }
@@ -79,8 +79,8 @@ impl EventQueue {
             self.last_popped_event_time = event.time();
         }
 
-        let count = POP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
         if LOG_EVERY > 0 {
+            let count = POP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             self.log_stats("pop", count);
         }
 
@@ -94,6 +94,10 @@ impl EventQueue {
 
     pub fn last_popped_event_time(&self) -> EmulatedTime {
         self.last_popped_event_time
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
     }
 
     pub fn set_last_popped_event_time(&mut self, time: EmulatedTime) {

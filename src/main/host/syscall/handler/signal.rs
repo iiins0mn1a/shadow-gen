@@ -216,6 +216,7 @@ impl SyscallHandler {
             let siginfo = siginfo_t::new_for_tkill(signal, sender_pid.into(), 0);
 
             thread_protected.set_pending_standard_siginfo(signal, &siginfo);
+            thread_shmem.mark_pending_signals();
 
             if sender_tid == target_thread.id() {
                 // Target is the current thread. It'll be handled synchronously when the current

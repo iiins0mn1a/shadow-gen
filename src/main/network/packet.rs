@@ -4,8 +4,8 @@ use std::net::{IpAddr, SocketAddrV4};
 use std::sync::Arc;
 
 use crate::host::network::interface::FifoPacketPriority;
-use crate::utility::ObjectCounter;
 use crate::utility::pcap_writer::PacketDisplay;
+use crate::utility::ObjectCounter;
 
 use atomic_refcell::AtomicRefCell;
 use bytes::Bytes;
@@ -380,6 +380,35 @@ impl Packet {
             Data::LegacyTcp(tcp_rc) => tcp_rc.borrow().payload.clone(),
             Data::Tcp(tcp) => tcp.payload.clone(),
             Data::Udp(udp) => vec![udp.payload.clone()],
+        }
+    }
+
+    pub fn single_payload_chunk(&self) -> Option<Bytes> {
+        match &self.data {
+            Data::LegacyTcp(tcp_rc) => {
+                let tcp = tcp_rc.borrow();
+                (tcp.payload.len() == 1).then(|| tcp.payload[0].clone())
+            }
+            Data::Tcp(tcp) => (tcp.payload.len() == 1).then(|| tcp.payload[0].clone()),
+            Data::Udp(udp) => Some(udp.payload.clone()),
+        }
+    }
+
+    /// Borrow each payload chunk without allocating a new payload vector.
+    pub fn for_each_payload_chunk<F: FnMut(&[u8])>(&self, mut f: F) {
+        match &self.data {
+            Data::LegacyTcp(tcp_rc) => {
+                let tcp = tcp_rc.borrow();
+                for bytes in &tcp.payload {
+                    f(bytes.as_ref());
+                }
+            }
+            Data::Tcp(tcp) => {
+                for bytes in &tcp.payload {
+                    f(bytes.as_ref());
+                }
+            }
+            Data::Udp(udp) => f(udp.payload.as_ref()),
         }
     }
 
@@ -1265,7 +1294,6 @@ mod export {
         // Write the payload data from the packet into the managed process memory.
         let packet = PacketRc::borrow_raw(packet_ptr);
         let mem = unsafe { mem.as_mut() }.unwrap();
-        let payload = packet.payload();
 
         if dst_len == 0 {
             return 0;
@@ -1283,12 +1311,17 @@ mod export {
         let mut dst_writer = mem.writer(dst);
         let mut dst_space = dst_len;
         let mut src_offset = usize::try_from(payload_offset).unwrap_or(usize::MAX);
+        let mut write_failed = false;
 
-        for bytes in &payload {
+        packet.for_each_payload_chunk(|bytes| {
+            if write_failed || dst_space == 0 {
+                return;
+            }
+
             // This also skips over empty Bytes objects.
             if src_offset >= bytes.len() {
                 src_offset = src_offset.saturating_sub(bytes.len());
-                continue;
+                return;
             }
 
             let start = src_offset;
@@ -1297,7 +1330,7 @@ mod export {
             assert!(start <= end);
 
             if len == 0 {
-                break;
+                return;
             }
 
             log::trace!("Writing {len} bytes into managed process");
@@ -1307,11 +1340,16 @@ mod export {
                     "Couldn't write managed process memory at {dst:?} from packet payload: {e:?}"
                 );
                 // TODO: can we get memmgr errno here like we can with `copy_from_ptr()`?
-                return linux_api::errno::Errno::EFAULT.to_negated_i64();
+                write_failed = true;
+                return;
             }
 
             dst_space = dst_space.saturating_sub(len);
             src_offset = 0;
+        });
+
+        if write_failed {
+            return linux_api::errno::Errno::EFAULT.to_negated_i64();
         }
 
         let tot_written = dst_len.saturating_sub(dst_space);

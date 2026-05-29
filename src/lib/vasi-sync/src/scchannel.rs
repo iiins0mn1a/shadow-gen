@@ -180,17 +180,16 @@ impl<T> SelfContainedChannel<T> {
     ///
     /// Panics if the channel already has an unreceived message.
     pub fn send(&self, message: T) {
-        self.state
-            .fetch_update(
-                sync::atomic::Ordering::Acquire,
-                sync::atomic::Ordering::Relaxed,
-                |mut state| {
-                    assert_eq!(state.contents_state, ChannelContentsState::Empty);
-                    state.contents_state = ChannelContentsState::Writing;
-                    Some(state)
-                },
-            )
-            .unwrap();
+        // This channel's API requires a single writer and no pending message when
+        // `send` is called. Since readers only inspect `message` after observing
+        // `Ready`, we can write first and publish the message with one release
+        // transition instead of using a separate `Writing` state transition.
+        assert_eq!(
+            self.state
+                .load(sync::atomic::Ordering::Relaxed)
+                .contents_state,
+            ChannelContentsState::Empty
+        );
         unsafe { self.message.get_mut().deref().as_mut_ptr().write(message) };
         let prev = self
             .state
@@ -198,7 +197,7 @@ impl<T> SelfContainedChannel<T> {
                 sync::atomic::Ordering::Release,
                 sync::atomic::Ordering::Relaxed,
                 |mut state| {
-                    assert_eq!(state.contents_state, ChannelContentsState::Writing);
+                    assert_eq!(state.contents_state, ChannelContentsState::Empty);
                     state.contents_state = ChannelContentsState::Ready;
                     Some(state)
                 },
@@ -293,6 +292,138 @@ impl<T> SelfContainedChannel<T> {
         Ok(val)
     }
 
+    /// Blocks until either the channel contains a message, or the writer has
+    /// closed the channel.
+    ///
+    /// Unlike [`SelfContainedChannel::receive`], this method does not use the
+    /// intermediate `Reading` state to detect parallel readers. This saves one
+    /// atomic state transition on the SPSC IPC hot path.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that no other thread or process is calling
+    /// `receive` or `receive_assuming_single_consumer` on this channel at the
+    /// same time.
+    pub unsafe fn receive_assuming_single_consumer(
+        &self,
+    ) -> Result<T, SelfContainedChannelError> {
+        let mut state = self.state.load(sync::atomic::Ordering::Relaxed);
+        loop {
+            if state.contents_state == ChannelContentsState::Ready {
+                break;
+            }
+            if state.writer_closed {
+                return Err(SelfContainedChannelError::WriterIsClosed);
+            }
+            assert!(
+                state.contents_state == ChannelContentsState::Empty
+                    || state.contents_state == ChannelContentsState::Writing
+            );
+            assert!(!state.has_sleeper);
+            let mut sleeper_state = state;
+            sleeper_state.has_sleeper = true;
+            match self.state.compare_exchange(
+                state,
+                sleeper_state,
+                sync::atomic::Ordering::Relaxed,
+                sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => (),
+                Err(s) => {
+                    // Something changed; re-evaluate.
+                    state = s;
+                    continue;
+                }
+            };
+            let expected = sleeper_state.into();
+            match sync::futex_wait(&self.state.0, expected) {
+                Ok(_) | Err(rustix::io::Errno::INTR) | Err(rustix::io::Errno::AGAIN) => {
+                    // Something changed; clear the sleeper bit and try again.
+                    let mut updated_state = self
+                        .state
+                        .fetch_update(
+                            sync::atomic::Ordering::Relaxed,
+                            sync::atomic::Ordering::Relaxed,
+                            |mut state| {
+                                state.has_sleeper = false;
+                                Some(state)
+                            },
+                        )
+                        .unwrap();
+                    updated_state.has_sleeper = false;
+                    state = updated_state;
+                    continue;
+                }
+                Err(e) => panic!("Unexpected futex error {e:?}"),
+            };
+        }
+
+        // Synchronize with the writer's Release publish of the message before
+        // reading it while the channel remains in the Ready state.
+        assert_eq!(
+            self.state
+                .load(sync::atomic::Ordering::Acquire)
+                .contents_state,
+            ChannelContentsState::Ready
+        );
+        let val = unsafe { self.message.get_mut().deref().assume_init_read() };
+        self.state
+            .fetch_update(
+                sync::atomic::Ordering::Release,
+                sync::atomic::Ordering::Relaxed,
+                |mut state| {
+                    assert_eq!(state.contents_state, ChannelContentsState::Ready);
+                    state.contents_state = ChannelContentsState::Empty;
+                    Some(state)
+                },
+            )
+            .unwrap();
+        Ok(val)
+    }
+
+    /// Attempts to receive a message without blocking.
+    ///
+    /// Returns `Ok(Some(T))` if a message was available, `Ok(None)` if the
+    /// channel is empty, or `Err(SelfContainedChannelError::WriterIsClosed)` if
+    /// the writer is closed and no message is pending.
+    ///
+    /// Unlike [`SelfContainedChannel::receive`], this method does not use the
+    /// intermediate `Reading` state to detect parallel readers.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that no other thread or process is calling
+    /// `receive`, `receive_assuming_single_consumer`, or
+    /// `try_receive_assuming_single_consumer` on this channel at the same time.
+    pub unsafe fn try_receive_assuming_single_consumer(
+        &self,
+    ) -> Result<Option<T>, SelfContainedChannelError> {
+        let state = self.state.load(sync::atomic::Ordering::Acquire);
+        if state.contents_state == ChannelContentsState::Ready {
+            let val = unsafe { self.message.get_mut().deref().assume_init_read() };
+            self.state
+                .fetch_update(
+                    sync::atomic::Ordering::Release,
+                    sync::atomic::Ordering::Relaxed,
+                    |mut state| {
+                        assert_eq!(state.contents_state, ChannelContentsState::Ready);
+                        state.contents_state = ChannelContentsState::Empty;
+                        Some(state)
+                    },
+                )
+                .unwrap();
+            return Ok(Some(val));
+        }
+        if state.writer_closed {
+            return Err(SelfContainedChannelError::WriterIsClosed);
+        }
+        assert!(
+            state.contents_state == ChannelContentsState::Empty
+                || state.contents_state == ChannelContentsState::Writing
+        );
+        Ok(None)
+    }
+
     /// Closes the "write" end of the channel. This will cause any current
     /// and subsequent `receive` operations to fail once the channel is empty.
     ///
@@ -321,6 +452,25 @@ impl<T> SelfContainedChannel<T> {
         self.state
             .load(sync::atomic::Ordering::Relaxed)
             .writer_closed
+    }
+
+    /// Reopen the write-end after restoring a still-live process.
+    ///
+    /// Checkpoint/restore may intentionally kill the old native process after
+    /// restoring shared memory. That old process' watcher can close the channel
+    /// before the restored process resumes using the same shared memory block.
+    /// This method is only valid before any restored reader/writer has resumed.
+    pub fn reopen_writer_after_restore(&self) {
+        self.state
+            .fetch_update(
+                sync::atomic::Ordering::Relaxed,
+                sync::atomic::Ordering::Relaxed,
+                |mut state| {
+                    state.writer_closed = false;
+                    Some(state)
+                },
+            )
+            .unwrap();
     }
 }
 

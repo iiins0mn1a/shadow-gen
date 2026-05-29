@@ -109,6 +109,15 @@ fn die_with_fatal_signal(sig: Signal) -> ! {
 pub unsafe fn process_signals(mut ucontext: Option<&mut ucontext>) -> bool {
     debug_assert_eq!(ExecutionContext::current(), ExecutionContext::Shadow);
 
+    let has_pending_signal_hint = tls_process_shmem::with(|process| {
+        tls_thread_shmem::with(|thread| {
+            process.has_pending_signals_hint() || thread.has_pending_signals_hint()
+        })
+    });
+    if !has_pending_signal_hint {
+        return true;
+    }
+
     let mut host = crate::global_host_shmem::get();
     let mut host_lock = host.protected().lock();
 
@@ -374,6 +383,7 @@ unsafe fn handle_hardware_error_signal_inner(
             let mut thread_protected = thread.protected.borrow_mut(&host_lock.root);
             thread_protected.pending_signals |= signal.into();
             thread_protected.set_pending_standard_siginfo(signal, info);
+            thread.mark_pending_signals();
         }
     });
 

@@ -1,17 +1,18 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use linux_api::posix_types::Pid;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
+use shadow_shim_helper_rs::HostId;
 
 use super::work::event_queue::EventQueue;
 use crate::core::controller::ShadowStatusBarState;
@@ -23,7 +24,7 @@ use crate::host::host::Host;
 use crate::host::process::{Process, ProcessId};
 use crate::host::thread::{Thread, ThreadId};
 use crate::network::dns::Dns;
-use crate::network::graph::{IpAssignment, RoutingInfo};
+use crate::network::graph::{IpAssignment, PathProperties, RoutingInfo};
 use crate::network::packet::{PacketRc, PacketStatus};
 use crate::utility::childpid_watcher::ChildPidWatcher;
 use crate::utility::counter::Counter;
@@ -339,9 +340,10 @@ impl Worker {
         let current_time = Worker::current_time().unwrap();
         let round_end_time = Worker::round_end_time().unwrap();
 
-        let is_completed = current_time >= Worker::with(|w| w.shared.sim_end_time).unwrap();
-        let is_bootstrapping =
-            current_time < Worker::with(|w| w.shared.bootstrap_end_time).unwrap();
+        let (sim_end_time, bootstrap_end_time) =
+            Worker::with(|w| (w.shared.sim_end_time, w.shared.bootstrap_end_time)).unwrap();
+        let is_completed = current_time >= sim_end_time;
+        let is_bootstrapping = current_time < bootstrap_end_time;
 
         if is_completed {
             // the simulation is over, don't bother
@@ -352,7 +354,7 @@ impl Worker {
         let dst_ip = *packetrc.dst_ipv4_address().ip();
         let payload_size = packetrc.payload_len();
 
-        let Some(dst_host_id) = Worker::resolve_ip_to_host_id(dst_ip) else {
+        let Some(route) = Worker::with(|w| w.shared.packet_route(src_ip, dst_ip)).unwrap() else {
             log_once_per_value_at_level!(
                 dst_ip,
                 std::net::Ipv4Addr,
@@ -364,13 +366,8 @@ impl Worker {
             return;
         };
 
-        let src_ip = std::net::IpAddr::V4(src_ip);
-        let dst_ip = std::net::IpAddr::V4(dst_ip);
-
         // check if network reliability forces us to 'drop' the packet
-        let reliability: f64 = Worker::with(|w| w.shared.reliability(src_ip, dst_ip).unwrap())
-            .unwrap()
-            .into();
+        let reliability: f64 = (1.0 - route.path.packet_loss).into();
         let chance: f64 = src_host.random_mut().random();
 
         // don't drop control packets with length 0, otherwise congestion control has problems
@@ -381,10 +378,9 @@ impl Worker {
             return;
         }
 
-        let delay = Worker::with(|w| w.shared.latency(src_ip, dst_ip).unwrap()).unwrap();
+        let delay = SimulationTime::from_nanos(route.path.latency_ns);
 
         Worker::update_lowest_used_latency(delay);
-        Worker::with(|w| w.shared.increment_packet_count(src_ip, dst_ip)).unwrap();
 
         // TODO: this should change for sending to remote manager (on a different machine); this is
         // the only place where tasks are sent between separate host
@@ -404,8 +400,13 @@ impl Worker {
         // copy the packet (except the payload) so the dst gets its own header info
         let dst_packet = packetrc.new_copy_inner();
         Worker::with(|w| {
+            if w.shared.packet_counters_enabled {
+                w.shared
+                    .routing_info
+                    .increment_packet_count(route.src_node, route.dst_node);
+            }
             w.shared
-                .push_packet_to_host(dst_packet, dst_host_id, deliver_time, src_host)
+                .push_packet_to_host(dst_packet, route.dst_host_id, deliver_time, src_host)
         })
         .unwrap();
     }
@@ -498,10 +499,36 @@ impl Worker {
             None
         }
     }
+}
 
-    fn resolve_ip_to_host_id(ip: std::net::Ipv4Addr) -> Option<HostId> {
-        Worker::with_dns(|dns| dns.addr_to_host_id(ip))
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct PacketRoute {
+    dst_host_id: HostId,
+    pub src_node: u32,
+    pub dst_node: u32,
+    pub path: PathProperties,
+}
+
+impl PacketRoute {
+    pub(crate) fn new(
+        dst_host_id: HostId,
+        src_node: u32,
+        dst_node: u32,
+        path: PathProperties,
+    ) -> Self {
+        Self {
+            dst_host_id,
+            src_node,
+            dst_node,
+            path,
+        }
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct RouteEndpoint {
+    pub host_id: HostId,
+    pub node_id: u32,
 }
 
 #[derive(Debug)]
@@ -510,6 +537,9 @@ pub struct WorkerShared {
     pub routing_info: RoutingInfo<u32>,
     pub host_bandwidths: HashMap<std::net::IpAddr, Bandwidth>,
     pub dns: Dns,
+    pub route_endpoints: HashMap<std::net::Ipv4Addr, RouteEndpoint>,
+    pub(crate) packet_route_cache:
+        Option<HashMap<(std::net::Ipv4Addr, std::net::Ipv4Addr), PacketRoute>>,
     // allows for easy updating of the status bar's state
     pub status_logger_state: Option<Arc<status_bar::Status<ShadowStatusBarState>>>,
     // number of plugins that failed with a non-zero exit code
@@ -519,13 +549,57 @@ pub struct WorkerShared {
     pub child_pid_watcher: ChildPidWatcher,
     /// Event queues for each host. This should only be used to push packet events.
     pub event_queues: HashMap<HostId, Arc<Mutex<EventQueue>>>,
+    pub network_perf_stats: Option<Arc<NetworkPerfStats>>,
+    pub packet_counters_enabled: bool,
     pub bootstrap_end_time: EmulatedTime,
     pub sim_end_time: EmulatedTime,
+}
+
+#[derive(Default, Debug)]
+pub struct NetworkPerfStats {
+    pub packet_pushes: AtomicU64,
+    pub cross_host_packet_pushes: AtomicU64,
+    pub event_queue_lock_wait_ns: AtomicU64,
+    pub max_event_queue_lock_wait_ns: AtomicU64,
+    pub event_queue_len_after_sum: AtomicU64,
+    pub max_event_queue_len_after: AtomicU64,
 }
 
 impl WorkerShared {
     pub fn dns(&self) -> &Dns {
         &self.dns
+    }
+
+    fn packet_route(
+        &self,
+        src: std::net::Ipv4Addr,
+        dst: std::net::Ipv4Addr,
+    ) -> Option<PacketRoute> {
+        if let Some(cache) = self.packet_route_cache.as_ref()
+            && let Some(route) = cache.get(&(src, dst))
+        {
+            return Some(*route);
+        }
+
+        let dst_endpoint = self.route_endpoints.get(&dst)?;
+        let src_node = self
+            .route_endpoints
+            .get(&src)
+            .map(|endpoint| endpoint.node_id)
+            .unwrap_or_else(|| {
+                self.ip_assignment
+                    .get_node(std::net::IpAddr::V4(src))
+                    .unwrap()
+            });
+        let dst_node = dst_endpoint.node_id;
+        let path = self.routing_info.path(src_node, dst_node).unwrap();
+
+        Some(PacketRoute::new(
+            dst_endpoint.host_id,
+            src_node,
+            dst_node,
+            path,
+        ))
     }
 
     pub fn latency(&self, src: std::net::IpAddr, dst: std::net::IpAddr) -> Option<SimulationTime> {
@@ -617,7 +691,35 @@ impl WorkerShared {
     ) {
         let event = Event::new_packet(packet, time, src_host);
         let event_queue = self.event_queues.get(&dst_host_id).unwrap();
-        event_queue.lock().unwrap().push(event);
+        let lock_started = self.network_perf_stats.as_ref().map(|_| Instant::now());
+        let mut event_queue = event_queue.lock().unwrap();
+        let lock_wait_ns = lock_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
+        event_queue.push(event);
+        let len_after = event_queue.len() as u64;
+        drop(event_queue);
+
+        if let Some(stats) = self.network_perf_stats.as_ref() {
+            stats.packet_pushes.fetch_add(1, Ordering::Relaxed);
+            if src_host.id() != dst_host_id {
+                stats
+                    .cross_host_packet_pushes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            stats
+                .event_queue_lock_wait_ns
+                .fetch_add(lock_wait_ns, Ordering::Relaxed);
+            stats
+                .max_event_queue_lock_wait_ns
+                .fetch_max(lock_wait_ns, Ordering::Relaxed);
+            stats
+                .event_queue_len_after_sum
+                .fetch_add(len_after, Ordering::Relaxed);
+            stats
+                .max_event_queue_len_after
+                .fetch_max(len_after, Ordering::Relaxed);
+        }
     }
 }
 

@@ -4,6 +4,7 @@
 //! memory for fast restore during state-space exploration.
 
 use std::collections::HashMap;
+use std::io::BufWriter;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -48,7 +49,8 @@ impl CheckpointStore for FilesystemStore {
         let path = self.path_for(label);
         let file = std::fs::File::create(&path)
             .with_context(|| format!("Failed to create checkpoint file: {}", path.display()))?;
-        serde_json::to_writer_pretty(file, checkpoint)
+        let writer = BufWriter::new(file);
+        serde_json::to_writer(writer, checkpoint)
             .with_context(|| format!("Failed to serialize checkpoint to: {}", path.display()))?;
         log::info!("Checkpoint '{}' saved to {}", label, path.display());
         Ok(())

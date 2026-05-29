@@ -149,9 +149,11 @@ impl UdpSocket {
         // we use concat in case the payload has mutiple chunks, but that should not happen in
         // the normal case since we only send UDP messages with a single `Bytes` object.
 
-        let payload = tcp::Payload(packet.payload());
-        assert_eq!(payload.len() as usize, packet.payload_len());
-        let message = payload.concat();
+        let message = packet.single_payload_chunk().unwrap_or_else(|| {
+            let payload = tcp::Payload(packet.payload());
+            assert_eq!(payload.len() as usize, packet.payload_len());
+            payload.concat()
+        });
 
         let header = MessageRecvHeader {
             src: packet.src_ipv4_address(),

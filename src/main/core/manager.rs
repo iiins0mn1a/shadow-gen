@@ -4,13 +4,15 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::net::Ipv4Addr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use atomic_refcell::AtomicRefCell;
@@ -21,12 +23,12 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use scheduler::thread_per_core::ThreadPerCoreSched;
 use scheduler::thread_per_host::ThreadPerHostSched;
 use scheduler::{HostIter, Scheduler};
-use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::option::FfiOption;
 use shadow_shim_helper_rs::shim_shmem::{ManagerShmem, NativePreemptionConfig};
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::{SyscallArgs, UntypedForeignPtr};
+use shadow_shim_helper_rs::HostId;
 use shadow_shmem::allocator::ShMemBlock;
 
 use crate::core::checkpoint::criu;
@@ -39,9 +41,9 @@ use crate::core::configuration::{self, ConfigOptions, Flatten};
 use crate::core::controller::{Controller, ShadowStatusBarState, SimController};
 use crate::core::cpu;
 use crate::core::resource_usage;
-use crate::core::run_control::TimeController;
 use crate::core::run_control::commands::{ControlDecision, SimulationRunResult};
 use crate::core::run_control::controller::WindowBoundaryContext;
+use crate::core::run_control::TimeController;
 use crate::core::runahead::Runahead;
 use crate::core::sim_config::{Bandwidth, HostInfo};
 use crate::core::sim_stats;
@@ -355,6 +357,25 @@ impl<'a> Manager<'a> {
         // Convert to a global read-only DNS struct.
         let dns = dns_builder.into_dns()?;
 
+        let route_endpoints: HashMap<Ipv4Addr, worker::RouteEndpoint> = host_init
+            .iter()
+            .map(|(info, id)| {
+                let std::net::IpAddr::V4(addr) = info.ip_addr.unwrap() else {
+                    unreachable!("IPv6 not supported");
+                };
+                let node_id = manager_config.ip_assignment.get_node(addr.into()).unwrap();
+                (
+                    addr,
+                    worker::RouteEndpoint {
+                        host_id: *id,
+                        node_id,
+                    },
+                )
+            })
+            .collect();
+        let packet_route_cache = packet_route_cache_enabled()
+            .then(|| build_packet_route_cache(&route_endpoints, &manager_config.routing_info));
+
         // Now build the hosts using the assigned host ids.
         let mut hosts: Vec<_> = host_init
             .iter()
@@ -368,6 +389,8 @@ impl<'a> Manager<'a> {
         hosts.shuffle(&mut manager_config.random);
 
         let use_cpu_pinning = self.config.experimental.use_cpu_pinning.unwrap();
+        let network_perf_stats = scheduler_perf_counters_enabled()
+            .then(|| Arc::new(worker::NetworkPerfStats::default()));
 
         let cpu_iter =
             std::iter::from_fn(|| {
@@ -390,26 +413,32 @@ impl<'a> Manager<'a> {
         assert_eq!(cpus.len(), parallelism);
 
         // set the simulation's global state
-        let old_worker_shared = worker::WORKER_SHARED.borrow_mut().replace(worker::WorkerShared {
-            ip_assignment: manager_config.ip_assignment,
-            routing_info: manager_config.routing_info,
-            host_bandwidths: manager_config.host_bandwidths,
-            dns,
-            num_plugin_errors: AtomicU32::new(0),
-            status_logger_state: status_logger_state.map(Arc::clone),
-            runahead: Runahead::new(
-                self.config.experimental.use_dynamic_runahead.unwrap(),
-                smallest_latency,
-                min_runahead_config,
-            ),
-            child_pid_watcher: ChildPidWatcher::new(),
-            event_queues: hosts
-                .iter()
-                .map(|x| (x.id(), x.event_queue().clone()))
-                .collect(),
-            bootstrap_end_time,
-            sim_end_time: self.end_time,
-        });
+        let old_worker_shared = worker::WORKER_SHARED
+            .borrow_mut()
+            .replace(worker::WorkerShared {
+                ip_assignment: manager_config.ip_assignment,
+                routing_info: manager_config.routing_info,
+                host_bandwidths: manager_config.host_bandwidths,
+                dns,
+                route_endpoints,
+                packet_route_cache,
+                num_plugin_errors: AtomicU32::new(0),
+                status_logger_state: status_logger_state.map(Arc::clone),
+                runahead: Runahead::new(
+                    self.config.experimental.use_dynamic_runahead.unwrap(),
+                    smallest_latency,
+                    min_runahead_config,
+                ),
+                child_pid_watcher: ChildPidWatcher::new(),
+                event_queues: hosts
+                    .iter()
+                    .map(|x| (x.id(), x.event_queue().clone()))
+                    .collect(),
+                network_perf_stats: network_perf_stats.clone(),
+                packet_counters_enabled: packet_counters_enabled(),
+                bootstrap_end_time,
+                sim_end_time: self.end_time,
+            });
         if old_worker_shared.is_some() {
             // In restart/restore flows, the previous simulation's global queues may still hold
             // host-bound tasks whose Drop paths access HostTreePointer-backed state. They are
@@ -543,8 +572,9 @@ impl<'a> Manager<'a> {
                 },
             );
 
-            let thread_next_event_times: Vec<AtomicRefCell<Option<EmulatedTime>>> =
-                vec![AtomicRefCell::new(None); scheduler.parallelism()];
+            let scheduler_thread_data: Vec<SchedulerThreadData> = (0..scheduler.parallelism())
+                .map(|_| SchedulerThreadData::default())
+                .collect();
 
             let heartbeat_interval = self
                 .config
@@ -555,12 +585,39 @@ impl<'a> Manager<'a> {
 
             let mut last_heartbeat = EmulatedTime::SIMULATION_START;
             let mut time_of_last_usage_check = std::time::Instant::now();
+            let scheduler_perf_stats = scheduler_perf_counters_enabled().then(|| {
+                Arc::new(SchedulerPerfStats {
+                    parallelism: scheduler.parallelism(),
+                    ..SchedulerPerfStats::default()
+                })
+            });
 
             // Notify the time controller that the simulation is starting.
             self.time_controller.on_simulation_start();
 
             // the scheduling loop
             while let Some((window_start, window_end)) = window {
+                let run_control_trace = run_control_trace_enabled();
+                if run_control_trace {
+                    log::info!(
+                        "run-control manager window start: window_start_ns={} window_end_ns={}",
+                        (window_start - EmulatedTime::SIMULATION_START).as_nanos(),
+                        (window_end - EmulatedTime::SIMULATION_START).as_nanos(),
+                    );
+                }
+
+                let scheduler_window_index = scheduler_perf_stats
+                    .as_ref()
+                    .map(|stats| stats.windows.fetch_add(1, Ordering::Relaxed) + 1)
+                    .unwrap_or_default();
+                for thread_data in &scheduler_thread_data {
+                    *thread_data.next_event_time.borrow_mut() = None;
+                    thread_data.worker_body_wall_ns.store(0, Ordering::Relaxed);
+                    thread_data
+                        .worker_body_continue_receive_wall_ns
+                        .store(0, Ordering::Relaxed);
+                }
+
                 #[cfg(feature = "enable_perf_logging")]
                 let active_hosts_in_window = {
                     let shared = worker::WORKER_SHARED.borrow();
@@ -585,35 +642,293 @@ impl<'a> Manager<'a> {
                     });
 
                 // run the events
+                let scheduler_scope_started = scheduler_perf_stats
+                    .as_ref()
+                    .map(|_| std::time::Instant::now());
                 scheduler.scope(|s| {
+                    let scheduler_perf_stats = scheduler_perf_stats.clone();
                     s.run_with_data(
-                        &thread_next_event_times,
-                        move |_, hosts, next_event_time| {
-                            let mut next_event_time = next_event_time.borrow_mut();
+                        &scheduler_thread_data,
+                        move |thread_index, hosts, thread_data| {
+                            let worker_body_started = scheduler_perf_stats
+                                .as_ref()
+                                .map(|_| std::time::Instant::now());
+                            if scheduler_perf_stats.is_some() {
+                                crate::host::managed_thread::tdt_perf_reset_worker_body_continue_receive_wall_ns();
+                            }
+                            let mut next_event_time = thread_data.next_event_time.borrow_mut();
+                            let mut host_scans = 0u64;
+                            let mut host_executes = 0u64;
+                            let mut host_execute_wall_ns = 0u64;
+                            let mut host_execute_by_host = scheduler_perf_stats
+                                .as_ref()
+                                .map(|_| HashMap::<HostId, HostExecutePerf>::new());
 
                             worker::Worker::reset_next_event_time();
                             worker::Worker::set_round_end_time(window_end);
 
                             for_each_host(hosts, |host| {
-                                let host_next_event_time = {
-                                    host.lock_shmem();
-                                    host.execute(window_end);
-                                    let host_next_event_time = host.next_event_time();
-                                    host.unlock_shmem();
-                                    host_next_event_time
+                                host_scans += 1;
+                                let host_next_event_time = match host.next_event_time() {
+                                    Some(t) if t < window_end => {
+                                        host_executes += 1;
+                                        host.lock_shmem();
+                                        let host_execute_started = scheduler_perf_stats
+                                            .as_ref()
+                                            .map(|_| std::time::Instant::now());
+                                        let collect_scheduler_stats =
+                                            scheduler_perf_stats.is_some();
+                                        let execution_stats =
+                                            host.execute(window_end, collect_scheduler_stats);
+                                        if let Some(stats) = scheduler_perf_stats.as_ref() {
+                                            stats
+                                                .packet_events
+                                                .fetch_add(
+                                                    execution_stats.packet_events,
+                                                    Ordering::Relaxed,
+                                                );
+                                            stats.local_events.fetch_add(
+                                                execution_stats.local_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.cpu_delayed_events.fetch_add(
+                                                execution_stats.cpu_delayed_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.packet_event_wall_ns.fetch_add(
+                                                execution_stats.packet_event_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.local_event_wall_ns.fetch_add(
+                                                execution_stats.local_event_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.resume_process_events.fetch_add(
+                                                execution_stats.resume_process_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.resume_process_wall_ns.fetch_add(
+                                                execution_stats.resume_process_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.start_application_events.fetch_add(
+                                                execution_stats.start_application_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.start_application_wall_ns.fetch_add(
+                                                execution_stats.start_application_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.shutdown_process_events.fetch_add(
+                                                execution_stats.shutdown_process_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.shutdown_process_wall_ns.fetch_add(
+                                                execution_stats.shutdown_process_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.relay_forward_events.fetch_add(
+                                                execution_stats.relay_forward_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.relay_forward_wall_ns.fetch_add(
+                                                execution_stats.relay_forward_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.syscall_condition_wake_events.fetch_add(
+                                                execution_stats.syscall_condition_wake_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.syscall_condition_wake_wall_ns.fetch_add(
+                                                execution_stats.syscall_condition_wake_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats
+                                                .prepare_poll_timeout_completion_events
+                                                .fetch_add(
+                                                    execution_stats
+                                                        .prepare_poll_timeout_completion_events,
+                                                    Ordering::Relaxed,
+                                                );
+                                            stats
+                                                .prepare_poll_timeout_completion_wall_ns
+                                                .fetch_add(
+                                                    execution_stats
+                                                        .prepare_poll_timeout_completion_wall_ns,
+                                                    Ordering::Relaxed,
+                                                );
+                                            stats
+                                                .restore_blocked_syscall_condition_events
+                                                .fetch_add(
+                                                    execution_stats
+                                                        .restore_blocked_syscall_condition_events,
+                                                    Ordering::Relaxed,
+                                                );
+                                            stats
+                                                .restore_blocked_syscall_condition_wall_ns
+                                                .fetch_add(
+                                                    execution_stats
+                                                        .restore_blocked_syscall_condition_wall_ns,
+                                                    Ordering::Relaxed,
+                                                );
+                                            stats.timer_expire_events.fetch_add(
+                                                execution_stats.timer_expire_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.timer_expire_wall_ns.fetch_add(
+                                                execution_stats.timer_expire_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.legacy_tcp_deferred_events.fetch_add(
+                                                execution_stats.legacy_tcp_deferred_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.legacy_tcp_deferred_wall_ns.fetch_add(
+                                                execution_stats.legacy_tcp_deferred_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.exec_continuation_events.fetch_add(
+                                                execution_stats.exec_continuation_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.exec_continuation_wall_ns.fetch_add(
+                                                execution_stats.exec_continuation_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.opaque_events.fetch_add(
+                                                execution_stats.opaque_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.opaque_wall_ns.fetch_add(
+                                                execution_stats.opaque_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.undescribed_events.fetch_add(
+                                                execution_stats.undescribed_events,
+                                                Ordering::Relaxed,
+                                            );
+                                            stats.undescribed_wall_ns.fetch_add(
+                                                execution_stats.undescribed_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                        }
+                                        if let Some(started) = host_execute_started {
+                                            let elapsed_ns =
+                                                started.elapsed().as_nanos() as u64;
+                                            host_execute_wall_ns += elapsed_ns;
+                                            if let Some(host_stats) = host_execute_by_host.as_mut()
+                                            {
+                                                let entry =
+                                                    host_stats.entry(host.id()).or_default();
+                                                if entry.name.is_empty() {
+                                                    entry.name = host.name().to_string();
+                                                }
+                                                entry.count += 1;
+                                                entry.wall_ns += elapsed_ns;
+                                                entry.syscall_condition_wake_wall_ns +=
+                                                    execution_stats
+                                                        .syscall_condition_wake_wall_ns;
+                                            }
+                                        }
+                                        let host_next_event_time = host.next_event_time();
+                                        host.unlock_shmem();
+                                        host_next_event_time
+                                    }
+                                    host_next_event_time => host_next_event_time,
                                 };
-                                *next_event_time = [*next_event_time, host_next_event_time]
-                                    .into_iter()
-                                    .flatten()
-                                    .reduce(std::cmp::min);
+                                *next_event_time = min_emulated_time_option(
+                                    *next_event_time,
+                                    host_next_event_time,
+                                );
                             });
 
                             let packet_next_event_time = worker::Worker::get_next_event_time();
 
-                            *next_event_time = [*next_event_time, packet_next_event_time]
-                                .into_iter()
-                                .flatten()
-                                .reduce(std::cmp::min);
+                            *next_event_time =
+                                min_emulated_time_option(*next_event_time, packet_next_event_time);
+
+                            if let Some(stats) = scheduler_perf_stats.as_ref() {
+                                stats.host_scans.fetch_add(host_scans, Ordering::Relaxed);
+                                stats
+                                    .host_executes
+                                    .fetch_add(host_executes, Ordering::Relaxed);
+                                stats
+                                    .host_execute_wall_ns
+                                    .fetch_add(host_execute_wall_ns, Ordering::Relaxed);
+                                if let Some(started) = worker_body_started {
+                                    let worker_body_wall_ns =
+                                        started.elapsed().as_nanos() as u64;
+                                    thread_data
+                                        .worker_body_wall_ns
+                                        .store(worker_body_wall_ns, Ordering::Relaxed);
+                                    stats
+                                        .worker_bodies
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    stats
+                                        .worker_body_wall_ns
+                                        .fetch_add(worker_body_wall_ns, Ordering::Relaxed);
+                                    stats
+                                        .max_worker_body_wall_ns
+                                        .fetch_max(worker_body_wall_ns, Ordering::Relaxed);
+                                    if let Some(host_stats) = host_execute_by_host {
+                                        let worker_body_continue_receive_wall_ns =
+                                            crate::host::managed_thread::tdt_perf_take_worker_body_continue_receive_wall_ns();
+                                        thread_data
+                                            .worker_body_continue_receive_wall_ns
+                                            .store(
+                                                worker_body_continue_receive_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                        stats
+                                            .worker_body_continue_receive_wall_ns
+                                            .fetch_add(
+                                                worker_body_continue_receive_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                        stats
+                                            .max_worker_body_continue_receive_wall_ns
+                                            .fetch_max(
+                                                worker_body_continue_receive_wall_ns,
+                                                Ordering::Relaxed,
+                                            );
+                                        let top_host = host_stats
+                                            .iter()
+                                            .max_by_key(|(_, perf)| perf.wall_ns)
+                                            .map(|(host_id, perf)| WorkerBodyTopHost {
+                                                host_id: *host_id,
+                                                name: perf.name.clone(),
+                                                count: perf.count,
+                                                wall_ns: perf.wall_ns,
+                                                syscall_condition_wake_wall_ns: perf
+                                                    .syscall_condition_wake_wall_ns,
+                                            });
+                                        stats.worker_body_details.lock().unwrap().push(
+                                            WorkerBodyPerf {
+                                                window_index: scheduler_window_index,
+                                                thread_index,
+                                                host_scans,
+                                                host_executes,
+                                                body_wall_ns: worker_body_wall_ns,
+                                                continue_receive_wall_ns:
+                                                    worker_body_continue_receive_wall_ns,
+                                                top_host,
+                                            },
+                                        );
+                                        let mut aggregate =
+                                            stats.host_execute_by_host.lock().unwrap();
+                                        for (host_id, local) in host_stats {
+                                            let entry = aggregate.entry(host_id).or_default();
+                                            if entry.name.is_empty() {
+                                                entry.name = local.name;
+                                            }
+                                            entry.count += local.count;
+                                            entry.wall_ns += local.wall_ns;
+                                            entry.syscall_condition_wake_wall_ns +=
+                                                local.syscall_condition_wake_wall_ns;
+                                        }
+                                    }
+                                }
+                            }
                         },
                     );
 
@@ -632,10 +947,57 @@ impl<'a> Manager<'a> {
                         self.check_resource_usage();
                     }
                 });
+                if run_control_trace {
+                    log::info!(
+                        "run-control manager scheduler returned: window_start_ns={} window_end_ns={}",
+                        (window_start - EmulatedTime::SIMULATION_START).as_nanos(),
+                        (window_end - EmulatedTime::SIMULATION_START).as_nanos(),
+                    );
+                }
+                if let Some(started) = scheduler_scope_started
+                    && let Some(stats) = scheduler_perf_stats.as_ref()
+                {
+                    let mut max_worker_body_wall_ns = 0;
+                    let mut max_worker_body_continue_receive_wall_ns = 0;
+                    let mut second_worker_body_wall_ns = 0;
+                    for thread_data in &scheduler_thread_data {
+                        let worker_body_wall_ns =
+                            thread_data.worker_body_wall_ns.load(Ordering::Relaxed);
+                        let continue_receive_wall_ns = thread_data
+                            .worker_body_continue_receive_wall_ns
+                            .load(Ordering::Relaxed);
+                        if worker_body_wall_ns > max_worker_body_wall_ns {
+                            second_worker_body_wall_ns = max_worker_body_wall_ns;
+                            max_worker_body_wall_ns = worker_body_wall_ns;
+                            max_worker_body_continue_receive_wall_ns = continue_receive_wall_ns;
+                        } else if worker_body_wall_ns > second_worker_body_wall_ns {
+                            second_worker_body_wall_ns = worker_body_wall_ns;
+                        }
+                    }
+                    let projected_async_body_wall_ns = max_worker_body_wall_ns
+                        .saturating_sub(max_worker_body_continue_receive_wall_ns);
+                    let projected_async_scope_wall_ns =
+                        std::cmp::max(projected_async_body_wall_ns, second_worker_body_wall_ns);
+                    let estimated_async_continue_overlap_savings_ns =
+                        max_worker_body_wall_ns.saturating_sub(projected_async_scope_wall_ns);
+                    stats
+                        .scheduler_scope_wall_ns
+                        .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    stats
+                        .window_max_worker_body_wall_ns
+                        .fetch_add(max_worker_body_wall_ns, Ordering::Relaxed);
+                    stats
+                        .window_max_worker_body_continue_receive_wall_ns
+                        .fetch_add(max_worker_body_continue_receive_wall_ns, Ordering::Relaxed);
+                    stats.estimated_async_continue_overlap_savings_ns.fetch_add(
+                        estimated_async_continue_overlap_savings_ns,
+                        Ordering::Relaxed,
+                    );
+                }
 
-                let min_next_event_time = thread_next_event_times
+                let min_next_event_time = scheduler_thread_data
                     .iter()
-                    .filter_map(|x| x.borrow_mut().take())
+                    .filter_map(|x| x.next_event_time.borrow_mut().take())
                     .reduce(std::cmp::min)
                     .unwrap_or(EmulatedTime::MAX);
 
@@ -788,6 +1150,10 @@ impl<'a> Manager<'a> {
                     }
                     ControlDecision::RestoreCheckpoint { label } => {
                         log::info!("Restore requested: label={}", label);
+                        log_scheduler_perf_stats(&scheduler_perf_stats);
+                        log_network_perf_stats(&network_perf_stats);
+                        log_syscall_condition_perf_stats();
+                        crate::host::managed_thread::log_tdt_managed_thread_perf_stats();
                         // The existing scheduler and its Hosts are about to be dropped on the
                         // main thread while returning from `run()`. Allow HostTreePointer-backed
                         // objects in the old simulation graph to tear down without an active host.
@@ -796,6 +1162,11 @@ impl<'a> Manager<'a> {
                     }
                 }
             }
+
+            log_scheduler_perf_stats(&scheduler_perf_stats);
+            log_network_perf_stats(&network_perf_stats);
+            log_syscall_condition_perf_stats();
+            crate::host::managed_thread::log_tdt_managed_thread_perf_stats();
 
             if restart_request.is_some() {
                 worker::RESTART_TEARDOWN.store(true, Ordering::Relaxed);
@@ -1161,10 +1532,12 @@ impl<'a> Manager<'a> {
         let checkpoint_time =
             EmulatedTime::SIMULATION_START + SimulationTime::from_nanos(current_sim_time_ns);
         let restore_mode = restore_protocol_mode_from_env();
+        let checkpoint_started = Instant::now();
 
         std::fs::create_dir_all(&checkpoint_base)
             .context("Failed to create checkpoint directory")?;
 
+        let phase_started = Instant::now();
         // Freeze the app-visible shim clock to the checkpoint cut before
         // copying the /dev/shm files. Otherwise restore may resurrect a stale
         // timestamp from an older execution slice.
@@ -1178,12 +1551,16 @@ impl<'a> Manager<'a> {
                 });
             });
         });
+        let freeze_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
+        let phase_started = Instant::now();
         // (1) SHMEM: copy MAP_SHARED backing files Shadow maps from /dev/shm into this checkpoint.
         // CRIU restore expects those files to exist; primary list from /proc/self/maps, else scan /dev/shm.
         let shmem_paths = collect_checkpoint_shmem_paths();
         shmem_backup::backup_shmem_files(&shmem_paths, &shmem_backup_dir)?;
+        let shmem_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
+        let phase_started = Instant::now();
         // (2) SHADOW JSON: walk all hosts under the scheduler and capture in-memory emulator state.
         let host_snapshots = Arc::new(Mutex::new(Vec::<HostCheckpoint>::new()));
         scheduler.scope(|s| {
@@ -1198,13 +1575,20 @@ impl<'a> Manager<'a> {
             });
         });
         let mut host_snapshots = host_snapshots.lock().unwrap().clone();
-        audit_checkpoint_event_queue(&host_snapshots, restore_mode)?;
+        let snapshot_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
+        let phase_started = Instant::now();
+        audit_checkpoint_event_queue(&host_snapshots, restore_mode)?;
+        let audit_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
+
+        let phase_started = Instant::now();
         // (3) CRIU: freeze+dump each native plugin process tree; record image dir in the snapshot
         // so JSON and CRIU dirs stay linked. leave_running=true: dump then resume — simulation
         // keeps going until an explicit restore run.
         checkpoint_running_process_images(&mut host_snapshots, &criu_base_dir)?;
+        let criu_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
 
+        let phase_started = Instant::now();
         // (4) ASSEMBLE + SAVE: one SimulationCheckpoint struct (hosts + paths + window/sim time + runahead).
         let worker_shared = worker::WORKER_SHARED.borrow();
         let worker_shared = worker_shared.as_ref().unwrap();
@@ -1243,11 +1627,24 @@ impl<'a> Manager<'a> {
         // Persist JSON (paths inside point at shmem/ and criu/ under checkpoint_base).
         let store = FilesystemStore::new(self.data_path.join("checkpoints"))?;
         store.save(label, &checkpoint)?;
+        let json_ms = phase_started.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = checkpoint_started.elapsed().as_secs_f64() * 1000.0;
 
         log::info!(
             "Checkpoint '{}' saved to {}",
             label,
             checkpoint_base.display()
+        );
+        log::info!(
+            "Checkpoint '{}' phase timings: freeze_ms={:.3} shmem_ms={:.3} snapshot_ms={:.3} audit_ms={:.3} criu_ms={:.3} json_ms={:.3} total_ms={:.3}",
+            label,
+            freeze_ms,
+            shmem_ms,
+            snapshot_ms,
+            audit_ms,
+            criu_ms,
+            json_ms,
+            total_ms,
         );
 
         Ok(())
@@ -1283,6 +1680,439 @@ fn for_each_host(host_iter: &mut HostIter<Box<Host>>, mut f: impl FnMut(&Host)) 
     });
 }
 
+fn min_emulated_time_option(
+    lhs: Option<EmulatedTime>,
+    rhs: Option<EmulatedTime>,
+) -> Option<EmulatedTime> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(std::cmp::min(lhs, rhs)),
+        (Some(lhs), None) => Some(lhs),
+        (None, Some(rhs)) => Some(rhs),
+        (None, None) => None,
+    }
+}
+
+#[derive(Default)]
+struct SchedulerThreadData {
+    next_event_time: AtomicRefCell<Option<EmulatedTime>>,
+    worker_body_wall_ns: AtomicU64,
+    worker_body_continue_receive_wall_ns: AtomicU64,
+}
+
+#[derive(Default)]
+struct SchedulerPerfStats {
+    parallelism: usize,
+    windows: AtomicU64,
+    host_scans: AtomicU64,
+    host_executes: AtomicU64,
+    scheduler_scope_wall_ns: AtomicU64,
+    host_execute_wall_ns: AtomicU64,
+    window_max_worker_body_wall_ns: AtomicU64,
+    window_max_worker_body_continue_receive_wall_ns: AtomicU64,
+    estimated_async_continue_overlap_savings_ns: AtomicU64,
+    packet_events: AtomicU64,
+    local_events: AtomicU64,
+    cpu_delayed_events: AtomicU64,
+    packet_event_wall_ns: AtomicU64,
+    local_event_wall_ns: AtomicU64,
+    resume_process_events: AtomicU64,
+    resume_process_wall_ns: AtomicU64,
+    start_application_events: AtomicU64,
+    start_application_wall_ns: AtomicU64,
+    shutdown_process_events: AtomicU64,
+    shutdown_process_wall_ns: AtomicU64,
+    relay_forward_events: AtomicU64,
+    relay_forward_wall_ns: AtomicU64,
+    syscall_condition_wake_events: AtomicU64,
+    syscall_condition_wake_wall_ns: AtomicU64,
+    prepare_poll_timeout_completion_events: AtomicU64,
+    prepare_poll_timeout_completion_wall_ns: AtomicU64,
+    restore_blocked_syscall_condition_events: AtomicU64,
+    restore_blocked_syscall_condition_wall_ns: AtomicU64,
+    timer_expire_events: AtomicU64,
+    timer_expire_wall_ns: AtomicU64,
+    legacy_tcp_deferred_events: AtomicU64,
+    legacy_tcp_deferred_wall_ns: AtomicU64,
+    exec_continuation_events: AtomicU64,
+    exec_continuation_wall_ns: AtomicU64,
+    opaque_events: AtomicU64,
+    opaque_wall_ns: AtomicU64,
+    undescribed_events: AtomicU64,
+    undescribed_wall_ns: AtomicU64,
+    worker_bodies: AtomicU64,
+    worker_body_wall_ns: AtomicU64,
+    max_worker_body_wall_ns: AtomicU64,
+    worker_body_continue_receive_wall_ns: AtomicU64,
+    max_worker_body_continue_receive_wall_ns: AtomicU64,
+    host_execute_by_host: Mutex<HashMap<HostId, HostExecutePerf>>,
+    worker_body_details: Mutex<Vec<WorkerBodyPerf>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct HostExecutePerf {
+    name: String,
+    count: u64,
+    wall_ns: u64,
+    syscall_condition_wake_wall_ns: u64,
+}
+
+#[derive(Clone, Debug)]
+struct WorkerBodyTopHost {
+    host_id: HostId,
+    name: String,
+    count: u64,
+    wall_ns: u64,
+    syscall_condition_wake_wall_ns: u64,
+}
+
+#[derive(Clone, Debug)]
+struct WorkerBodyPerf {
+    window_index: u64,
+    thread_index: usize,
+    host_scans: u64,
+    host_executes: u64,
+    body_wall_ns: u64,
+    continue_receive_wall_ns: u64,
+    top_host: Option<WorkerBodyTopHost>,
+}
+
+fn scheduler_perf_counters_enabled() -> bool {
+    tdt_perf_counters_enabled()
+}
+
+fn packet_counters_enabled() -> bool {
+    std::env::var_os("SHADOW_PACKET_COUNTERS").is_some()
+}
+
+fn packet_route_cache_enabled() -> bool {
+    std::env::var_os("SHADOW_PACKET_ROUTE_CACHE").is_some()
+}
+
+fn build_packet_route_cache(
+    route_endpoints: &HashMap<Ipv4Addr, worker::RouteEndpoint>,
+    routing_info: &RoutingInfo<u32>,
+) -> HashMap<(Ipv4Addr, Ipv4Addr), worker::PacketRoute> {
+    let mut cache = HashMap::with_capacity(route_endpoints.len().pow(2));
+    for (src_ip, src_endpoint) in route_endpoints {
+        for (dst_ip, dst_endpoint) in route_endpoints {
+            let path = routing_info
+                .path(src_endpoint.node_id, dst_endpoint.node_id)
+                .unwrap();
+            cache.insert(
+                (*src_ip, *dst_ip),
+                worker::PacketRoute::new(
+                    dst_endpoint.host_id,
+                    src_endpoint.node_id,
+                    dst_endpoint.node_id,
+                    path,
+                ),
+            );
+        }
+    }
+    log::info!("Built packet route cache with {} entries", cache.len());
+    cache
+}
+
+fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
+    let Some(stats) = stats.as_ref() else {
+        return;
+    };
+
+    let windows = stats.windows.load(Ordering::Relaxed);
+    let host_scans = stats.host_scans.load(Ordering::Relaxed);
+    let host_executes = stats.host_executes.load(Ordering::Relaxed);
+    let scheduler_scope_wall_ns = stats.scheduler_scope_wall_ns.load(Ordering::Relaxed);
+    let host_execute_wall_ns = stats.host_execute_wall_ns.load(Ordering::Relaxed);
+    let window_max_worker_body_wall_ns =
+        stats.window_max_worker_body_wall_ns.load(Ordering::Relaxed);
+    let window_max_worker_body_continue_receive_wall_ns = stats
+        .window_max_worker_body_continue_receive_wall_ns
+        .load(Ordering::Relaxed);
+    let estimated_async_continue_overlap_savings_ns = stats
+        .estimated_async_continue_overlap_savings_ns
+        .load(Ordering::Relaxed);
+    let packet_events = stats.packet_events.load(Ordering::Relaxed);
+    let local_events = stats.local_events.load(Ordering::Relaxed);
+    let cpu_delayed_events = stats.cpu_delayed_events.load(Ordering::Relaxed);
+    let packet_event_wall_ns = stats.packet_event_wall_ns.load(Ordering::Relaxed);
+    let local_event_wall_ns = stats.local_event_wall_ns.load(Ordering::Relaxed);
+    let resume_process_events = stats.resume_process_events.load(Ordering::Relaxed);
+    let resume_process_wall_ns = stats.resume_process_wall_ns.load(Ordering::Relaxed);
+    let start_application_events = stats.start_application_events.load(Ordering::Relaxed);
+    let start_application_wall_ns = stats.start_application_wall_ns.load(Ordering::Relaxed);
+    let shutdown_process_events = stats.shutdown_process_events.load(Ordering::Relaxed);
+    let shutdown_process_wall_ns = stats.shutdown_process_wall_ns.load(Ordering::Relaxed);
+    let relay_forward_events = stats.relay_forward_events.load(Ordering::Relaxed);
+    let relay_forward_wall_ns = stats.relay_forward_wall_ns.load(Ordering::Relaxed);
+    let syscall_condition_wake_events = stats.syscall_condition_wake_events.load(Ordering::Relaxed);
+    let syscall_condition_wake_wall_ns =
+        stats.syscall_condition_wake_wall_ns.load(Ordering::Relaxed);
+    let prepare_poll_timeout_completion_events = stats
+        .prepare_poll_timeout_completion_events
+        .load(Ordering::Relaxed);
+    let prepare_poll_timeout_completion_wall_ns = stats
+        .prepare_poll_timeout_completion_wall_ns
+        .load(Ordering::Relaxed);
+    let restore_blocked_syscall_condition_events = stats
+        .restore_blocked_syscall_condition_events
+        .load(Ordering::Relaxed);
+    let restore_blocked_syscall_condition_wall_ns = stats
+        .restore_blocked_syscall_condition_wall_ns
+        .load(Ordering::Relaxed);
+    let timer_expire_events = stats.timer_expire_events.load(Ordering::Relaxed);
+    let timer_expire_wall_ns = stats.timer_expire_wall_ns.load(Ordering::Relaxed);
+    let legacy_tcp_deferred_events = stats.legacy_tcp_deferred_events.load(Ordering::Relaxed);
+    let legacy_tcp_deferred_wall_ns = stats.legacy_tcp_deferred_wall_ns.load(Ordering::Relaxed);
+    let exec_continuation_events = stats.exec_continuation_events.load(Ordering::Relaxed);
+    let exec_continuation_wall_ns = stats.exec_continuation_wall_ns.load(Ordering::Relaxed);
+    let opaque_events = stats.opaque_events.load(Ordering::Relaxed);
+    let opaque_wall_ns = stats.opaque_wall_ns.load(Ordering::Relaxed);
+    let undescribed_events = stats.undescribed_events.load(Ordering::Relaxed);
+    let undescribed_wall_ns = stats.undescribed_wall_ns.load(Ordering::Relaxed);
+    let worker_bodies = stats.worker_bodies.load(Ordering::Relaxed);
+    let worker_body_wall_ns = stats.worker_body_wall_ns.load(Ordering::Relaxed);
+    let max_worker_body_wall_ns = stats.max_worker_body_wall_ns.load(Ordering::Relaxed);
+    let worker_body_continue_receive_wall_ns = stats
+        .worker_body_continue_receive_wall_ns
+        .load(Ordering::Relaxed);
+    let max_worker_body_continue_receive_wall_ns = stats
+        .max_worker_body_continue_receive_wall_ns
+        .load(Ordering::Relaxed);
+    let host_scans_per_execute = if host_executes == 0 {
+        0.0
+    } else {
+        host_scans as f64 / host_executes as f64
+    };
+    let worker_busy_percent = if scheduler_scope_wall_ns == 0 || stats.parallelism == 0 {
+        0.0
+    } else {
+        (host_execute_wall_ns as f64 / (scheduler_scope_wall_ns as f64 * stats.parallelism as f64))
+            * 100.0
+    };
+    let scheduler_scope_over_window_max_percent = if scheduler_scope_wall_ns == 0 {
+        0.0
+    } else {
+        (window_max_worker_body_wall_ns as f64 / scheduler_scope_wall_ns as f64) * 100.0
+    };
+    let estimated_async_continue_overlap_savings_percent = if scheduler_scope_wall_ns == 0 {
+        0.0
+    } else {
+        (estimated_async_continue_overlap_savings_ns as f64 / scheduler_scope_wall_ns as f64)
+            * 100.0
+    };
+    let avg_worker_body_wall_ns = if worker_bodies == 0 {
+        0.0
+    } else {
+        worker_body_wall_ns as f64 / worker_bodies as f64
+    };
+    let worker_body_max_to_avg = if avg_worker_body_wall_ns == 0.0 {
+        0.0
+    } else {
+        max_worker_body_wall_ns as f64 / avg_worker_body_wall_ns
+    };
+    let top_hosts = {
+        let mut host_stats: Vec<_> = stats
+            .host_execute_by_host
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(host_id, perf)| (*host_id, perf.clone()))
+            .collect();
+        host_stats.sort_by_key(|(_, perf)| std::cmp::Reverse(perf.wall_ns));
+        host_stats
+            .into_iter()
+            .take(5)
+            .map(|(host_id, perf)| {
+                format!(
+                    "{:?}:name={}:count={}:wall_ms={:.3}:syscall_wake_ms={:.3}",
+                    host_id,
+                    perf.name,
+                    perf.count,
+                    perf.wall_ns as f64 / 1_000_000.0,
+                    perf.syscall_condition_wake_wall_ns as f64 / 1_000_000.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let top_worker_bodies = {
+        let mut worker_bodies = stats.worker_body_details.lock().unwrap().clone();
+        worker_bodies.sort_by_key(|perf| std::cmp::Reverse(perf.body_wall_ns));
+        worker_bodies
+            .into_iter()
+            .take(8)
+            .map(|perf| {
+                let continue_receive_pct = if perf.body_wall_ns == 0 {
+                    0.0
+                } else {
+                    (perf.continue_receive_wall_ns as f64 / perf.body_wall_ns as f64) * 100.0
+                };
+                let host = perf.top_host.map_or_else(
+                    || "host=none".to_string(),
+                    |host| {
+                        format!(
+                            "host={:?}:name={}:host_count={}:host_wall_ms={:.3}:host_syscall_wake_ms={:.3}",
+                            host.host_id,
+                            host.name,
+                            host.count,
+                            host.wall_ns as f64 / 1_000_000.0,
+                            host.syscall_condition_wake_wall_ns as f64 / 1_000_000.0
+                        )
+                    },
+                );
+                format!(
+                    "window={}:thread={}:body_ms={:.3}:continue_receive_ms={:.3}:continue_receive_pct={:.3}:host_scans={}:host_executes={}:{}",
+                    perf.window_index,
+                    perf.thread_index,
+                    perf.body_wall_ns as f64 / 1_000_000.0,
+                    perf.continue_receive_wall_ns as f64 / 1_000_000.0,
+                    continue_receive_pct,
+                    perf.host_scans,
+                    perf.host_executes,
+                    host
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    log::info!(
+        "TDT scheduler counters: parallelism={} windows={} host_scans={} host_executes={} host_scans_per_execute={:.3} scheduler_scope_wall_ns={} host_execute_wall_ns={} worker_busy_percent={:.3} window_max_worker_body_wall_ns={} scheduler_scope_over_window_max_percent={:.3} window_max_worker_body_continue_receive_wall_ns={} estimated_async_continue_overlap_savings_ns={} estimated_async_continue_overlap_savings_percent={:.3} packet_events={} local_events={} cpu_delayed_events={} packet_event_wall_ns={} local_event_wall_ns={} resume_process_events={} resume_process_wall_ns={} start_application_events={} start_application_wall_ns={} shutdown_process_events={} shutdown_process_wall_ns={} relay_forward_events={} relay_forward_wall_ns={} syscall_condition_wake_events={} syscall_condition_wake_wall_ns={} prepare_poll_timeout_completion_events={} prepare_poll_timeout_completion_wall_ns={} restore_blocked_syscall_condition_events={} restore_blocked_syscall_condition_wall_ns={} timer_expire_events={} timer_expire_wall_ns={} legacy_tcp_deferred_events={} legacy_tcp_deferred_wall_ns={} exec_continuation_events={} exec_continuation_wall_ns={} opaque_events={} opaque_wall_ns={} undescribed_events={} undescribed_wall_ns={} worker_bodies={} worker_body_wall_ns={} avg_worker_body_wall_ns={:.3} max_worker_body_wall_ns={} worker_body_max_to_avg={:.3} worker_body_continue_receive_wall_ns={} max_worker_body_continue_receive_wall_ns={} top_hosts={} top_worker_bodies={}",
+        stats.parallelism,
+        windows,
+        host_scans,
+        host_executes,
+        host_scans_per_execute,
+        scheduler_scope_wall_ns,
+        host_execute_wall_ns,
+        worker_busy_percent,
+        window_max_worker_body_wall_ns,
+        scheduler_scope_over_window_max_percent,
+        window_max_worker_body_continue_receive_wall_ns,
+        estimated_async_continue_overlap_savings_ns,
+        estimated_async_continue_overlap_savings_percent,
+        packet_events,
+        local_events,
+        cpu_delayed_events,
+        packet_event_wall_ns,
+        local_event_wall_ns,
+        resume_process_events,
+        resume_process_wall_ns,
+        start_application_events,
+        start_application_wall_ns,
+        shutdown_process_events,
+        shutdown_process_wall_ns,
+        relay_forward_events,
+        relay_forward_wall_ns,
+        syscall_condition_wake_events,
+        syscall_condition_wake_wall_ns,
+        prepare_poll_timeout_completion_events,
+        prepare_poll_timeout_completion_wall_ns,
+        restore_blocked_syscall_condition_events,
+        restore_blocked_syscall_condition_wall_ns,
+        timer_expire_events,
+        timer_expire_wall_ns,
+        legacy_tcp_deferred_events,
+        legacy_tcp_deferred_wall_ns,
+        exec_continuation_events,
+        exec_continuation_wall_ns,
+        opaque_events,
+        opaque_wall_ns,
+        undescribed_events,
+        undescribed_wall_ns,
+        worker_bodies,
+        worker_body_wall_ns,
+        avg_worker_body_wall_ns,
+        max_worker_body_wall_ns,
+        worker_body_max_to_avg,
+        worker_body_continue_receive_wall_ns,
+        max_worker_body_continue_receive_wall_ns,
+        top_hosts,
+        top_worker_bodies,
+    );
+}
+
+fn log_network_perf_stats(stats: &Option<Arc<worker::NetworkPerfStats>>) {
+    let Some(stats) = stats.as_ref() else {
+        return;
+    };
+
+    let packet_pushes = stats.packet_pushes.load(Ordering::Relaxed);
+    let cross_host_packet_pushes = stats.cross_host_packet_pushes.load(Ordering::Relaxed);
+    let event_queue_lock_wait_ns = stats.event_queue_lock_wait_ns.load(Ordering::Relaxed);
+    let max_event_queue_lock_wait_ns = stats.max_event_queue_lock_wait_ns.load(Ordering::Relaxed);
+    let event_queue_len_after_sum = stats.event_queue_len_after_sum.load(Ordering::Relaxed);
+    let max_event_queue_len_after = stats.max_event_queue_len_after.load(Ordering::Relaxed);
+    let avg_event_queue_lock_wait_ns = if packet_pushes == 0 {
+        0.0
+    } else {
+        event_queue_lock_wait_ns as f64 / packet_pushes as f64
+    };
+    let avg_event_queue_len_after = if packet_pushes == 0 {
+        0.0
+    } else {
+        event_queue_len_after_sum as f64 / packet_pushes as f64
+    };
+    log::info!(
+        "TDT network counters: packet_pushes={} cross_host_packet_pushes={} event_queue_lock_wait_ns={} avg_event_queue_lock_wait_ns={:.3} max_event_queue_lock_wait_ns={} avg_event_queue_len_after={:.3} max_event_queue_len_after={}",
+        packet_pushes,
+        cross_host_packet_pushes,
+        event_queue_lock_wait_ns,
+        avg_event_queue_lock_wait_ns,
+        max_event_queue_lock_wait_ns,
+        avg_event_queue_len_after,
+        max_event_queue_len_after,
+    );
+}
+
+fn log_syscall_condition_perf_stats() {
+    if !tdt_perf_counters_enabled() {
+        return;
+    }
+
+    let schedule_attempts = unsafe { c::syscallcondition_perfScheduleAttempts() };
+    let scheduled_wakeups = unsafe { c::syscallcondition_perfScheduledWakeups() };
+    let skipped_already_scheduled = unsafe { c::syscallcondition_perfSkippedAlreadyScheduled() };
+    let trigger_enters = unsafe { c::syscallcondition_perfTriggerEnters() };
+    let trigger_continues = unsafe { c::syscallcondition_perfTriggerContinues() };
+    let trigger_reblocks = unsafe { c::syscallcondition_perfTriggerReblocks() };
+    let trigger_missing_process = unsafe { c::syscallcondition_perfTriggerMissingProcess() };
+    let trigger_stopped_process = unsafe { c::syscallcondition_perfTriggerStoppedProcess() };
+    let trigger_missing_thread = unsafe { c::syscallcondition_perfTriggerMissingThread() };
+    let notify_status_changed = unsafe { c::syscallcondition_perfNotifyStatusChanged() };
+    let notify_timeout_expired = unsafe { c::syscallcondition_perfNotifyTimeoutExpired() };
+    let signal_wakeups_scheduled = unsafe { c::syscallcondition_perfSignalWakeupsScheduled() };
+    let signal_wakeups_blocked = unsafe { c::syscallcondition_perfSignalWakeupsBlocked() };
+
+    log::info!(
+        "TDT syscall-condition counters: schedule_attempts={} scheduled_wakeups={} skipped_already_scheduled={} trigger_enters={} trigger_continues={} trigger_reblocks={} trigger_missing_process={} trigger_stopped_process={} trigger_missing_thread={} notify_status_changed={} notify_timeout_expired={} signal_wakeups_scheduled={} signal_wakeups_blocked={}",
+        schedule_attempts,
+        scheduled_wakeups,
+        skipped_already_scheduled,
+        trigger_enters,
+        trigger_continues,
+        trigger_reblocks,
+        trigger_missing_process,
+        trigger_stopped_process,
+        trigger_missing_thread,
+        notify_status_changed,
+        notify_timeout_expired,
+        signal_wakeups_scheduled,
+        signal_wakeups_blocked,
+    );
+}
+
+fn tdt_perf_counters_enabled() -> bool {
+    std::env::var("SHADOW_TDT_PERF_COUNTERS")
+        .map(|raw| !(raw.trim().is_empty() || raw.trim() == "0"))
+        .unwrap_or(false)
+}
+
+fn run_control_trace_enabled() -> bool {
+    std::env::var("SHADOW_RUN_CONTROL_TRACE")
+        .map(|raw| !(raw.trim().is_empty() || raw.trim() == "0"))
+        .unwrap_or(false)
+}
+
 fn collect_checkpoint_shmem_paths() -> Vec<PathBuf> {
     criu::collect_shadow_shmem_paths().unwrap_or_else(|e| {
         log::warn!("Failed to collect shmem from /proc/self/maps: {e}; falling back");
@@ -1294,8 +2124,9 @@ fn checkpoint_running_process_images(
     host_snapshots: &mut [HostCheckpoint],
     criu_base_dir: &PathBuf,
 ) -> anyhow::Result<()> {
-    for host_cp in host_snapshots {
-        for proc_cp in &mut host_cp.processes {
+    let mut jobs = Vec::new();
+    for (host_index, host_cp) in host_snapshots.iter().enumerate() {
+        for (process_index, proc_cp) in host_cp.processes.iter().enumerate() {
             if !proc_cp.is_running {
                 continue;
             }
@@ -1303,11 +2134,114 @@ fn checkpoint_running_process_images(
                 "host_{}_proc_{}",
                 host_cp.host_id, proc_cp.process_id
             ));
-            criu::checkpoint_process(proc_cp.native_pid, &images_dir, true)?;
-            proc_cp.criu_image_dir = Some(images_dir);
+            jobs.push(CriuCheckpointJob {
+                host_index,
+                process_index,
+                host_id: host_cp.host_id,
+                process_id: proc_cp.process_id,
+                native_pid: proc_cp.native_pid,
+                images_dir,
+            });
         }
     }
+
+    let jobs_per_batch = checkpoint_criu_jobs().min(jobs.len().max(1));
+    log::info!(
+        "Checkpointing {} running process image(s) with criu_jobs={}",
+        jobs.len(),
+        jobs_per_batch
+    );
+
+    for batch in jobs.chunks(jobs_per_batch) {
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .cloned()
+                .map(|job| {
+                    scope.spawn(move || {
+                        let started = Instant::now();
+                        let result =
+                            criu::checkpoint_process(job.native_pid, &job.images_dir, true);
+                        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                        let image_bytes = result
+                            .as_ref()
+                            .ok()
+                            .and_then(|_| directory_size_bytes(&job.images_dir).ok())
+                            .unwrap_or(0);
+                        CriuCheckpointResult {
+                            job,
+                            result,
+                            elapsed_ms,
+                            image_bytes,
+                        }
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        for result in results {
+            log::info!(
+                "CRIU dump completed: host_id={} process_id={} pid={} images_dir={} elapsed_ms={:.3} image_bytes={}",
+                result.job.host_id,
+                result.job.process_id,
+                result.job.native_pid,
+                result.job.images_dir.display(),
+                result.elapsed_ms,
+                result.image_bytes,
+            );
+
+            result.result?;
+            host_snapshots[result.job.host_index].processes[result.job.process_index]
+                .criu_image_dir = Some(result.job.images_dir);
+        }
+    }
+
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct CriuCheckpointJob {
+    host_index: usize,
+    process_index: usize,
+    host_id: u32,
+    process_id: u32,
+    native_pid: i32,
+    images_dir: PathBuf,
+}
+
+#[derive(Debug)]
+struct CriuCheckpointResult {
+    job: CriuCheckpointJob,
+    result: anyhow::Result<()>,
+    elapsed_ms: f64,
+    image_bytes: u64,
+}
+
+fn checkpoint_criu_jobs() -> usize {
+    std::env::var("SHADOW_CHECKPOINT_CRIU_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+}
+
+fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            total += directory_size_bytes(&entry.path())?;
+        } else if metadata.is_file() {
+            total += metadata.len();
+        }
+    }
+    Ok(total)
 }
 
 fn task_descriptor_kind_name(desc: &TaskDescriptor) -> &'static str {
@@ -1602,7 +2536,12 @@ fn snapshot_process(host: &Host, process: &crate::host::process::Process) -> Pro
         .as_ref()
         .map(|_| process.snapshot_descriptor_entries(host))
         .unwrap_or_default();
-    log_descriptor_census("checkpoint", host.name(), u32::from(process.id()), &descriptors);
+    log_descriptor_census(
+        "checkpoint",
+        host.name(),
+        u32::from(process.id()),
+        &descriptors,
+    );
 
     ProcessCheckpoint {
         process_id: u32::from(process.id()),
@@ -1654,7 +2593,9 @@ fn restore_host_globals(host: &Host, checkpoint: &HostCheckpoint) {
     );
 }
 
-fn build_live_inet_socket_map(host: &Host) -> HashMap<u64, crate::host::descriptor::socket::inet::InetSocket> {
+fn build_live_inet_socket_map(
+    host: &Host,
+) -> HashMap<u64, crate::host::descriptor::socket::inet::InetSocket> {
     let mut sockets = HashMap::new();
     let processes = host.processes_borrow();
     for process_rc in processes.values() {
@@ -1668,8 +2609,9 @@ fn build_live_inet_socket_map(host: &Host) -> HashMap<u64, crate::host::descript
             let crate::host::descriptor::CompatFile::New(open_file) = descriptor.file() else {
                 continue;
             };
-            let crate::host::descriptor::File::Socket(crate::host::descriptor::socket::Socket::Inet(inet_socket)) =
-                open_file.inner_file()
+            let crate::host::descriptor::File::Socket(
+                crate::host::descriptor::socket::Socket::Inet(inet_socket),
+            ) = open_file.inner_file()
             else {
                 continue;
             };
@@ -1700,13 +2642,15 @@ fn restore_interface_send_queues(host: &Host, checkpoint: &HostCheckpoint) -> an
             entries: snapshot
                 .entries
                 .iter()
-                .map(|entry| crate::host::network::interface::SendSocketQueueEntry {
-                    canonical_handle: host
-                        .translate_restored_canonical_handle(entry.canonical_handle)
-                        .unwrap_or(entry.canonical_handle),
-                    priority: entry.priority,
-                    push_order: entry.push_order,
-                })
+                .map(
+                    |entry| crate::host::network::interface::SendSocketQueueEntry {
+                        canonical_handle: host
+                            .translate_restored_canonical_handle(entry.canonical_handle)
+                            .unwrap_or(entry.canonical_handle),
+                        priority: entry.priority,
+                        push_order: entry.push_order,
+                    },
+                )
                 .collect(),
         };
         iface.restore_send_socket_queue(&translated_entries, &sockets_by_handle)
@@ -1811,7 +2755,9 @@ fn thread_restore_policy_from_mode(
             ThreadRestorePolicySnapshot::LegacyHeuristic
         }
         RestoreProtocolModeSnapshot::ProtocolV1 => ThreadRestorePolicySnapshot::ProtocolV1,
-        RestoreProtocolModeSnapshot::DeterministicV2 => ThreadRestorePolicySnapshot::DeterministicV2,
+        RestoreProtocolModeSnapshot::DeterministicV2 => {
+            ThreadRestorePolicySnapshot::DeterministicV2
+        }
     }
 }
 
@@ -2135,8 +3081,7 @@ fn apply_host_checkpoint(
                 restore_protocol_mode,
                 RestoreProtocolModeSnapshot::ProtocolV1
                     | RestoreProtocolModeSnapshot::DeterministicV2
-            )
-                && runtime.blocked_syscall_active
+            ) && runtime.blocked_syscall_active
                 && runtime.blocked_syscall_instance_id.is_none()
             {
                 log::warn!(
@@ -2239,13 +3184,13 @@ fn apply_host_checkpoint(
                     let thread = thread_rc.borrow(host.root());
                     match blocked_restore_action {
                         BlockedSyscallRestoreActionSnapshot::RearmPoll => {
-                                thread.restore_poll_blocked_syscall_condition(
-                                    host,
-                                    &process,
-                                    &poll_watches,
-                                    abs_timeout,
-                                    None,
-                                );
+                            thread.restore_poll_blocked_syscall_condition(
+                                host,
+                                &process,
+                                &poll_watches,
+                                abs_timeout,
+                                None,
+                            );
                             Worker::clear_active_process();
                             return;
                         }
@@ -2335,8 +3280,7 @@ fn apply_host_checkpoint(
                         host,
                         process_id,
                         tid,
-                        replay_time
-                            + SimulationTime::from_millis(1 + (25 * nudge_i)),
+                        replay_time + SimulationTime::from_millis(1 + (25 * nudge_i)),
                     );
                 }
             }
@@ -2627,7 +3571,7 @@ fn apply_host_checkpoint(
                         });
                         let all_threads_have_runtime =
                             p.threads.iter().all(|t| t.runtime.is_some());
-                    let nudge_count = if has_timeout_blocked_syscall && has_poll_runtime {
+                        let nudge_count = if has_timeout_blocked_syscall && has_poll_runtime {
                             5
                         } else if has_timeout_blocked_syscall {
                             0
@@ -2662,7 +3606,12 @@ fn apply_host_checkpoint(
             let skip_initial_resume = *file_trigger_blocked_by_process
                 .get(process_id)
                 .unwrap_or(&false);
-            if skip_initial_resume || (deterministic_restore && *blocked_condition_by_process.get(process_id).unwrap_or(&false)) {
+            if skip_initial_resume
+                || (deterministic_restore
+                    && *blocked_condition_by_process
+                        .get(process_id)
+                        .unwrap_or(&false))
+            {
                 continue;
             }
             let process_id_for_log = *process_id;

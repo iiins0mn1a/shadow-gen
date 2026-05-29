@@ -451,11 +451,18 @@ impl Epoll {
             let pri_key = self.ready.pop().unwrap();
             let key = Key::from(pri_key);
             let entry = self.monitoring.get_mut(&key).unwrap();
-            let watched_fd = key.fd();
-            let watched_canonical_handle = key.file().canonical_handle();
-            let interest_bits = entry.interest().bits();
-            let data = entry.data();
-            let (file_kind, local_addr, peer_addr) = Self::describe_watched_file(key.file());
+            let trace_record = trace_records.as_ref().map(|_| {
+                let (file_kind, local_addr, peer_addr) = Self::describe_watched_file(key.file());
+                (
+                    key.fd(),
+                    key.file().canonical_handle(),
+                    entry.interest().bits(),
+                    entry.data(),
+                    file_kind,
+                    local_addr,
+                    peer_addr,
+                )
+            });
 
             // Just removed from the ready set, keep the priority consistent.
             entry.set_priority(None);
@@ -466,6 +473,15 @@ impl Epoll {
             // Store the events we should report to the managed process.
             let (ready_events, ready_data) = entry.collect_ready_events().unwrap();
             if let Some(trace_records) = trace_records.as_deref_mut() {
+                let (
+                    watched_fd,
+                    watched_canonical_handle,
+                    interest_bits,
+                    data,
+                    file_kind,
+                    local_addr,
+                    peer_addr,
+                ) = trace_record.unwrap();
                 trace_records.push(ReadyEventTraceRecord {
                     watched_fd,
                     watched_canonical_handle,

@@ -331,15 +331,15 @@ impl Log for ShadowLogger {
 
         let host_info = Worker::with_active_host(|host| host.info().clone());
 
+        let elapsed_micros = unsafe { c_log::logger_elapsed_micros() }.max(0) as u64;
+
         let mut shadowrecord = ShadowLogRecord {
             level: record.level(),
             file: record.file_static(),
             module_path: record.module_path_static(),
             line: record.line(),
             message,
-            wall_time: Duration::from_micros(unsafe {
-                u64::try_from(c_log::logger_elapsed_micros()).unwrap()
-            }),
+            wall_time: Duration::from_micros(elapsed_micros),
 
             emu_time: Worker::current_time(),
             thread_name: THREAD_NAME

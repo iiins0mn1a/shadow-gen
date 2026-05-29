@@ -75,7 +75,10 @@ pub(crate) unsafe fn emulated_syscall_event(
 
     loop {
         log::trace!("waiting for event");
-        let res = crate::tls_ipc::with(|ipc| ipc.from_shadow().receive().unwrap());
+        let res = crate::tls_ipc::with(|ipc| {
+            // SAFETY: Each IPC channel has a single shim-side consumer.
+            unsafe { ipc.from_shadow().receive_assuming_single_consumer().unwrap() }
+        });
         log::trace!("got response {res:?}");
         match res {
             ShimEventToShim::SyscallComplete(syscall_complete) => {

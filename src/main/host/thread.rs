@@ -8,14 +8,14 @@ use linux_api::fcntl::DescriptorFlags;
 use linux_api::mman::{MapFlags, ProtFlags};
 use linux_api::posix_types::Pid;
 use linux_api::signal::stack_t;
-use shadow_shim_helper_rs::HostId;
 use shadow_shim_helper_rs::explicit_drop::ExplicitDrop;
 use shadow_shim_helper_rs::rootedcell::rc::RootedRc;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
 use shadow_shim_helper_rs::shim_shmem::{HostShmemProtected, ThreadShmem};
 use shadow_shim_helper_rs::syscall_types::{ForeignPtr, SyscallReg};
 use shadow_shim_helper_rs::util::SendPointer;
-use shadow_shmem::allocator::{ShMemBlock, shmalloc};
+use shadow_shim_helper_rs::HostId;
+use shadow_shmem::allocator::{shmalloc, ShMemBlock};
 
 use super::context::ProcessContext;
 use super::descriptor::descriptor_table::{DescriptorHandle, DescriptorTable};
@@ -28,13 +28,13 @@ use crate::core::checkpoint::snapshot_types::{
 };
 use crate::cshadow as c;
 use crate::host::futex_table::FutexRef;
-use crate::host::syscall::Trigger;
 use crate::host::syscall::condition::{
     SyscallCondition, SyscallConditionRef, SyscallConditionRefMut,
 };
 use crate::host::syscall::handler::SyscallHandler;
+use crate::host::syscall::Trigger;
 use crate::utility::callback_queue::CallbackQueue;
-use crate::utility::{IsSend, ObjectCounter, syscall};
+use crate::utility::{syscall, IsSend, ObjectCounter};
 
 /// The thread's state after having been allowed to execute some code.
 #[derive(Debug)]
@@ -333,9 +333,8 @@ impl Thread {
     ) {
         self.cleanup_syscall_condition();
 
-        let futex_addr = process.physical_address(ForeignPtr::<()>::from(
-            usize::try_from(futex_word).unwrap(),
-        ));
+        let futex_addr =
+            process.physical_address(ForeignPtr::<()>::from(usize::try_from(futex_word).unwrap()));
         let futex = {
             let mut table = host.futextable_borrow_mut();
             if let Some(futex) = table.get(futex_addr) {
@@ -872,8 +871,8 @@ mod export {
 
     use super::*;
     use crate::core::worker::Worker;
-    use crate::host::descriptor::socket::Socket;
     use crate::host::descriptor::socket::inet::InetSocket;
+    use crate::host::descriptor::socket::Socket;
     use crate::host::descriptor::{CompatFile, Descriptor, File};
 
     /// Make the requested syscall from within the plugin.

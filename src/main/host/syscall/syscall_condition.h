@@ -98,6 +98,20 @@ void syscallcondition_setTriggerListenerSequenceValue(SysCallCondition* cond, ui
 /* Get the active file for the condition, or NULL if there isn't one. */
 OpenFile* syscallcondition_getActiveFile(SysCallCondition* cond);
 
+uint64_t syscallcondition_perfScheduleAttempts(void);
+uint64_t syscallcondition_perfScheduledWakeups(void);
+uint64_t syscallcondition_perfSkippedAlreadyScheduled(void);
+uint64_t syscallcondition_perfTriggerEnters(void);
+uint64_t syscallcondition_perfTriggerContinues(void);
+uint64_t syscallcondition_perfTriggerReblocks(void);
+uint64_t syscallcondition_perfTriggerMissingProcess(void);
+uint64_t syscallcondition_perfTriggerStoppedProcess(void);
+uint64_t syscallcondition_perfTriggerMissingThread(void);
+uint64_t syscallcondition_perfNotifyStatusChanged(void);
+uint64_t syscallcondition_perfNotifyTimeoutExpired(void);
+uint64_t syscallcondition_perfSignalWakeupsScheduled(void);
+uint64_t syscallcondition_perfSignalWakeupsBlocked(void);
+
 /* If the condition's thread doesn't have `signo` blocked, schedule a wakeup.
  *
  * Returns whether a wakeup was scheduled.

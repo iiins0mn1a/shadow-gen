@@ -18,6 +18,8 @@
 //! <- {"status":"ok","sim_time_ns":123456,"message":"pause requested at next window boundary"}
 //! -> {"cmd":"info"}
 //! <- {"status":"ok","sim_time_ns":123456,"message":"** Next window ..."}
+//! -> {"cmd":"wait_until_paused"}
+//! <- {"status":"ok","sim_time_ns":123456,"message":"simulation paused"}
 //! -> {"cmd":"checkpoint","label":"cp1"}
 //! <- {"status":"ok","sim_time_ns":5000000000}
 //! ```
@@ -169,9 +171,25 @@ fn handle_client(stream: UnixStream, state: &SharedState) -> anyhow::Result<()> 
             }
         };
 
-        log::info!("Control socket received: {:?}", req);
+        if req.cmd == "status" {
+            log::trace!("Control socket received: {:?}", req);
+        } else {
+            log::info!("Control socket received: {:?}", req);
+        }
 
         match req.cmd.as_str() {
+            "wait_until_paused" => {
+                let guard = state.inner.lock().unwrap();
+                let guard = state.cv.wait_while(guard, |g| !g.sim_waiting).unwrap();
+                write_json(
+                    &mut writer,
+                    Response {
+                        status: "ok".into(),
+                        sim_time_ns: Some(guard.sim_time_ns),
+                        message: Some("simulation paused".into()),
+                    },
+                )?;
+            }
             "status" => {
                 let guard = state.inner.lock().unwrap();
                 write_json(
@@ -377,20 +395,45 @@ impl TimeController for SocketController {
         ctx: &WindowBoundaryContext,
         print_info: PrintNextWindowInfoFn<'_>,
     ) -> ControlDecision {
+        let trace = run_control_trace_enabled();
         let mut guard = self.state.inner.lock().unwrap();
         guard.sim_time_ns = ctx.current_sim_time_ns;
+        if trace {
+            log::info!(
+                "run-control boundary enter: current_sim_time_ns={} window_start_ns={} window_end_ns={} min_next_event_ns={} sim_waiting={} run_continuously={} auto_run_until={:?} pause_requested={} step_windows_remaining={}",
+                ctx.current_sim_time_ns,
+                (ctx.window_start - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START).as_nanos(),
+                (ctx.window_end - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START).as_nanos(),
+                (ctx.min_next_event_time - shadow_shim_helper_rs::emulated_time::EmulatedTime::SIMULATION_START).as_nanos(),
+                guard.sim_waiting,
+                guard.run_continuously,
+                guard.auto_run_until_ns,
+                guard.pause_requested,
+                guard.step_windows_remaining,
+            );
+        }
 
         if guard.step_windows_remaining > 0 {
             guard.step_windows_remaining -= 1;
             if guard.step_windows_remaining == 0 {
                 guard.run_continuously = false;
             } else {
+                if trace {
+                    log::info!("run-control boundary decision: continue step_windows_remaining={}", guard.step_windows_remaining);
+                }
                 return ControlDecision::Continue;
             }
         }
 
         if let Some(deadline) = guard.auto_run_until_ns {
             if ctx.current_sim_time_ns < deadline {
+                if trace {
+                    log::info!(
+                        "run-control boundary decision: continue until deadline={} current={}",
+                        deadline,
+                        ctx.current_sim_time_ns
+                    );
+                }
                 return ControlDecision::Continue;
             }
             guard.auto_run_until_ns = None;
@@ -406,6 +449,9 @@ impl TimeController for SocketController {
 
         guard.sim_waiting = true;
         self.state.cv.notify_all();
+        if trace {
+            log::info!("run-control boundary paused: current_sim_time_ns={}", guard.sim_time_ns);
+        }
 
         loop {
             if guard.info_requested {
@@ -417,6 +463,9 @@ impl TimeController for SocketController {
             if let Some(cmd) = guard.pending.take() {
                 guard.sim_waiting = false;
                 self.state.cv.notify_all();
+                if trace {
+                    log::info!("run-control boundary decision: pending {:?}", cmd);
+                }
                 return cmd;
             }
 
@@ -426,6 +475,14 @@ impl TimeController for SocketController {
             {
                 guard.sim_waiting = false;
                 self.state.cv.notify_all();
+                if trace {
+                    log::info!(
+                        "run-control boundary decision: resume from paused run_continuously={} auto_run_until={:?} step_windows_remaining={}",
+                        guard.run_continuously,
+                        guard.auto_run_until_ns,
+                        guard.step_windows_remaining
+                    );
+                }
                 return ControlDecision::Continue;
             }
 
@@ -442,6 +499,12 @@ impl TimeController for SocketController {
         guard.step_windows_remaining = 0;
         self.state.cv.notify_all();
     }
+}
+
+fn run_control_trace_enabled() -> bool {
+    std::env::var("SHADOW_RUN_CONTROL_TRACE")
+        .map(|raw| !(raw.trim().is_empty() || raw.trim() == "0"))
+        .unwrap_or(false)
 }
 
 impl Drop for SocketController {

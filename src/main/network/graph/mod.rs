@@ -1,9 +1,10 @@
 mod petgraph_wrapper;
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::error::Error;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 use log::*;
@@ -427,14 +428,19 @@ impl<T: Copy + Eq + Hash + std::fmt::Display> Default for IpAssignment<T> {
 #[derive(Debug)]
 pub struct RoutingInfo<T: Eq + Hash + std::fmt::Display + Clone + Copy> {
     paths: HashMap<(T, T), PathProperties>,
-    packet_counters: std::sync::RwLock<HashMap<(T, T), u64>>,
+    packet_counters: HashMap<(T, T), AtomicU64>,
 }
 
 impl<T: Eq + Hash + std::fmt::Display + Clone + Copy> RoutingInfo<T> {
     pub fn new(paths: HashMap<(T, T), PathProperties>) -> Self {
+        let packet_counters = paths
+            .keys()
+            .copied()
+            .map(|key| (key, AtomicU64::new(0)))
+            .collect();
         Self {
             paths,
-            packet_counters: std::sync::RwLock::new(HashMap::new()),
+            packet_counters,
         }
     }
 
@@ -445,18 +451,25 @@ impl<T: Eq + Hash + std::fmt::Display + Clone + Copy> RoutingInfo<T> {
 
     /// Increment the number of packets sent from one node to another.
     pub fn increment_packet_count(&self, start: T, end: T) {
-        let key = (start, end);
-        let mut packet_counters = self.packet_counters.write().unwrap();
-        match packet_counters.get_mut(&key) {
-            Some(x) => *x = x.saturating_add(1),
-            None => assert!(packet_counters.insert(key, 1).is_none()),
+        if let Some(counter) = self.packet_counters.get(&(start, end)) {
+            // These counters are diagnostic only. Avoid a per-packet CAS loop
+            // on hot routes; reaching u64::MAX is not realistic in normal
+            // runs, and saturating after overflow preserves the intended
+            // logging behavior for that boundary case.
+            if counter.fetch_add(1, Ordering::Relaxed) == u64::MAX {
+                counter.store(u64::MAX, Ordering::Relaxed);
+            }
         }
     }
 
     /// Log the number of packets sent between nodes.
     pub fn log_packet_counts(&self) {
         // only logs paths that have transmitted at least one packet
-        for ((start, end), count) in self.packet_counters.read().unwrap().iter() {
+        for ((start, end), counter) in self.packet_counters.iter() {
+            let count = counter.load(Ordering::Relaxed);
+            if count == 0 {
+                continue;
+            }
             let path = self.paths.get(&(*start, *end)).unwrap();
             log::debug!(
                 "Found path {}->{}: latency={}ns, packet_loss={}, packet_count={}",

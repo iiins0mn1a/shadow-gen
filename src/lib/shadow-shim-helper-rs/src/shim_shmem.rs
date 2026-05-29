@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use linux_api::signal::{Signal, sigaction, siginfo_t, sigset_t, stack_t};
 use shadow_shmem::allocator::{ShMemBlock, ShMemBlockSerialized};
 use vasi::VirtualAddressSpaceIndependent;
@@ -174,6 +176,7 @@ pub struct ProcessShmem {
     /// Handle to shared memory for the Host
     pub host_shmem: ShMemBlockSerialized,
     pub strace_fd: FfiOption<libc::c_int>,
+    pending_signals_hint: AtomicBool,
 
     pub protected: RootedRefCell<ProcessShmemProtected>,
 }
@@ -190,6 +193,7 @@ impl ProcessShmem {
             host_id,
             host_shmem,
             strace_fd: strace_fd.into(),
+            pending_signals_hint: AtomicBool::new(false),
             protected: RootedRefCell::new(
                 host_root,
                 ProcessShmemProtected {
@@ -294,11 +298,27 @@ impl ProcessShmemProtected {
     }
 }
 
+impl ProcessShmem {
+    pub fn has_pending_signals_hint(&self) -> bool {
+        self.pending_signals_hint.load(Ordering::Acquire)
+    }
+
+    pub fn mark_pending_signals(&self) {
+        self.pending_signals_hint.store(true, Ordering::Release);
+    }
+
+    pub fn update_pending_signals_hint(&self, has_pending: bool) {
+        self.pending_signals_hint
+            .store(has_pending, Ordering::Release);
+    }
+}
+
 #[derive(VirtualAddressSpaceIndependent)]
 #[repr(C)]
 pub struct ThreadShmem {
     pub host_id: HostId,
     pub tid: libc::pid_t,
+    pending_signals_hint: AtomicBool,
 
     pub protected: RootedRefCell<ThreadShmemProtected>,
 }
@@ -309,6 +329,7 @@ impl ThreadShmem {
         Self {
             host_id: host.host_id,
             tid,
+            pending_signals_hint: AtomicBool::new(false),
             protected: RootedRefCell::new(
                 &host.root,
                 ThreadShmemProtected {
@@ -330,10 +351,12 @@ impl ThreadShmem {
     /// Create a copy of `Self`. We can't implement the `Clone` trait since we
     /// need the `root`.
     pub fn clone(&self, root: &Root) -> Self {
+        let protected = *self.protected.borrow(root);
         Self {
             host_id: self.host_id,
             tid: self.tid,
-            protected: RootedRefCell::new(root, *self.protected.borrow(root)),
+            pending_signals_hint: AtomicBool::new(!protected.pending_signals.is_empty()),
+            protected: RootedRefCell::new(root, protected),
         }
     }
 }
@@ -405,6 +428,21 @@ impl ThreadShmemProtected {
     }
 }
 
+impl ThreadShmem {
+    pub fn has_pending_signals_hint(&self) -> bool {
+        self.pending_signals_hint.load(Ordering::Acquire)
+    }
+
+    pub fn mark_pending_signals(&self) {
+        self.pending_signals_hint.store(true, Ordering::Release);
+    }
+
+    pub fn update_pending_signals_hint(&self, has_pending: bool) {
+        self.pending_signals_hint
+            .store(has_pending, Ordering::Release);
+    }
+}
+
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 struct StackWrapper(stack_t);
@@ -424,12 +462,17 @@ pub fn take_pending_unblocked_signal(
     thread: &ThreadShmem,
 ) -> Option<(Signal, siginfo_t)> {
     let mut thread_protected = thread.protected.borrow_mut(&lock.root);
-    thread_protected
-        .take_pending_unblocked_signal()
-        .or_else(|| {
-            let mut process_protected = process.protected.borrow_mut(&lock.root);
-            process_protected.take_pending_unblocked_signal(&thread_protected)
-        })
+    if let Some(signal) = thread_protected.take_pending_unblocked_signal() {
+        thread.update_pending_signals_hint(!thread_protected.pending_signals.is_empty());
+        return Some(signal);
+    }
+
+    let mut process_protected = process.protected.borrow_mut(&lock.root);
+    let signal = process_protected.take_pending_unblocked_signal(&thread_protected);
+    if signal.is_some() {
+        process.update_pending_signals_hint(!process_protected.pending_signals.is_empty());
+    }
+    signal
 }
 
 pub mod export {
