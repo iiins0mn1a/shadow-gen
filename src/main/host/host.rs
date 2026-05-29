@@ -947,6 +947,10 @@ impl Host {
         !self.async_continuations.borrow().is_empty()
     }
 
+    pub fn async_continuation_pending_count(&self) -> usize {
+        self.async_continuations.borrow().len()
+    }
+
     pub fn drain_async_continuations(&self) {
         loop {
             let Some(pending) = self.async_continuations.borrow_mut().pop_front() else {

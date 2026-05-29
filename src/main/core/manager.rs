@@ -1011,6 +1011,31 @@ impl<'a> Manager<'a> {
                         });
                     });
                 }
+                if crate::host::managed_thread::tdt_async_continue_enabled()
+                    && let Some(stats) = scheduler_perf_stats.as_ref()
+                {
+                    scheduler.scope(|s| {
+                        let stats = Arc::clone(stats);
+                        s.run_with_data(&scheduler_thread_data, move |_, hosts, _| {
+                            let mut pending_hosts = 0u64;
+                            let mut pending_continuations = 0u64;
+                            for_each_host(hosts, |host| {
+                                let pending = host.async_continuation_pending_count() as u64;
+                                if pending == 0 {
+                                    return;
+                                }
+                                pending_hosts += 1;
+                                pending_continuations += pending;
+                            });
+                            stats
+                                .async_boundary_pending_hosts
+                                .fetch_add(pending_hosts, Ordering::Relaxed);
+                            stats
+                                .async_boundary_pending_continuations
+                                .fetch_add(pending_continuations, Ordering::Relaxed);
+                        });
+                    });
+                }
                 if let Some(started) = scheduler_scope_started
                     && let Some(stats) = scheduler_perf_stats.as_ref()
                 {
@@ -1770,6 +1795,8 @@ struct SchedulerPerfStats {
     async_scope_drain_hosts: AtomicU64,
     async_scope_reenter_opportunities: AtomicU64,
     async_scope_drain_wall_ns: AtomicU64,
+    async_boundary_pending_hosts: AtomicU64,
+    async_boundary_pending_continuations: AtomicU64,
     packet_events: AtomicU64,
     local_events: AtomicU64,
     cpu_delayed_events: AtomicU64,
@@ -1896,6 +1923,10 @@ fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
         .async_scope_reenter_opportunities
         .load(Ordering::Relaxed);
     let async_scope_drain_wall_ns = stats.async_scope_drain_wall_ns.load(Ordering::Relaxed);
+    let async_boundary_pending_hosts = stats.async_boundary_pending_hosts.load(Ordering::Relaxed);
+    let async_boundary_pending_continuations = stats
+        .async_boundary_pending_continuations
+        .load(Ordering::Relaxed);
     let packet_events = stats.packet_events.load(Ordering::Relaxed);
     let local_events = stats.local_events.load(Ordering::Relaxed);
     let cpu_delayed_events = stats.cpu_delayed_events.load(Ordering::Relaxed);
@@ -2041,7 +2072,7 @@ fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
             .join(",")
     };
     log::info!(
-        "TDT scheduler counters: parallelism={} windows={} host_scans={} host_executes={} host_scans_per_execute={:.3} scheduler_scope_wall_ns={} host_execute_wall_ns={} worker_busy_percent={:.3} window_max_worker_body_wall_ns={} scheduler_scope_over_window_max_percent={:.3} window_max_worker_body_continue_receive_wall_ns={} estimated_async_continue_overlap_savings_ns={} estimated_async_continue_overlap_savings_percent={:.3} async_scope_drain_hosts={} async_scope_reenter_opportunities={} async_scope_drain_wall_ns={} packet_events={} local_events={} cpu_delayed_events={} packet_event_wall_ns={} local_event_wall_ns={} resume_process_events={} resume_process_wall_ns={} start_application_events={} start_application_wall_ns={} shutdown_process_events={} shutdown_process_wall_ns={} relay_forward_events={} relay_forward_wall_ns={} syscall_condition_wake_events={} syscall_condition_wake_wall_ns={} prepare_poll_timeout_completion_events={} prepare_poll_timeout_completion_wall_ns={} restore_blocked_syscall_condition_events={} restore_blocked_syscall_condition_wall_ns={} timer_expire_events={} timer_expire_wall_ns={} legacy_tcp_deferred_events={} legacy_tcp_deferred_wall_ns={} exec_continuation_events={} exec_continuation_wall_ns={} opaque_events={} opaque_wall_ns={} undescribed_events={} undescribed_wall_ns={} worker_bodies={} worker_body_wall_ns={} avg_worker_body_wall_ns={:.3} max_worker_body_wall_ns={} worker_body_max_to_avg={:.3} worker_body_continue_receive_wall_ns={} max_worker_body_continue_receive_wall_ns={} top_hosts={} top_worker_bodies={}",
+        "TDT scheduler counters: parallelism={} windows={} host_scans={} host_executes={} host_scans_per_execute={:.3} scheduler_scope_wall_ns={} host_execute_wall_ns={} worker_busy_percent={:.3} window_max_worker_body_wall_ns={} scheduler_scope_over_window_max_percent={:.3} window_max_worker_body_continue_receive_wall_ns={} estimated_async_continue_overlap_savings_ns={} estimated_async_continue_overlap_savings_percent={:.3} async_scope_drain_hosts={} async_scope_reenter_opportunities={} async_scope_drain_wall_ns={} async_boundary_pending_hosts={} async_boundary_pending_continuations={} packet_events={} local_events={} cpu_delayed_events={} packet_event_wall_ns={} local_event_wall_ns={} resume_process_events={} resume_process_wall_ns={} start_application_events={} start_application_wall_ns={} shutdown_process_events={} shutdown_process_wall_ns={} relay_forward_events={} relay_forward_wall_ns={} syscall_condition_wake_events={} syscall_condition_wake_wall_ns={} prepare_poll_timeout_completion_events={} prepare_poll_timeout_completion_wall_ns={} restore_blocked_syscall_condition_events={} restore_blocked_syscall_condition_wall_ns={} timer_expire_events={} timer_expire_wall_ns={} legacy_tcp_deferred_events={} legacy_tcp_deferred_wall_ns={} exec_continuation_events={} exec_continuation_wall_ns={} opaque_events={} opaque_wall_ns={} undescribed_events={} undescribed_wall_ns={} worker_bodies={} worker_body_wall_ns={} avg_worker_body_wall_ns={:.3} max_worker_body_wall_ns={} worker_body_max_to_avg={:.3} worker_body_continue_receive_wall_ns={} max_worker_body_continue_receive_wall_ns={} top_hosts={} top_worker_bodies={}",
         stats.parallelism,
         windows,
         host_scans,
@@ -2058,6 +2089,8 @@ fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
         async_scope_drain_hosts,
         async_scope_reenter_opportunities,
         async_scope_drain_wall_ns,
+        async_boundary_pending_hosts,
+        async_boundary_pending_continuations,
         packet_events,
         local_events,
         cpu_delayed_events,
