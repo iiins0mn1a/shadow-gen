@@ -111,6 +111,11 @@ uint64_t syscallcondition_perfNotifyStatusChanged(void);
 uint64_t syscallcondition_perfNotifyTimeoutExpired(void);
 uint64_t syscallcondition_perfSignalWakeupsScheduled(void);
 uint64_t syscallcondition_perfSignalWakeupsBlocked(void);
+uint64_t syscallcondition_perfTriggerLookupWallNs(void);
+uint64_t syscallcondition_perfSatisfiedCheckWallNs(void);
+uint64_t syscallcondition_perfHostContinueWallNs(void);
+uint64_t syscallcondition_perfWakeContinueWallNs(void);
+uint64_t syscallcondition_perfWakeReblockWallNs(void);
 
 /* If the condition's thread doesn't have `signo` blocked, schedule a wakeup.
  *

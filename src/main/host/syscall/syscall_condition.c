@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "lib/logger/logger.h"
 #include "main/bindings/c/bindings.h"
@@ -60,6 +61,11 @@ static uint64_t _syscallcondition_perf_notify_status_changed;
 static uint64_t _syscallcondition_perf_notify_timeout_expired;
 static uint64_t _syscallcondition_perf_signal_wakeups_scheduled;
 static uint64_t _syscallcondition_perf_signal_wakeups_blocked;
+static uint64_t _syscallcondition_perf_trigger_lookup_wall_ns;
+static uint64_t _syscallcondition_perf_satisfied_check_wall_ns;
+static uint64_t _syscallcondition_perf_host_continue_wall_ns;
+static uint64_t _syscallcondition_perf_wake_continue_wall_ns;
+static uint64_t _syscallcondition_perf_wake_reblock_wall_ns;
 static int _syscallcondition_perf_enabled = -1;
 
 static bool _syscallcondition_perfCountersEnabled() {
@@ -80,8 +86,34 @@ static void _syscallcondition_perfInc(uint64_t* counter) {
     }
 }
 
+static void _syscallcondition_perfAdd(uint64_t* counter, uint64_t value) {
+    if (_syscallcondition_perfCountersEnabled()) {
+        __atomic_fetch_add(counter, value, __ATOMIC_RELAXED);
+    }
+}
+
 static uint64_t _syscallcondition_perfLoad(uint64_t* counter) {
     return __atomic_load_n(counter, __ATOMIC_RELAXED);
+}
+
+static uint64_t _syscallcondition_perfWallNowNs(void) {
+    if (!_syscallcondition_perfCountersEnabled()) {
+        return 0;
+    }
+
+    struct timespec ts = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return ((uint64_t)ts.tv_sec * 1000000000ull) + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t _syscallcondition_perfElapsedNs(uint64_t start_ns) {
+    if (start_ns == 0) {
+        return 0;
+    }
+    uint64_t end_ns = _syscallcondition_perfWallNowNs();
+    return end_ns >= start_ns ? end_ns - start_ns : 0;
 }
 
 static bool _syscallcondition_trace_enabled(const Host* host) {
@@ -447,6 +479,8 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     }
     MAGIC_ASSERT(*cond_wrapper);
     _syscallcondition_perfInc(&_syscallcondition_perf_trigger_enters);
+    uint64_t trigger_wall_start_ns = _syscallcondition_perfWallNowNs();
+    uint64_t lookup_wall_start_ns = _syscallcondition_perfWallNowNs();
 
     // The wakeup is executing here and now. Setting to false allows
     // the callback to be scheduled again if the condition isn't canceled
@@ -455,6 +489,8 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 
     const Process* proc = host_getProcess(host, (*cond_wrapper)->proc);
     if (!proc) {
+        _syscallcondition_perfAdd(&_syscallcondition_perf_trigger_lookup_wall_ns,
+                                  _syscallcondition_perfElapsedNs(lookup_wall_start_ns));
         _syscallcondition_perfInc(&_syscallcondition_perf_trigger_missing_process);
 #ifdef DEBUG
         _syscallcondition_logListeningState(*cond_wrapper, proc, "ignored (process no longer exists)");
@@ -463,6 +499,8 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     }
 
     if (!process_isRunning(proc)) {
+        _syscallcondition_perfAdd(&_syscallcondition_perf_trigger_lookup_wall_ns,
+                                  _syscallcondition_perfElapsedNs(lookup_wall_start_ns));
         _syscallcondition_perfInc(&_syscallcondition_perf_trigger_stopped_process);
 #ifdef DEBUG
         _syscallcondition_logListeningState(*cond_wrapper, proc, "ignored (process no longer running)");
@@ -472,12 +510,16 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 
     const Thread* thread = process_getThread(proc, (*cond_wrapper)->threadId);
     if (!thread) {
+        _syscallcondition_perfAdd(&_syscallcondition_perf_trigger_lookup_wall_ns,
+                                  _syscallcondition_perfElapsedNs(lookup_wall_start_ns));
         _syscallcondition_perfInc(&_syscallcondition_perf_trigger_missing_thread);
 #ifdef DEBUG
         _syscallcondition_logListeningState(*cond_wrapper, proc, "ignored (thread no longer exists)");
 #endif
         return;
     }
+    _syscallcondition_perfAdd(&_syscallcondition_perf_trigger_lookup_wall_ns,
+                              _syscallcondition_perfElapsedNs(lookup_wall_start_ns));
 
 #ifdef DEBUG
     _syscallcondition_logListeningState(*cond_wrapper, proc, "wakeup while");
@@ -487,7 +529,12 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 
     // Always deliver the wakeup if the timeout expired.
     // Otherwise, only deliver the wakeup if the desc status is still valid.
+    uint64_t satisfied_wall_start_ns = _syscallcondition_perfWallNowNs();
     if (!_syscallcondition_satisfied(*cond_wrapper, host, thread)) {
+        _syscallcondition_perfAdd(&_syscallcondition_perf_satisfied_check_wall_ns,
+                                  _syscallcondition_perfElapsedNs(satisfied_wall_start_ns));
+        _syscallcondition_perfAdd(&_syscallcondition_perf_wake_reblock_wall_ns,
+                                  _syscallcondition_perfElapsedNs(trigger_wall_start_ns));
         _syscallcondition_perfInc(&_syscallcondition_perf_trigger_reblocks);
         // Spurious wakeup. Just return without running the process. The
         // condition's listeners should still be installed, and now that we've
@@ -497,6 +544,8 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
 #endif
         return;
     }
+    _syscallcondition_perfAdd(&_syscallcondition_perf_satisfied_check_wall_ns,
+                              _syscallcondition_perfElapsedNs(satisfied_wall_start_ns));
 
 #ifdef DEBUG
     _syscallcondition_logListeningState(*cond_wrapper, proc, "stopped");
@@ -513,7 +562,12 @@ static void _syscallcondition_trigger(const Host* host, void* obj, void* arg) {
     *cond_wrapper = NULL;
 
     /* Wake up the thread. */
+    uint64_t host_continue_wall_start_ns = _syscallcondition_perfWallNowNs();
     host_continue(host, pid, tid);
+    _syscallcondition_perfAdd(&_syscallcondition_perf_host_continue_wall_ns,
+                              _syscallcondition_perfElapsedNs(host_continue_wall_start_ns));
+    _syscallcondition_perfAdd(&_syscallcondition_perf_wake_continue_wall_ns,
+                              _syscallcondition_perfElapsedNs(trigger_wall_start_ns));
 }
 
 static void _syscallcondition_scheduleWakeupTask(SysCallCondition* cond, const Host* host) {
@@ -783,4 +837,24 @@ uint64_t syscallcondition_perfSignalWakeupsScheduled(void) {
 
 uint64_t syscallcondition_perfSignalWakeupsBlocked(void) {
     return _syscallcondition_perfLoad(&_syscallcondition_perf_signal_wakeups_blocked);
+}
+
+uint64_t syscallcondition_perfTriggerLookupWallNs(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_trigger_lookup_wall_ns);
+}
+
+uint64_t syscallcondition_perfSatisfiedCheckWallNs(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_satisfied_check_wall_ns);
+}
+
+uint64_t syscallcondition_perfHostContinueWallNs(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_host_continue_wall_ns);
+}
+
+uint64_t syscallcondition_perfWakeContinueWallNs(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_wake_continue_wall_ns);
+}
+
+uint64_t syscallcondition_perfWakeReblockWallNs(void) {
+    return _syscallcondition_perfLoad(&_syscallcondition_perf_wake_reblock_wall_ns);
 }

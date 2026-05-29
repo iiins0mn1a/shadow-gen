@@ -2112,9 +2112,14 @@ fn log_syscall_condition_perf_stats() {
     let notify_timeout_expired = unsafe { c::syscallcondition_perfNotifyTimeoutExpired() };
     let signal_wakeups_scheduled = unsafe { c::syscallcondition_perfSignalWakeupsScheduled() };
     let signal_wakeups_blocked = unsafe { c::syscallcondition_perfSignalWakeupsBlocked() };
+    let trigger_lookup_wall_ns = unsafe { c::syscallcondition_perfTriggerLookupWallNs() };
+    let satisfied_check_wall_ns = unsafe { c::syscallcondition_perfSatisfiedCheckWallNs() };
+    let host_continue_wall_ns = unsafe { c::syscallcondition_perfHostContinueWallNs() };
+    let wake_continue_wall_ns = unsafe { c::syscallcondition_perfWakeContinueWallNs() };
+    let wake_reblock_wall_ns = unsafe { c::syscallcondition_perfWakeReblockWallNs() };
 
     log::info!(
-        "TDT syscall-condition counters: schedule_attempts={} scheduled_wakeups={} skipped_already_scheduled={} trigger_enters={} trigger_continues={} trigger_reblocks={} trigger_missing_process={} trigger_stopped_process={} trigger_missing_thread={} notify_status_changed={} notify_timeout_expired={} signal_wakeups_scheduled={} signal_wakeups_blocked={}",
+        "TDT syscall-condition counters: schedule_attempts={} scheduled_wakeups={} skipped_already_scheduled={} trigger_enters={} trigger_continues={} trigger_reblocks={} trigger_missing_process={} trigger_stopped_process={} trigger_missing_thread={} notify_status_changed={} notify_timeout_expired={} signal_wakeups_scheduled={} signal_wakeups_blocked={} trigger_lookup_wall_ns={} satisfied_check_wall_ns={} host_continue_wall_ns={} wake_continue_wall_ns={} wake_reblock_wall_ns={}",
         schedule_attempts,
         scheduled_wakeups,
         skipped_already_scheduled,
@@ -2128,6 +2133,11 @@ fn log_syscall_condition_perf_stats() {
         notify_timeout_expired,
         signal_wakeups_scheduled,
         signal_wakeups_blocked,
+        trigger_lookup_wall_ns,
+        satisfied_check_wall_ns,
+        host_continue_wall_ns,
+        wake_continue_wall_ns,
+        wake_reblock_wall_ns,
     );
 }
 
