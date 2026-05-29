@@ -967,20 +967,47 @@ impl<'a> Manager<'a> {
                     && crate::host::managed_thread::tdt_async_continue_scope_drain_enabled()
                 {
                     scheduler.scope(|s| {
+                        let scheduler_perf_stats = scheduler_perf_stats.clone();
                         s.run_with_data(&scheduler_thread_data, move |_, hosts, thread_data| {
                             let mut next_event_time = thread_data.next_event_time.borrow_mut();
+                            let mut async_scope_drain_hosts = 0u64;
+                            let mut async_scope_reenter_opportunities = 0u64;
+                            let mut async_scope_drain_wall_ns = 0u64;
                             for_each_host(hosts, |host| {
                                 if !host.has_async_continuation_pending() {
                                     return;
                                 }
+                                async_scope_drain_hosts += 1;
+                                let drain_started = scheduler_perf_stats
+                                    .as_ref()
+                                    .map(|_| std::time::Instant::now());
                                 host.drain_async_continuations();
+                                if let Some(started) = drain_started {
+                                    async_scope_drain_wall_ns +=
+                                        started.elapsed().as_nanos() as u64;
+                                }
                                 let host_next_event_time = host.next_event_time();
+                                if matches!(host_next_event_time, Some(t) if t < window_end) {
+                                    async_scope_reenter_opportunities += 1;
+                                }
                                 host.unlock_shmem();
                                 *next_event_time = min_emulated_time_option(
                                     *next_event_time,
                                     host_next_event_time,
                                 );
                             });
+                            if let Some(stats) = scheduler_perf_stats.as_ref() {
+                                stats
+                                    .async_scope_drain_hosts
+                                    .fetch_add(async_scope_drain_hosts, Ordering::Relaxed);
+                                stats.async_scope_reenter_opportunities.fetch_add(
+                                    async_scope_reenter_opportunities,
+                                    Ordering::Relaxed,
+                                );
+                                stats
+                                    .async_scope_drain_wall_ns
+                                    .fetch_add(async_scope_drain_wall_ns, Ordering::Relaxed);
+                            }
                         });
                     });
                 }
@@ -1740,6 +1767,9 @@ struct SchedulerPerfStats {
     window_max_worker_body_wall_ns: AtomicU64,
     window_max_worker_body_continue_receive_wall_ns: AtomicU64,
     estimated_async_continue_overlap_savings_ns: AtomicU64,
+    async_scope_drain_hosts: AtomicU64,
+    async_scope_reenter_opportunities: AtomicU64,
+    async_scope_drain_wall_ns: AtomicU64,
     packet_events: AtomicU64,
     local_events: AtomicU64,
     cpu_delayed_events: AtomicU64,
@@ -1861,6 +1891,11 @@ fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
     let estimated_async_continue_overlap_savings_ns = stats
         .estimated_async_continue_overlap_savings_ns
         .load(Ordering::Relaxed);
+    let async_scope_drain_hosts = stats.async_scope_drain_hosts.load(Ordering::Relaxed);
+    let async_scope_reenter_opportunities = stats
+        .async_scope_reenter_opportunities
+        .load(Ordering::Relaxed);
+    let async_scope_drain_wall_ns = stats.async_scope_drain_wall_ns.load(Ordering::Relaxed);
     let packet_events = stats.packet_events.load(Ordering::Relaxed);
     let local_events = stats.local_events.load(Ordering::Relaxed);
     let cpu_delayed_events = stats.cpu_delayed_events.load(Ordering::Relaxed);
@@ -2006,7 +2041,7 @@ fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
             .join(",")
     };
     log::info!(
-        "TDT scheduler counters: parallelism={} windows={} host_scans={} host_executes={} host_scans_per_execute={:.3} scheduler_scope_wall_ns={} host_execute_wall_ns={} worker_busy_percent={:.3} window_max_worker_body_wall_ns={} scheduler_scope_over_window_max_percent={:.3} window_max_worker_body_continue_receive_wall_ns={} estimated_async_continue_overlap_savings_ns={} estimated_async_continue_overlap_savings_percent={:.3} packet_events={} local_events={} cpu_delayed_events={} packet_event_wall_ns={} local_event_wall_ns={} resume_process_events={} resume_process_wall_ns={} start_application_events={} start_application_wall_ns={} shutdown_process_events={} shutdown_process_wall_ns={} relay_forward_events={} relay_forward_wall_ns={} syscall_condition_wake_events={} syscall_condition_wake_wall_ns={} prepare_poll_timeout_completion_events={} prepare_poll_timeout_completion_wall_ns={} restore_blocked_syscall_condition_events={} restore_blocked_syscall_condition_wall_ns={} timer_expire_events={} timer_expire_wall_ns={} legacy_tcp_deferred_events={} legacy_tcp_deferred_wall_ns={} exec_continuation_events={} exec_continuation_wall_ns={} opaque_events={} opaque_wall_ns={} undescribed_events={} undescribed_wall_ns={} worker_bodies={} worker_body_wall_ns={} avg_worker_body_wall_ns={:.3} max_worker_body_wall_ns={} worker_body_max_to_avg={:.3} worker_body_continue_receive_wall_ns={} max_worker_body_continue_receive_wall_ns={} top_hosts={} top_worker_bodies={}",
+        "TDT scheduler counters: parallelism={} windows={} host_scans={} host_executes={} host_scans_per_execute={:.3} scheduler_scope_wall_ns={} host_execute_wall_ns={} worker_busy_percent={:.3} window_max_worker_body_wall_ns={} scheduler_scope_over_window_max_percent={:.3} window_max_worker_body_continue_receive_wall_ns={} estimated_async_continue_overlap_savings_ns={} estimated_async_continue_overlap_savings_percent={:.3} async_scope_drain_hosts={} async_scope_reenter_opportunities={} async_scope_drain_wall_ns={} packet_events={} local_events={} cpu_delayed_events={} packet_event_wall_ns={} local_event_wall_ns={} resume_process_events={} resume_process_wall_ns={} start_application_events={} start_application_wall_ns={} shutdown_process_events={} shutdown_process_wall_ns={} relay_forward_events={} relay_forward_wall_ns={} syscall_condition_wake_events={} syscall_condition_wake_wall_ns={} prepare_poll_timeout_completion_events={} prepare_poll_timeout_completion_wall_ns={} restore_blocked_syscall_condition_events={} restore_blocked_syscall_condition_wall_ns={} timer_expire_events={} timer_expire_wall_ns={} legacy_tcp_deferred_events={} legacy_tcp_deferred_wall_ns={} exec_continuation_events={} exec_continuation_wall_ns={} opaque_events={} opaque_wall_ns={} undescribed_events={} undescribed_wall_ns={} worker_bodies={} worker_body_wall_ns={} avg_worker_body_wall_ns={:.3} max_worker_body_wall_ns={} worker_body_max_to_avg={:.3} worker_body_continue_receive_wall_ns={} max_worker_body_continue_receive_wall_ns={} top_hosts={} top_worker_bodies={}",
         stats.parallelism,
         windows,
         host_scans,
@@ -2020,6 +2055,9 @@ fn log_scheduler_perf_stats(stats: &Option<Arc<SchedulerPerfStats>>) {
         window_max_worker_body_continue_receive_wall_ns,
         estimated_async_continue_overlap_savings_ns,
         estimated_async_continue_overlap_savings_percent,
+        async_scope_drain_hosts,
+        async_scope_reenter_opportunities,
+        async_scope_drain_wall_ns,
         packet_events,
         local_events,
         cpu_delayed_events,
