@@ -76,6 +76,9 @@ struct ManagedThreadPerfStats {
     continue_plugin_receive_wall_ns: AtomicU64,
     continue_plugin_lock_wall_ns: AtomicU64,
     continue_plugin_prepare_wall_ns: AtomicU64,
+    continue_plugin_runahead_wall_ns: AtomicU64,
+    continue_plugin_clock_state_wall_ns: AtomicU64,
+    continue_plugin_unlock_wall_ns: AtomicU64,
     continue_plugin_send_wall_ns: AtomicU64,
     continue_plugin_time_update_wall_ns: AtomicU64,
     syscall_handler_calls: AtomicU64,
@@ -339,6 +342,14 @@ pub fn log_tdt_managed_thread_perf_stats() {
     let continue_plugin_prepare_wall_ns = stats
         .continue_plugin_prepare_wall_ns
         .load(Ordering::Relaxed);
+    let continue_plugin_runahead_wall_ns = stats
+        .continue_plugin_runahead_wall_ns
+        .load(Ordering::Relaxed);
+    let continue_plugin_clock_state_wall_ns = stats
+        .continue_plugin_clock_state_wall_ns
+        .load(Ordering::Relaxed);
+    let continue_plugin_unlock_wall_ns =
+        stats.continue_plugin_unlock_wall_ns.load(Ordering::Relaxed);
     let continue_plugin_send_wall_ns = stats.continue_plugin_send_wall_ns.load(Ordering::Relaxed);
     let continue_plugin_time_update_wall_ns = stats
         .continue_plugin_time_update_wall_ns
@@ -440,12 +451,15 @@ pub fn log_tdt_managed_thread_perf_stats() {
     };
 
     log::info!(
-        "TDT managed-thread counters: continue_plugin_calls={} continue_plugin_wall_ns={} continue_plugin_receive_wall_ns={} continue_plugin_lock_wall_ns={} continue_plugin_prepare_wall_ns={} continue_plugin_send_wall_ns={} continue_plugin_time_update_wall_ns={} syscall_handler_calls={} syscall_handler_wall_ns={} syscall_continue_calls={} syscall_continue_wall_ns={} syscall_top={} continue_exchange_top={}",
+        "TDT managed-thread counters: continue_plugin_calls={} continue_plugin_wall_ns={} continue_plugin_receive_wall_ns={} continue_plugin_lock_wall_ns={} continue_plugin_prepare_wall_ns={} continue_plugin_runahead_wall_ns={} continue_plugin_clock_state_wall_ns={} continue_plugin_unlock_wall_ns={} continue_plugin_send_wall_ns={} continue_plugin_time_update_wall_ns={} syscall_handler_calls={} syscall_handler_wall_ns={} syscall_continue_calls={} syscall_continue_wall_ns={} syscall_top={} continue_exchange_top={}",
         continue_plugin_calls,
         continue_plugin_wall_ns,
         continue_plugin_receive_wall_ns,
         continue_plugin_lock_wall_ns,
         continue_plugin_prepare_wall_ns,
+        continue_plugin_runahead_wall_ns,
+        continue_plugin_clock_state_wall_ns,
+        continue_plugin_unlock_wall_ns,
         continue_plugin_send_wall_ns,
         continue_plugin_time_update_wall_ns,
         syscall_handler_calls,
@@ -1325,12 +1339,24 @@ impl ManagedThread {
         let sent_kind = stats.map(|_| shim_event_to_shim_kind(event));
         let prepare_started = stats.map(|_| Instant::now());
         // Update shared state before transferring control.
+        let runahead_started = stats.map(|_| Instant::now());
         let max_runahead_time = Worker::max_event_runahead_time(host);
+        let runahead_wall_ns = runahead_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
+        let clock_state_started = stats.map(|_| Instant::now());
         let sim_time = Worker::current_time().unwrap();
         host.set_shim_clock_state(sim_time, max_runahead_time);
+        let clock_state_wall_ns = clock_state_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
 
         // Release lock so that plugin can take it. Reacquired in `wait_for_next_event`.
+        let unlock_started = stats.map(|_| Instant::now());
         host.unlock_shmem();
+        let unlock_wall_ns = unlock_started
+            .map(|started| started.elapsed().as_nanos() as u64)
+            .unwrap_or_default();
         let prepare_wall_ns = prepare_started
             .map(|started| started.elapsed().as_nanos() as u64)
             .unwrap_or_default();
@@ -1425,6 +1451,15 @@ impl ManagedThread {
             stats
                 .continue_plugin_prepare_wall_ns
                 .fetch_add(prepare_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_runahead_wall_ns
+                .fetch_add(runahead_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_clock_state_wall_ns
+                .fetch_add(clock_state_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_unlock_wall_ns
+                .fetch_add(unlock_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_send_wall_ns
                 .fetch_add(send_wall_ns, Ordering::Relaxed);
