@@ -1187,7 +1187,9 @@ impl Host {
     }
 
     pub fn schedule_task_with_delay(&self, task: TaskRef, t: SimulationTime) -> bool {
-        self.schedule_task_at_emulated_time(task, Worker::current_time().unwrap() + t)
+        let base_time = Worker::current_time()
+            .unwrap_or_else(|| self.event_queue.lock().unwrap().last_popped_event_time());
+        self.schedule_task_at_emulated_time(task, base_time + t)
     }
 
     pub fn event_queue(&self) -> &Arc<Mutex<EventQueue>> {

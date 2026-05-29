@@ -830,9 +830,14 @@ impl<'a> Manager<'a> {
                                                         .syscall_condition_wake_wall_ns;
                                             }
                                         }
-                                        if execution_stats.async_continuation_pending {
+                                        if execution_stats.async_continuation_pending
+                                            && crate::host::managed_thread::tdt_async_continue_scope_drain_enabled()
+                                        {
                                             None
                                         } else {
+                                            if execution_stats.async_continuation_pending {
+                                                host.drain_async_continuations();
+                                            }
                                             let host_next_event_time = host.next_event_time();
                                             host.unlock_shmem();
                                             host_next_event_time
@@ -958,7 +963,9 @@ impl<'a> Manager<'a> {
                         (window_end - EmulatedTime::SIMULATION_START).as_nanos(),
                     );
                 }
-                if crate::host::managed_thread::tdt_async_continue_enabled() {
+                if crate::host::managed_thread::tdt_async_continue_enabled()
+                    && crate::host::managed_thread::tdt_async_continue_scope_drain_enabled()
+                {
                     scheduler.scope(|s| {
                         s.run_with_data(&scheduler_thread_data, move |_, hosts, thread_data| {
                             let mut next_event_time = thread_data.next_event_time.borrow_mut();

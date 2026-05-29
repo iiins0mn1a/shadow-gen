@@ -91,6 +91,7 @@ struct ManagedThreadPerfStats {
 static MANAGED_THREAD_PERF_STATS: OnceLock<ManagedThreadPerfStats> = OnceLock::new();
 static TDT_PERF_COUNTERS_ENABLED: OnceLock<bool> = OnceLock::new();
 static TDT_ASYNC_CONTINUE_ENABLED: OnceLock<bool> = OnceLock::new();
+static TDT_ASYNC_SCOPE_DRAIN_ENABLED: OnceLock<bool> = OnceLock::new();
 
 thread_local! {
     static TDT_WORKER_BODY_CONTINUE_RECEIVE_WALL_NS: Cell<u64> = const { Cell::new(0) };
@@ -123,18 +124,26 @@ pub fn tdt_async_continue_enabled() -> bool {
     })
 }
 
+pub fn tdt_async_continue_scope_drain_enabled() -> bool {
+    *TDT_ASYNC_SCOPE_DRAIN_ENABLED.get_or_init(|| {
+        std::env::var("SHADOW_TDT_ASYNC_SCOPE_DRAIN")
+            .map(|raw| {
+                let raw = raw.trim();
+                !raw.is_empty() && raw != "0"
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn tdt_async_continue_syscall_allowed(syscall_nr: u32) -> bool {
     let syscall_nr = i64::from(syscall_nr);
     syscall_nr == libc::SYS_epoll_wait
         || syscall_nr == libc::SYS_epoll_pwait
         || syscall_nr == libc::SYS_epoll_pwait2
-        || syscall_nr == libc::SYS_futex
         || syscall_nr == libc::SYS_poll
         || syscall_nr == libc::SYS_ppoll
         || syscall_nr == libc::SYS_select
         || syscall_nr == libc::SYS_pselect6
-        || syscall_nr == libc::SYS_nanosleep
-        || syscall_nr == libc::SYS_clock_nanosleep
 }
 
 pub fn tdt_perf_reset_worker_body_continue_receive_wall_ns() {
