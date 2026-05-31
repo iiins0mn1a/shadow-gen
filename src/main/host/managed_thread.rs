@@ -480,6 +480,7 @@ pub struct ManagedThread {
     // post-restore syscall result to the application.
     needs_post_restore_refresh: Cell<bool>,
     native_run_phase: Cell<NativeRunPhase>,
+    pending_native_run: RefCell<Option<NativeRunToken>>,
 }
 
 enum IpcShmem {
@@ -508,6 +509,12 @@ impl ManagedThread {
             NativeRunPhase::Parked,
             "ManagedThread checkpoint state requested during transient native-run phase: context={context} phase={:?} pid={:?} tid={:?}",
             self.native_run_phase.get(),
+            self.native_pid,
+            self.native_tid,
+        );
+        assert!(
+            self.pending_native_run.borrow().is_none(),
+            "ManagedThread checkpoint state requested with pending native run: context={context} pid={:?} tid={:?}",
             self.native_pid,
             self.native_tid,
         );
@@ -776,6 +783,7 @@ impl ManagedThread {
             force_syscall_eintr_once: Cell::new(false),
             needs_post_restore_refresh: Cell::new(false),
             native_run_phase: Cell::new(NativeRunPhase::Parked),
+            pending_native_run: RefCell::new(None),
         })
     }
 
@@ -1167,6 +1175,7 @@ impl ManagedThread {
             force_syscall_eintr_once: Cell::new(false),
             needs_post_restore_refresh: Cell::new(false),
             native_run_phase: Cell::new(NativeRunPhase::Parked),
+            pending_native_run: RefCell::new(None),
         })
     }
 
@@ -1817,6 +1826,7 @@ impl ManagedThread {
             force_syscall_eintr_once: Cell::new(force_syscall_eintr_once),
             needs_post_restore_refresh: Cell::new(true),
             native_run_phase: Cell::new(NativeRunPhase::Parked),
+            pending_native_run: RefCell::new(None),
         }
     }
 }
