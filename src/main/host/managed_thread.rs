@@ -439,6 +439,13 @@ pub enum ResumeResult {
     ExitedProcess,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeRunPhase {
+    Parked,
+    PostRestoreRefresh,
+    WaitingForShimReply,
+}
+
 pub struct ManagedThread {
     ipc_shmem: Arc<IpcShmem>,
     is_running: Cell<bool>,
@@ -461,6 +468,7 @@ pub struct ManagedThread {
     // If true, send a one-way shim refresh event before returning the first
     // post-restore syscall result to the application.
     needs_post_restore_refresh: Cell<bool>,
+    native_run_phase: Cell<NativeRunPhase>,
 }
 
 enum IpcShmem {
@@ -483,7 +491,19 @@ impl Deref for IpcShmem {
 }
 
 impl ManagedThread {
+    fn assert_shadow_owned_safepoint(&self, context: &str) {
+        assert_eq!(
+            self.native_run_phase.get(),
+            NativeRunPhase::Parked,
+            "ManagedThread checkpoint state requested during transient native-run phase: context={context} phase={:?} pid={:?} tid={:?}",
+            self.native_run_phase.get(),
+            self.native_pid,
+            self.native_tid,
+        );
+    }
+
     pub fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {
+        self.assert_shadow_owned_safepoint("runtime_snapshot");
         let event = *self.current_event.borrow();
         match event {
             ShimEventToShadow::StartReq(_) => ThreadRuntimeSnapshot {
@@ -600,6 +620,7 @@ impl ManagedThread {
     }
 
     pub fn current_event_bytes(&self) -> Vec<u8> {
+        self.assert_shadow_owned_safepoint("current_event_bytes");
         let event = *self.current_event.borrow();
         let size = std::mem::size_of_val(&event);
         let ptr = std::ptr::from_ref(&event).cast::<u8>();
@@ -737,6 +758,7 @@ impl ManagedThread {
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(false),
             needs_post_restore_refresh: Cell::new(false),
+            native_run_phase: Cell::new(NativeRunPhase::Parked),
         })
     }
 
@@ -1127,6 +1149,7 @@ impl ManagedThread {
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(false),
             needs_post_restore_refresh: Cell::new(false),
+            native_run_phase: Cell::new(NativeRunPhase::Parked),
         })
     }
 
@@ -1162,6 +1185,7 @@ impl ManagedThread {
 
     #[must_use]
     fn begin_continue_plugin(&self, host: &Host, event: &ShimEventToShim) -> NativeRunToken {
+        assert_eq!(self.native_run_phase.get(), NativeRunPhase::Parked);
         let stats = managed_thread_perf_stats();
         let perf_started = stats.map(|_| Instant::now());
         let sent_kind = stats.map(|_| shim_event_to_shim_kind(event));
@@ -1184,6 +1208,8 @@ impl ManagedThread {
                 | ShimEventToShim::SyscallDoNative
         );
         if supports_post_restore_refresh && self.needs_post_restore_refresh.replace(false) {
+            self.native_run_phase
+                .set(NativeRunPhase::PostRestoreRefresh);
             self.ipc_shmem
                 .to_plugin()
                 .send(ShimEventToShim::StartRes(ShimEventStartRes {
@@ -1205,8 +1231,11 @@ impl ManagedThread {
                 }) if i64::from(retval) == 0 => {}
                 other => panic!("Unexpected post-restore refresh ack: {other:?}"),
             }
+            self.native_run_phase.set(NativeRunPhase::Parked);
         }
         let send_started = stats.map(|_| Instant::now());
+        self.native_run_phase
+            .set(NativeRunPhase::WaitingForShimReply);
         self.ipc_shmem.to_plugin().send(*event);
         let send_wall_ns = send_started
             .map(|started| started.elapsed().as_nanos() as u64)
@@ -1305,6 +1334,7 @@ impl ManagedThread {
             }
         }
         Worker::set_current_time(shim_time);
+        self.native_run_phase.set(NativeRunPhase::Parked);
         let time_update_wall_ns = time_update_started
             .map(|started| started.elapsed().as_nanos() as u64)
             .unwrap_or_default();
@@ -1743,6 +1773,7 @@ impl ManagedThread {
             affinity: Cell::new(cshadow::AFFINITY_UNINIT),
             force_syscall_eintr_once: Cell::new(force_syscall_eintr_once),
             needs_post_restore_refresh: Cell::new(true),
+            native_run_phase: Cell::new(NativeRunPhase::Parked),
         }
     }
 }
