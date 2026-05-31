@@ -43,6 +43,11 @@ impl IPCData {
     pub fn from_shadow(&self) -> &SelfContainedChannel<ShimEventToShim> {
         &self.shadow_to_plugin
     }
+
+    /// Returns whether both IPC channels have no pending messages.
+    pub fn channels_are_empty(&self) -> bool {
+        self.shadow_to_plugin.is_empty() && self.plugin_to_shadow.is_empty()
+    }
 }
 
 impl Default for IPCData {

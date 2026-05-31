@@ -215,27 +215,33 @@ mod scchannel_tests {
     fn test_try_receive_single_thread() {
         sync::model(|| {
             let channel = SelfContainedChannel::new();
+            assert!(channel.is_empty());
 
             // SAFETY: This test has one receiver for this channel.
             assert_eq!(
                 unsafe { channel.try_receive_assuming_single_consumer() },
                 Ok(None)
             );
+            assert!(channel.is_empty());
 
             channel.send(42);
+            assert!(!channel.is_empty());
             // SAFETY: This test has one receiver for this channel.
             assert_eq!(
                 unsafe { channel.try_receive_assuming_single_consumer() },
                 Ok(Some(42))
             );
+            assert!(channel.is_empty());
 
             // SAFETY: This test has one receiver for this channel.
             assert_eq!(
                 unsafe { channel.try_receive_assuming_single_consumer() },
                 Ok(None)
             );
+            assert!(channel.is_empty());
 
             channel.close_writer();
+            assert!(channel.is_empty());
             // SAFETY: This test has one receiver for this channel.
             assert_eq!(
                 unsafe { channel.try_receive_assuming_single_consumer() },

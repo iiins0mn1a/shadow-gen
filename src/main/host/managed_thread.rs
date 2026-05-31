@@ -500,6 +500,12 @@ impl ManagedThread {
             self.native_pid,
             self.native_tid,
         );
+        assert!(
+            self.ipc_shmem.channels_are_empty(),
+            "ManagedThread checkpoint state requested with non-empty IPC channel: context={context} pid={:?} tid={:?}",
+            self.native_pid,
+            self.native_tid,
+        );
     }
 
     pub fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {

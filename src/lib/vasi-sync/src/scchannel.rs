@@ -424,6 +424,14 @@ impl<T> SelfContainedChannel<T> {
         Ok(None)
     }
 
+    /// Returns whether the channel currently has no pending message.
+    pub fn is_empty(&self) -> bool {
+        self.state
+            .load(sync::atomic::Ordering::Acquire)
+            .contents_state
+            == ChannelContentsState::Empty
+    }
+
     /// Closes the "write" end of the channel. This will cause any current
     /// and subsequent `receive` operations to fail once the channel is empty.
     ///
