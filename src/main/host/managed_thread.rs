@@ -67,6 +67,10 @@ struct ContinueExchangePerf {
     calls: u64,
     wall_ns: u64,
     receive_wall_ns: u64,
+    try_ready_calls: u64,
+    try_not_ready_calls: u64,
+    try_receive_wall_ns: u64,
+    post_try_receive_wall_ns: u64,
 }
 
 #[derive(Default)]
@@ -78,6 +82,10 @@ struct ManagedThreadPerfStats {
     continue_plugin_prepare_wall_ns: AtomicU64,
     continue_plugin_send_wall_ns: AtomicU64,
     continue_plugin_time_update_wall_ns: AtomicU64,
+    continue_plugin_try_ready_calls: AtomicU64,
+    continue_plugin_try_not_ready_calls: AtomicU64,
+    continue_plugin_try_receive_wall_ns: AtomicU64,
+    continue_plugin_post_try_receive_wall_ns: AtomicU64,
     syscall_handler_calls: AtomicU64,
     syscall_handler_wall_ns: AtomicU64,
     syscall_continue_calls: AtomicU64,
@@ -243,12 +251,20 @@ fn record_continue_exchange(
     received: &'static str,
     wall_ns: u64,
     receive_wall_ns: u64,
+    try_ready: bool,
+    try_not_ready: bool,
+    try_receive_wall_ns: u64,
+    post_try_receive_wall_ns: u64,
 ) {
     let mut exchanges = stats.continue_exchanges.lock().unwrap();
     let entry = exchanges.entry((sent, received)).or_default();
     entry.calls += 1;
     entry.wall_ns += wall_ns;
     entry.receive_wall_ns += receive_wall_ns;
+    entry.try_ready_calls += u64::from(try_ready);
+    entry.try_not_ready_calls += u64::from(try_not_ready);
+    entry.try_receive_wall_ns += try_receive_wall_ns;
+    entry.post_try_receive_wall_ns += post_try_receive_wall_ns;
 }
 
 pub fn log_tdt_managed_thread_perf_stats() {
@@ -268,6 +284,18 @@ pub fn log_tdt_managed_thread_perf_stats() {
     let continue_plugin_send_wall_ns = stats.continue_plugin_send_wall_ns.load(Ordering::Relaxed);
     let continue_plugin_time_update_wall_ns = stats
         .continue_plugin_time_update_wall_ns
+        .load(Ordering::Relaxed);
+    let continue_plugin_try_ready_calls = stats
+        .continue_plugin_try_ready_calls
+        .load(Ordering::Relaxed);
+    let continue_plugin_try_not_ready_calls = stats
+        .continue_plugin_try_not_ready_calls
+        .load(Ordering::Relaxed);
+    let continue_plugin_try_receive_wall_ns = stats
+        .continue_plugin_try_receive_wall_ns
+        .load(Ordering::Relaxed);
+    let continue_plugin_post_try_receive_wall_ns = stats
+        .continue_plugin_post_try_receive_wall_ns
         .load(Ordering::Relaxed);
     let syscall_handler_calls = stats.syscall_handler_calls.load(Ordering::Relaxed);
     let syscall_handler_wall_ns = stats.syscall_handler_wall_ns.load(Ordering::Relaxed);
@@ -353,12 +381,16 @@ pub fn log_tdt_managed_thread_perf_stats() {
             .take(8)
             .map(|((sent, received), perf)| {
                 format!(
-                    "{}->{}:calls={}:wall_ms={:.3}:receive_ms={:.3}",
+                    "{}->{}:calls={}:wall_ms={:.3}:receive_ms={:.3}:try_ready={}:try_not_ready={}:try_ms={:.3}:post_try_receive_ms={:.3}",
                     sent,
                     received,
                     perf.calls,
                     perf.wall_ns as f64 / 1_000_000.0,
                     perf.receive_wall_ns as f64 / 1_000_000.0,
+                    perf.try_ready_calls,
+                    perf.try_not_ready_calls,
+                    perf.try_receive_wall_ns as f64 / 1_000_000.0,
+                    perf.post_try_receive_wall_ns as f64 / 1_000_000.0,
                 )
             })
             .collect::<Vec<_>>()
@@ -366,7 +398,7 @@ pub fn log_tdt_managed_thread_perf_stats() {
     };
 
     log::info!(
-        "TDT managed-thread counters: continue_plugin_calls={} continue_plugin_wall_ns={} continue_plugin_receive_wall_ns={} continue_plugin_lock_wall_ns={} continue_plugin_prepare_wall_ns={} continue_plugin_send_wall_ns={} continue_plugin_time_update_wall_ns={} syscall_handler_calls={} syscall_handler_wall_ns={} syscall_continue_calls={} syscall_continue_wall_ns={} syscall_top={} continue_exchange_top={}",
+        "TDT managed-thread counters: continue_plugin_calls={} continue_plugin_wall_ns={} continue_plugin_receive_wall_ns={} continue_plugin_lock_wall_ns={} continue_plugin_prepare_wall_ns={} continue_plugin_send_wall_ns={} continue_plugin_time_update_wall_ns={} continue_plugin_try_ready_calls={} continue_plugin_try_not_ready_calls={} continue_plugin_try_receive_wall_ns={} continue_plugin_post_try_receive_wall_ns={} syscall_handler_calls={} syscall_handler_wall_ns={} syscall_continue_calls={} syscall_continue_wall_ns={} syscall_top={} continue_exchange_top={}",
         continue_plugin_calls,
         continue_plugin_wall_ns,
         continue_plugin_receive_wall_ns,
@@ -374,6 +406,10 @@ pub fn log_tdt_managed_thread_perf_stats() {
         continue_plugin_prepare_wall_ns,
         continue_plugin_send_wall_ns,
         continue_plugin_time_update_wall_ns,
+        continue_plugin_try_ready_calls,
+        continue_plugin_try_not_ready_calls,
+        continue_plugin_try_receive_wall_ns,
+        continue_plugin_post_try_receive_wall_ns,
         syscall_handler_calls,
         syscall_handler_wall_ns,
         syscall_continue_calls,
@@ -1163,14 +1199,56 @@ impl ManagedThread {
             .unwrap_or_default();
 
         let receive_started = stats.map(|_| Instant::now());
-        // SAFETY: Each IPC channel has a single Shadow-side consumer.
-        let event = match unsafe {
-            self.ipc_shmem
-                .from_plugin()
-                .receive_assuming_single_consumer()
-        } {
-            Ok(e) => e,
-            Err(SelfContainedChannelError::WriterIsClosed) => ShimEventToShadow::ProcessDeath,
+        let mut try_ready = false;
+        let mut try_not_ready = false;
+        let mut try_receive_wall_ns = 0;
+        let mut post_try_receive_wall_ns = 0;
+        let event = if stats.is_some() {
+            let try_started = Instant::now();
+            // SAFETY: Each IPC channel has a single Shadow-side consumer.
+            match unsafe {
+                self.ipc_shmem
+                    .from_plugin()
+                    .try_receive_assuming_single_consumer()
+            } {
+                Ok(Some(e)) => {
+                    try_ready = true;
+                    try_receive_wall_ns = try_started.elapsed().as_nanos() as u64;
+                    e
+                }
+                Ok(None) => {
+                    try_not_ready = true;
+                    try_receive_wall_ns = try_started.elapsed().as_nanos() as u64;
+                    let post_try_started = Instant::now();
+                    // SAFETY: Each IPC channel has a single Shadow-side consumer.
+                    let event = match unsafe {
+                        self.ipc_shmem
+                            .from_plugin()
+                            .receive_assuming_single_consumer()
+                    } {
+                        Ok(e) => e,
+                        Err(SelfContainedChannelError::WriterIsClosed) => {
+                            ShimEventToShadow::ProcessDeath
+                        }
+                    };
+                    post_try_receive_wall_ns = post_try_started.elapsed().as_nanos() as u64;
+                    event
+                }
+                Err(SelfContainedChannelError::WriterIsClosed) => {
+                    try_receive_wall_ns = try_started.elapsed().as_nanos() as u64;
+                    ShimEventToShadow::ProcessDeath
+                }
+            }
+        } else {
+            // SAFETY: Each IPC channel has a single Shadow-side consumer.
+            match unsafe {
+                self.ipc_shmem
+                    .from_plugin()
+                    .receive_assuming_single_consumer()
+            } {
+                Ok(e) => e,
+                Err(SelfContainedChannelError::WriterIsClosed) => ShimEventToShadow::ProcessDeath,
+            }
         };
         let receive_wall_ns = receive_started
             .map(|started| started.elapsed().as_nanos() as u64)
@@ -1223,6 +1301,18 @@ impl ManagedThread {
             stats
                 .continue_plugin_time_update_wall_ns
                 .fetch_add(time_update_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_try_ready_calls
+                .fetch_add(u64::from(try_ready), Ordering::Relaxed);
+            stats
+                .continue_plugin_try_not_ready_calls
+                .fetch_add(u64::from(try_not_ready), Ordering::Relaxed);
+            stats
+                .continue_plugin_try_receive_wall_ns
+                .fetch_add(try_receive_wall_ns, Ordering::Relaxed);
+            stats
+                .continue_plugin_post_try_receive_wall_ns
+                .fetch_add(post_try_receive_wall_ns, Ordering::Relaxed);
             if let Some(sent_kind) = sent_kind {
                 record_continue_exchange(
                     stats,
@@ -1230,6 +1320,10 @@ impl ManagedThread {
                     shim_event_to_shadow_kind(&event),
                     continue_wall_ns,
                     receive_wall_ns,
+                    try_ready,
+                    try_not_ready,
+                    try_receive_wall_ns,
+                    post_try_receive_wall_ns,
                 );
             }
         }
