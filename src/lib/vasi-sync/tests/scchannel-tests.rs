@@ -270,4 +270,65 @@ mod scchannel_tests {
             );
         })
     }
+
+    #[test]
+    fn test_wait_ready_does_not_consume() {
+        sync::model(|| {
+            let channel = SelfContainedChannel::new();
+            channel.send(42);
+
+            // SAFETY: This test has one receiver/waiter for this channel.
+            assert_eq!(unsafe { channel.wait_ready_assuming_single_consumer() }, Ok(()));
+            assert!(!channel.is_empty());
+
+            // SAFETY: This test has one receiver/waiter for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Ok(Some(42))
+            );
+            assert!(channel.is_empty());
+        })
+    }
+
+    #[test]
+    fn test_wait_ready_cross_thread() {
+        sync::model(|| {
+            let channel = sync::Arc::new(SelfContainedChannel::new());
+            let writer = {
+                let channel = channel.clone();
+                sync::thread::spawn(move || {
+                    channel.send(42);
+                })
+            };
+            let waiter = {
+                let channel = channel.clone();
+                sync::thread::spawn(move || {
+                    // SAFETY: This test has one receiver/waiter for this channel.
+                    unsafe { channel.wait_ready_assuming_single_consumer() }
+                })
+            };
+            writer.join().unwrap();
+            assert_eq!(waiter.join().unwrap(), Ok(()));
+
+            // SAFETY: This test has one receiver/waiter for this channel.
+            assert_eq!(
+                unsafe { channel.try_receive_assuming_single_consumer() },
+                Ok(Some(42))
+            );
+        })
+    }
+
+    #[test]
+    fn test_wait_ready_closed_without_message() {
+        sync::model(|| {
+            let channel = SelfContainedChannel::<u32>::new();
+            channel.close_writer();
+
+            // SAFETY: This test has one receiver/waiter for this channel.
+            assert_eq!(
+                unsafe { channel.wait_ready_assuming_single_consumer() },
+                Err(SelfContainedChannelError::WriterIsClosed)
+            );
+        })
+    }
 }

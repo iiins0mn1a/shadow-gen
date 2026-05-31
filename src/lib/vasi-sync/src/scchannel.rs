@@ -424,6 +424,71 @@ impl<T> SelfContainedChannel<T> {
         Ok(None)
     }
 
+    /// Blocks until either the channel contains a message, or the writer has
+    /// closed the channel. Does not consume a pending message.
+    ///
+    /// Returns `Ok(())` if a message is ready, or
+    /// `Err(SelfContainedChannelError::WriterIsClosed)` if the writer is closed
+    /// and no message is pending.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that no other thread or process is calling
+    /// `receive`, `receive_assuming_single_consumer`,
+    /// `try_receive_assuming_single_consumer`, or
+    /// `wait_ready_assuming_single_consumer` on this channel at the same time.
+    pub unsafe fn wait_ready_assuming_single_consumer(
+        &self,
+    ) -> Result<(), SelfContainedChannelError> {
+        let mut state = self.state.load(sync::atomic::Ordering::Acquire);
+        loop {
+            if state.contents_state == ChannelContentsState::Ready {
+                return Ok(());
+            }
+            if state.writer_closed {
+                return Err(SelfContainedChannelError::WriterIsClosed);
+            }
+            assert!(
+                state.contents_state == ChannelContentsState::Empty
+                    || state.contents_state == ChannelContentsState::Writing
+            );
+            assert!(!state.has_sleeper);
+            let mut sleeper_state = state;
+            sleeper_state.has_sleeper = true;
+            match self.state.compare_exchange(
+                state,
+                sleeper_state,
+                sync::atomic::Ordering::Relaxed,
+                sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => (),
+                Err(s) => {
+                    state = s;
+                    continue;
+                }
+            };
+            let expected = sleeper_state.into();
+            match sync::futex_wait(&self.state.0, expected) {
+                Ok(_) | Err(rustix::io::Errno::INTR) | Err(rustix::io::Errno::AGAIN) => {
+                    let mut updated_state = self
+                        .state
+                        .fetch_update(
+                            sync::atomic::Ordering::Relaxed,
+                            sync::atomic::Ordering::Relaxed,
+                            |mut state| {
+                                state.has_sleeper = false;
+                                Some(state)
+                            },
+                        )
+                        .unwrap();
+                    updated_state.has_sleeper = false;
+                    state = updated_state;
+                }
+                Err(e) => panic!("Unexpected futex error {e:?}"),
+            };
+        }
+    }
+
     /// Returns whether the channel currently has no pending message.
     pub fn is_empty(&self) -> bool {
         self.state
