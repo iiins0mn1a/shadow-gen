@@ -831,7 +831,9 @@ impl<'a> Manager<'a> {
                                             }
                                         }
                                         let host_next_event_time = host.next_event_time();
-                                        host.unlock_shmem();
+                                        if !execution_stats.host_shmem_unlocked_on_return {
+                                            host.unlock_shmem();
+                                        }
                                         host_next_event_time
                                     }
                                     host_next_event_time => host_next_event_time,

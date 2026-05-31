@@ -217,6 +217,7 @@ static RESTORE_THREAD_TRACE_CONFIG: OnceLock<Option<RestoreThreadTraceConfig>> =
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HostExecutionStats {
+    pub host_shmem_unlocked_on_return: bool,
     pub packet_events: u64,
     pub local_events: u64,
     pub cpu_delayed_events: u64,
