@@ -42,6 +42,8 @@ use crate::utility::{syscall, IsSend, ObjectCounter};
 pub enum ResumeResult {
     /// Blocked on a syscall.
     Blocked,
+    /// Waiting for a native thread reply outside of the scheduler worker body.
+    NativeReplyPending,
     /// The thread has exited with the given code.
     ExitedThread(i32),
     /// The process has exited.
@@ -733,6 +735,7 @@ impl Thread {
                 }
                 ResumeResult::Blocked
             }
+            managed_thread::ResumeResult::NativeReplyPending => ResumeResult::NativeReplyPending,
             managed_thread::ResumeResult::ExitedThread(c) => {
                 if ctx.host.matches_restore_thread_trace_host_phase() {
                     let sim_time_ns = crate::core::worker::Worker::current_time()

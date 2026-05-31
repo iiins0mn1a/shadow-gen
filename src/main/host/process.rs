@@ -593,10 +593,8 @@ impl RunnableProcess {
         // Schedule thread to start. We're giving the caller's reference to thread
         // to the TaskRef here, which is why we don't increment its ref count to
         // create the TaskRef, but do decrement it on cleanup.
-        let task = TaskRef::new_with_descriptor(
-            move |host| {
-                host.resume(pid, tid);
-            },
+        let task = TaskRef::new_with_result_and_descriptor(
+            move |host| host.resume(pid, tid),
             TaskDescriptor::ResumeProcess {
                 process_id: u32::from(pid),
                 thread_id: libc::pid_t::from(tid) as u32,
@@ -904,6 +902,12 @@ pub struct Process {
     // Most of the implementation should be in [`ProcessState`].
     // This wrapper allows us to change the state.
     state: RefCell<Option<ProcessState>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResumeResult {
+    Complete,
+    NativeReplyPending,
 }
 
 fn itimer_real_expiration(host: &Host, pid: ProcessId) {
@@ -1601,7 +1605,7 @@ impl Process {
 
     /// Resume execution of `tid` (if it exists).
     /// Should only be called from `Host::resume`.
-    pub fn resume(&self, host: &Host, tid: ThreadId) {
+    pub fn resume(&self, host: &Host, tid: ThreadId) -> ResumeResult {
         trace!("Continuing thread {} in process {}", tid, self.id());
         if host.matches_restore_thread_trace_host_phase() {
             let sim_time_ns = crate::core::worker::Worker::current_time()
@@ -1620,12 +1624,12 @@ impl Process {
         let threadrc = {
             let Some(runnable) = self.as_runnable() else {
                 debug!("Process {} is no longer running", &*self.name());
-                return;
+                return ResumeResult::Complete;
             };
             let threads = runnable.threads.borrow();
             let Some(thread) = threads.get(&tid) else {
                 debug!("Thread {tid} no longer exists");
-                return;
+                return ResumeResult::Complete;
             };
             // Clone the thread reference, so that we don't hold a dynamically
             // borrowed reference to the thread list while running the thread.
@@ -1669,6 +1673,10 @@ impl Process {
                     &*self.name()
                 );
             }
+            crate::host::thread::ResumeResult::NativeReplyPending => {
+                Worker::clear_active_thread();
+                return ResumeResult::NativeReplyPending;
+            }
             crate::host::thread::ResumeResult::ExitedThread(return_code) => {
                 debug!(
                     "thread {tid} in process '{}' exited with code {return_code}",
@@ -1695,6 +1703,7 @@ impl Process {
         };
 
         Worker::clear_active_thread();
+        ResumeResult::Complete
     }
 
     /// Terminate the Process.

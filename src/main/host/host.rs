@@ -47,7 +47,7 @@ use crate::core::configuration::{ProcessFinalState, QDiscMode};
 use crate::core::sim_config::PcapConfig;
 use crate::core::work::event::{Event, EventData};
 use crate::core::work::event_queue::EventQueue;
-use crate::core::work::task::TaskRef;
+use crate::core::work::task::{TaskExecutionResult, TaskRef};
 use crate::core::worker::Worker;
 use crate::cshadow;
 use crate::host::descriptor::socket::abstract_unix_ns::AbstractUnixNamespace;
@@ -831,10 +831,8 @@ impl Host {
             (process.id(), process.thread_group_leader_id())
         };
         host.processes.borrow_mut().insert(process_id, process);
-        let task = TaskRef::new_with_descriptor(
-            move |host| {
-                host.resume(process_id, thread_id);
-            },
+        let task = TaskRef::new_with_result_and_descriptor(
+            move |host| host.resume(process_id, thread_id),
             TaskDescriptor::ResumeProcess {
                 process_id: u32::from(process_id),
                 thread_id: libc::pid_t::from(thread_id) as u32,
@@ -843,7 +841,7 @@ impl Host {
         self.schedule_task_with_delay(task, SimulationTime::ZERO);
     }
 
-    pub fn resume(&self, pid: ProcessId, tid: ThreadId) {
+    pub fn resume(&self, pid: ProcessId, tid: ThreadId) -> TaskExecutionResult {
         if self.matches_restore_thread_trace_host_phase() {
             let sim_time_ns = Worker::current_time()
                 .map(|t| t.to_abs_simtime().as_nanos())
@@ -861,7 +859,7 @@ impl Host {
             .map(|p| RootedRc::clone(&p, &self.root))
         else {
             trace!("{pid:?} doesn't exist");
-            return;
+            return TaskExecutionResult::Complete;
         };
         let processrc = ExplicitDropper::new(processrc, |p| {
             p.explicit_drop_recursive(&self.root, self);
@@ -871,8 +869,11 @@ impl Host {
         {
             Worker::set_active_process(&processrc);
             let process = processrc.borrow(self.root());
-            process.resume(self, tid);
+            let resume_result = process.resume(self, tid);
             Worker::clear_active_process();
+            if resume_result == crate::host::process::ResumeResult::NativeReplyPending {
+                return TaskExecutionResult::NativeReplyPending;
+            }
             let zombie_state = process.borrow_as_zombie();
             if let Some(zombie) = zombie_state {
                 died = true;
@@ -884,7 +885,7 @@ impl Host {
         };
 
         if !died {
-            return;
+            return TaskExecutionResult::Complete;
         }
 
         // Reparent children, and collect IDs of children that are dead.
@@ -926,6 +927,7 @@ impl Host {
             let processrc = processes.remove(&pid).unwrap();
             RootedRc::explicit_drop_recursive(processrc, &self.root, self);
         }
+        TaskExecutionResult::Complete
     }
 
     #[track_caller]
@@ -1328,7 +1330,7 @@ impl Host {
                     let task = TaskRef::from(data);
                     let descriptor = task.descriptor().cloned();
                     let event_started = collect_stats.then(Instant::now);
-                    task.execute(self);
+                    let task_result = task.execute(self);
                     if let Some(started) = event_started {
                         stats.record_local_task(
                             descriptor.as_ref(),
@@ -1342,6 +1344,10 @@ impl Host {
                             traced_events,
                             descriptor,
                         );
+                    }
+                    if task_result == TaskExecutionResult::NativeReplyPending {
+                        stats.host_shmem_unlocked_on_return = true;
+                        break;
                     }
                 }
             }
@@ -1971,6 +1977,6 @@ mod export {
         tid: libc::pid_t,
     ) {
         let host = unsafe { host.as_ref().unwrap() };
-        host.resume(pid.try_into().unwrap(), tid.try_into().unwrap())
+        let _ = host.resume(pid.try_into().unwrap(), tid.try_into().unwrap());
     }
 }

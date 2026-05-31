@@ -13,14 +13,23 @@ use crate::{
 pub struct TaskRef {
     magic: Magic<Self>,
     _counter: ObjectCounter,
-    inner: Arc<dyn Fn(&Host) + Send + Sync>,
+    inner: Arc<dyn Fn(&Host) -> TaskExecutionResult + Send + Sync>,
     descriptor: Option<TaskDescriptor>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskExecutionResult {
+    Complete,
+    NativeReplyPending,
 }
 
 impl TaskRef {
     pub fn new<T: 'static + Fn(&Host) + Send + Sync>(f: T) -> Self {
         Self {
-            inner: Arc::new(f),
+            inner: Arc::new(move |host| {
+                f(host);
+                TaskExecutionResult::Complete
+            }),
             magic: Magic::new(),
             _counter: ObjectCounter::new("TaskRef"),
             descriptor: None,
@@ -28,6 +37,21 @@ impl TaskRef {
     }
 
     pub fn new_with_descriptor<T: 'static + Fn(&Host) + Send + Sync>(
+        f: T,
+        descriptor: TaskDescriptor,
+    ) -> Self {
+        Self::new_with_result_and_descriptor(
+            move |host| {
+                f(host);
+                TaskExecutionResult::Complete
+            },
+            descriptor,
+        )
+    }
+
+    pub fn new_with_result_and_descriptor<
+        T: 'static + Fn(&Host) -> TaskExecutionResult + Send + Sync,
+    >(
         f: T,
         descriptor: TaskDescriptor,
     ) -> Self {
@@ -46,7 +70,7 @@ impl TaskRef {
     /// Executes the task.
     ///
     /// If the task was created from C, will panic if the task's host lock isn't held.
-    pub fn execute(&self, host: &Host) {
+    pub fn execute(&self, host: &Host) -> TaskExecutionResult {
         self.magic.debug_check();
         (self.inner)(host)
     }
@@ -79,7 +103,7 @@ impl Eq for TaskRef {}
 
 pub mod export {
     use shadow_shim_helper_rs::util::SyncSendPointer;
-    use shadow_shim_helper_rs::{HostId, notnull::notnull_mut};
+    use shadow_shim_helper_rs::{notnull::notnull_mut, HostId};
 
     use super::*;
     use crate::utility::HostTreePointer;

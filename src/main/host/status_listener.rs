@@ -70,7 +70,10 @@ impl StatusListener {
         ) {
             let task: *const TaskRef = callback_object.cast();
             let task = unsafe { &*task };
-            Worker::with_active_host(|host| task.execute(host)).unwrap()
+            Worker::with_active_host(|host| {
+                let _ = task.execute(host);
+            })
+            .unwrap()
         }
         extern "C-unwind" fn object_free_fn(callback_object: *mut std::ffi::c_void) {
             let task: *mut TaskRef = callback_object.cast();

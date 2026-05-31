@@ -2,9 +2,9 @@
 
 use super::snapshot_types::{LegacyTcpDeferredActionSnapshot, TaskDescriptor};
 use crate::core::work::task::TaskRef;
-use crate::host::descriptor::File;
-use crate::host::descriptor::socket::Socket;
 use crate::host::descriptor::socket::inet::InetSocket;
+use crate::host::descriptor::socket::Socket;
+use crate::host::descriptor::File;
 use crate::host::process::ProcessId;
 use crate::host::thread::ThreadId;
 
@@ -75,10 +75,8 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
         } => {
             let pid = ProcessId::try_from(*process_id).unwrap();
             let tid = ThreadId::from(ProcessId::try_from(*thread_id).unwrap());
-            Some(TaskRef::new_with_descriptor(
-                move |host| {
-                    host.resume(pid, tid);
-                },
+            Some(TaskRef::new_with_result_and_descriptor(
+                move |host| host.resume(pid, tid),
                 desc.clone(),
             ))
         }
@@ -138,7 +136,7 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
                     if let Some(shutdown_time_ns) = shutdown_time_ns {
                         let task = TaskRef::new_with_descriptor(
                             move |host| {
-                                use linux_api::signal::{Signal, siginfo_t};
+                                use linux_api::signal::{siginfo_t, Signal};
                                 let Some(process) = host.process_borrow(process_id) else {
                                     return;
                                 };
@@ -174,7 +172,7 @@ pub fn reconstruct_task(desc: &TaskDescriptor) -> Option<TaskRef> {
             let sig = *signal;
             Some(TaskRef::new_with_descriptor(
                 move |host| {
-                    use linux_api::signal::{Signal, siginfo_t};
+                    use linux_api::signal::{siginfo_t, Signal};
                     let Some(process) = host.process_borrow(pid) else {
                         log::debug!(
                             "Can't send shutdown signal to process {pid:?}; it no longer exists"

@@ -442,6 +442,8 @@ pub fn log_tdt_managed_thread_perf_stats() {
 pub enum ResumeResult {
     /// Blocked on a SyscallCondition.
     Blocked(SyscallCondition),
+    /// Waiting for a native thread reply outside of the scheduler worker body.
+    NativeReplyPending,
     /// The native thread has exited with the given code.
     ExitedThread(i32),
     /// The thread's process has exited.

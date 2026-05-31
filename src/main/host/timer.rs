@@ -166,9 +166,7 @@ impl Timer {
         internal_ptr: Weak<AtomicRefCell<TimerInternal>>,
         host: &Host,
     ) {
-        let now = Worker::current_time().unwrap_or_else(|| {
-            host.restore_time_hint()
-        });
+        let now = Worker::current_time().unwrap_or_else(|| host.restore_time_hint());
 
         // have the timer expire between (1,2] seconds from now, but on a 1-second edge so that all
         // timer events for all hosts will expire at the same times (and therefore in the same
@@ -263,7 +261,9 @@ pub mod export {
     #[unsafe(no_mangle)]
     pub unsafe extern "C-unwind" fn timer_new(task: *const TaskRef) -> *mut Timer {
         let task = unsafe { task.as_ref() }.unwrap().clone();
-        let timer = Timer::new(move |host| task.execute(host));
+        let timer = Timer::new(move |host| {
+            let _ = task.execute(host);
+        });
         Box::into_raw(Box::new(timer))
     }
 

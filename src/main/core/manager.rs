@@ -3006,10 +3006,8 @@ fn apply_host_checkpoint(
         tid: crate::host::thread::ThreadId,
         when: EmulatedTime,
     ) {
-        let task = TaskRef::new_with_descriptor(
-            move |host| {
-                host.resume(process_id, tid);
-            },
+        let task = TaskRef::new_with_result_and_descriptor(
+            move |host| host.resume(process_id, tid),
             TaskDescriptor::ResumeProcess {
                 process_id: u32::from(process_id),
                 thread_id: u32::try_from(libc::pid_t::from(tid)).unwrap_or_default(),
@@ -3617,7 +3615,7 @@ fn apply_host_checkpoint(
                 continue;
             }
             let process_id_for_log = *process_id;
-            let task = TaskRef::new_with_descriptor(
+            let task = TaskRef::new_with_result_and_descriptor(
                 move |host| {
                     log::debug!(
                         "post_restore_resume host='{}' pid={} tid={}",
@@ -3625,7 +3623,7 @@ fn apply_host_checkpoint(
                         pid_u32,
                         tid_u32
                     );
-                    host.resume(process_id_for_log, thread_id);
+                    host.resume(process_id_for_log, thread_id)
                 },
                 TaskDescriptor::ResumeProcess {
                     process_id: pid_u32,
