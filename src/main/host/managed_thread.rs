@@ -81,6 +81,15 @@ struct NativeRunToken {
     send_wall_ns: u64,
 }
 
+struct NativeRunReply {
+    event: ShimEventToShadow,
+    receive_wall_ns: u64,
+    try_ready: bool,
+    try_not_ready: bool,
+    try_receive_wall_ns: u64,
+    post_try_receive_wall_ns: u64,
+}
+
 #[derive(Default)]
 struct ManagedThreadPerfStats {
     continue_plugin_calls: AtomicU64,
@@ -1262,7 +1271,15 @@ impl ManagedThread {
         host: &Host,
         token: NativeRunToken,
     ) -> ShimEventToShadow {
-        let stats = token.stats;
+        let reply = self.receive_continue_plugin_reply_blocking(token.stats);
+
+        self.finish_continue_plugin_with_reply(host, token, reply)
+    }
+
+    fn receive_continue_plugin_reply_blocking(
+        &self,
+        stats: Option<&'static ManagedThreadPerfStats>,
+    ) -> NativeRunReply {
         let receive_started = stats.map(|_| Instant::now());
         let mut try_ready = false;
         let mut try_not_ready = false;
@@ -1319,6 +1336,24 @@ impl ManagedThread {
             .map(|started| started.elapsed().as_nanos() as u64)
             .unwrap_or_default();
 
+        NativeRunReply {
+            event,
+            receive_wall_ns,
+            try_ready,
+            try_not_ready,
+            try_receive_wall_ns,
+            post_try_receive_wall_ns,
+        }
+    }
+
+    fn finish_continue_plugin_with_reply(
+        &self,
+        host: &Host,
+        token: NativeRunToken,
+        reply: NativeRunReply,
+    ) -> ShimEventToShadow {
+        let stats = token.stats;
+
         // Reacquire the shared memory lock, now that the shim has yielded control
         // back to us.
         let lock_started = stats.map(|_| Instant::now());
@@ -1353,8 +1388,8 @@ impl ManagedThread {
                 .fetch_add(continue_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_receive_wall_ns
-                .fetch_add(receive_wall_ns, Ordering::Relaxed);
-            tdt_perf_add_worker_body_continue_receive_wall_ns(receive_wall_ns);
+                .fetch_add(reply.receive_wall_ns, Ordering::Relaxed);
+            tdt_perf_add_worker_body_continue_receive_wall_ns(reply.receive_wall_ns);
             stats
                 .continue_plugin_lock_wall_ns
                 .fetch_add(lock_wall_ns, Ordering::Relaxed);
@@ -1369,32 +1404,32 @@ impl ManagedThread {
                 .fetch_add(time_update_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_try_ready_calls
-                .fetch_add(u64::from(try_ready), Ordering::Relaxed);
+                .fetch_add(u64::from(reply.try_ready), Ordering::Relaxed);
             stats
                 .continue_plugin_try_not_ready_calls
-                .fetch_add(u64::from(try_not_ready), Ordering::Relaxed);
+                .fetch_add(u64::from(reply.try_not_ready), Ordering::Relaxed);
             stats
                 .continue_plugin_try_receive_wall_ns
-                .fetch_add(try_receive_wall_ns, Ordering::Relaxed);
+                .fetch_add(reply.try_receive_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_post_try_receive_wall_ns
-                .fetch_add(post_try_receive_wall_ns, Ordering::Relaxed);
+                .fetch_add(reply.post_try_receive_wall_ns, Ordering::Relaxed);
             if let Some(sent_kind) = token.sent_kind {
                 record_continue_exchange(
                     stats,
                     sent_kind,
-                    shim_event_to_shadow_kind(&event),
+                    shim_event_to_shadow_kind(&reply.event),
                     continue_wall_ns,
-                    receive_wall_ns,
-                    try_ready,
-                    try_not_ready,
-                    try_receive_wall_ns,
-                    post_try_receive_wall_ns,
+                    reply.receive_wall_ns,
+                    reply.try_ready,
+                    reply.try_not_ready,
+                    reply.try_receive_wall_ns,
+                    reply.post_try_receive_wall_ns,
                 );
             }
         }
 
-        event
+        reply.event
     }
 
     /// To be called after we expect the native thread to have exited, or to
