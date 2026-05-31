@@ -73,6 +73,14 @@ struct ContinueExchangePerf {
     post_try_receive_wall_ns: u64,
 }
 
+struct NativeRunToken {
+    stats: Option<&'static ManagedThreadPerfStats>,
+    sent_kind: Option<&'static str>,
+    perf_started: Option<Instant>,
+    prepare_wall_ns: u64,
+    send_wall_ns: u64,
+}
+
 #[derive(Default)]
 struct ManagedThreadPerfStats {
     continue_plugin_calls: AtomicU64,
@@ -1148,6 +1156,12 @@ impl ManagedThread {
 
     #[must_use]
     fn continue_plugin(&self, host: &Host, event: &ShimEventToShim) -> ShimEventToShadow {
+        let token = self.begin_continue_plugin(host, event);
+        self.finish_continue_plugin_blocking(host, token)
+    }
+
+    #[must_use]
+    fn begin_continue_plugin(&self, host: &Host, event: &ShimEventToShim) -> NativeRunToken {
         let stats = managed_thread_perf_stats();
         let perf_started = stats.map(|_| Instant::now());
         let sent_kind = stats.map(|_| shim_event_to_shim_kind(event));
@@ -1198,6 +1212,22 @@ impl ManagedThread {
             .map(|started| started.elapsed().as_nanos() as u64)
             .unwrap_or_default();
 
+        NativeRunToken {
+            stats,
+            sent_kind,
+            perf_started,
+            prepare_wall_ns,
+            send_wall_ns,
+        }
+    }
+
+    #[must_use]
+    fn finish_continue_plugin_blocking(
+        &self,
+        host: &Host,
+        token: NativeRunToken,
+    ) -> ShimEventToShadow {
+        let stats = token.stats;
         let receive_started = stats.map(|_| Instant::now());
         let mut try_ready = false;
         let mut try_not_ready = false;
@@ -1279,7 +1309,7 @@ impl ManagedThread {
             .map(|started| started.elapsed().as_nanos() as u64)
             .unwrap_or_default();
 
-        if let (Some(stats), Some(started)) = (stats, perf_started) {
+        if let (Some(stats), Some(started)) = (stats, token.perf_started) {
             let continue_wall_ns = started.elapsed().as_nanos() as u64;
             stats.continue_plugin_calls.fetch_add(1, Ordering::Relaxed);
             stats
@@ -1294,10 +1324,10 @@ impl ManagedThread {
                 .fetch_add(lock_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_prepare_wall_ns
-                .fetch_add(prepare_wall_ns, Ordering::Relaxed);
+                .fetch_add(token.prepare_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_send_wall_ns
-                .fetch_add(send_wall_ns, Ordering::Relaxed);
+                .fetch_add(token.send_wall_ns, Ordering::Relaxed);
             stats
                 .continue_plugin_time_update_wall_ns
                 .fetch_add(time_update_wall_ns, Ordering::Relaxed);
@@ -1313,7 +1343,7 @@ impl ManagedThread {
             stats
                 .continue_plugin_post_try_receive_wall_ns
                 .fetch_add(post_try_receive_wall_ns, Ordering::Relaxed);
-            if let Some(sent_kind) = sent_kind {
+            if let Some(sent_kind) = token.sent_kind {
                 record_continue_exchange(
                     stats,
                     sent_kind,
